@@ -17,6 +17,8 @@ signal carried_block_changed(is_carrying: bool, block_type: StringName)
 signal cement_changed(current_count: int, max_count: int)
 signal target_face_changed(has_target: bool, cell: Vector3i, face_dir: Vector3i, status_text: String)
 signal raw_materials_changed(materials: Dictionary)
+signal save_blueprint_requested()
+signal load_blueprint_requested(anchor: Vector3i)
 
 @export_group("Cement & Bonding")
 @export var cement_count: int = 25
@@ -52,6 +54,7 @@ signal raw_materials_changed(materials: Dictionary)
 @export var stability_system: Node
 @export var orchestrator: CollapseOrchestrator
 @export var preview_ghost: PreviewGhost
+@export var build_hud: Node = null
 
 const DebrisGrabberScript = preload("res://systems/interaction/DebrisGrabber.gd")
 
@@ -252,7 +255,21 @@ func set_mouse_capture(captured: bool) -> void:
 func toggle_mouse_capture() -> void:
 	set_mouse_capture(not _mouse_captured)
 
+## Returns true if a UI modal (like save/load blueprint) is currently active.
+func _is_ui_modal_open() -> bool:
+	if build_hud != null and build_hud.has_method("is_modal_open"):
+		return build_hud.is_modal_open()
+	return false
+
 func _input(event: InputEvent) -> void:
+	# If a UI modal is active, ESC closes it and clicks do not recapture mouse
+	if _is_ui_modal_open():
+		if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
+			if build_hud != null and build_hud.has_method("close_all_modals"):
+				build_hud.close_all_modals()
+				get_viewport().set_input_as_handled()
+		return
+
 	# ESC releases cursor immediately
 	if event is InputEventKey and event.pressed and not event.echo:
 		if event.keycode == KEY_ESCAPE:
@@ -269,9 +286,9 @@ func _input(event: InputEvent) -> void:
 				get_viewport().set_input_as_handled()
 				return
 
-## Consume all mouse motion and keyboard gameplay events (but NOT when debug camera is active)
+## Consume all mouse motion and keyboard gameplay events (but NOT when debug camera is active or modal is open)
 func _unhandled_input(event: InputEvent) -> void:
-	if current_state == State.DEBUG_FLIGHT:
+	if current_state == State.DEBUG_FLIGHT or _is_ui_modal_open():
 		return
 
 	# Mouse look — requires captured cursor; no middle-mouse dragging in body modes
@@ -315,6 +332,12 @@ func _unhandled_input(event: InputEvent) -> void:
 		elif event.is_action_pressed(&"apply_cement") or event.keycode == KEY_G:
 			_handle_cement_action()
 			return
+		elif event.is_action_pressed(&"save_blueprint") or event.keycode == KEY_K:
+			_handle_save_blueprint_action()
+			return
+		elif event.is_action_pressed(&"load_blueprint") or event.keycode == KEY_L:
+			_handle_load_blueprint_action()
+			return
 		elif event.is_action_pressed(&"soul_projection") or event.keycode == KEY_V or event.keycode == KEY_P:
 			toggle_soul_projection()
 		elif event.is_action_pressed(&"select_slot_1") or event.keycode == KEY_1:
@@ -325,6 +348,17 @@ func _unhandled_input(event: InputEvent) -> void:
 			_select_type_by_index(2)
 		elif event.is_action_pressed(&"select_slot_4") or event.keycode == KEY_4:
 			_select_type_by_index(3)
+
+func _handle_save_blueprint_action() -> void:
+	save_blueprint_requested.emit()
+	if build_hud != null and build_hud.has_method("open_save_blueprint_dialog"):
+		build_hud.open_save_blueprint_dialog()
+
+func _handle_load_blueprint_action() -> void:
+	var anchor: Vector3i = target_place_cell if has_target else Vector3i.ZERO
+	load_blueprint_requested.emit(anchor)
+	if build_hud != null and build_hud.has_method("open_load_blueprint_dialog"):
+		build_hud.open_load_blueprint_dialog(anchor)
 
 func _handle_mouse_look(relative: Vector2) -> void:
 	match current_state:
@@ -601,6 +635,23 @@ func _update_raycast() -> void:
 				target_face_status = "Uncoated Surface (Hold G to Paint Mortar)"
 		else:
 			target_face_status = ""
+
+		# Append durability info for the targeted block.
+		var block_data: BlockData = grid.get_block(target_remove_cell)
+		if block_data != null:
+			var pct: int = int(clampf(block_data.durability, 0.0, 1.0) * 100.0)
+			var dur_label: String
+			if pct >= 80:
+				dur_label = "%d%% Integrity" % pct
+			elif pct >= 40:
+				dur_label = "%d%% Integrity (Damaged)" % pct
+			else:
+				dur_label = "%d%% Integrity (CRITICAL)" % pct
+			if target_face_status.is_empty():
+				target_face_status = dur_label
+			else:
+				target_face_status = target_face_status + "  |  " + dur_label
+
 		target_face_changed.emit(true, target_remove_cell, target_face_dir, target_face_status)
 
 	elif hit_collider is DebrisIsland:

@@ -5,6 +5,8 @@ extends RefCounted
 
 const BlueprintDataScript = preload("res://data/BlueprintData.gd")
 const DebrisIslandScript = preload("res://systems/collapse/DebrisIsland.gd")
+const BuildHUDScript = preload("res://scenes/ui/BuildHUD.gd")
+const PlayerControllerScript = preload("res://scenes/player/PlayerController.gd")
 
 var _passed: int = 0
 var _failed: int = 0
@@ -40,6 +42,16 @@ func run_all() -> bool:
 	_run_test("test_debris_island_mortar_overlay_spawned_on_collapse")
 	_run_test("test_mortar_overlay_absent_when_no_coated_faces")
 	_run_test("test_blueprint_actions_no_conflict_with_existing_bindings")
+	_run_test("test_hud_blueprint_modals_initial_state")
+	_run_test("test_hud_open_save_modal_empty_grid_feedback")
+	_run_test("test_hud_open_save_modal_with_blocks")
+	_run_test("test_hud_save_blueprint_confirm_flow")
+	_run_test("test_hud_load_modal_populates_anchor_and_list")
+	_run_test("test_hud_load_placement_validation_rejection_feedback")
+	_run_test("test_hud_load_placement_success_flow")
+	_run_test("test_hud_is_modal_open_and_close")
+	_run_test("test_player_controller_k_l_emits_signals")
+	_run_test("test_player_controller_modal_blocks_gameplay_input")
 
 	print("==================================================")
 	print("M4 TEST RESULTS: %d PASSED, %d FAILED" % [_passed, _failed])
@@ -565,4 +577,285 @@ func test_blueprint_actions_no_conflict_with_existing_bindings() -> bool:
 					printerr("load_blueprint KEY_L conflicts with action: %s" % action)
 					return false
 
+	return true
+
+# ==============================================================================
+# HUD IN-GAME WORKFLOW & INPUT TESTS
+# ==============================================================================
+
+func _make_hud(grid: Node) -> BuildHUD:
+	var hud: BuildHUD = BuildHUDScript.new()
+	hud.grid_system = grid
+	hud.blueprint_manager = _make_manager()
+	hud.blueprint_manager.grid_system = grid
+	return hud
+
+func test_hud_blueprint_modals_initial_state() -> bool:
+	var grid := _make_grid()
+	var hud = _make_hud(grid)
+
+	if hud.is_modal_open():
+		hud.queue_free()
+		return false
+	if hud._save_modal == null or hud._save_modal.visible:
+		hud.queue_free()
+		return false
+	if hud._load_modal == null or hud._load_modal.visible:
+		hud.queue_free()
+		return false
+
+	hud.queue_free()
+	return true
+
+func test_hud_open_save_modal_empty_grid_feedback() -> bool:
+	var grid := _make_grid()
+	var hud = _make_hud(grid)
+
+	hud.open_save_blueprint_dialog()
+	if not hud.is_modal_open():
+		hud.queue_free()
+		return false
+	if not hud._save_modal.visible:
+		hud.queue_free()
+		return false
+	if not hud._save_btn.disabled:
+		hud.queue_free()
+		return false
+	if "Grid is empty" not in hud._save_feedback_label.text:
+		hud.queue_free()
+		return false
+
+	hud.close_all_modals()
+	hud.queue_free()
+	return true
+
+func test_hud_open_save_modal_with_blocks() -> bool:
+	var grid := _make_grid()
+	grid.place_block(Vector3i(0, 0, 0), BlockData.new(&"stone", 1.0))
+	var hud = _make_hud(grid)
+
+	hud.open_save_blueprint_dialog()
+	if not hud._save_modal.visible:
+		hud.queue_free()
+		return false
+	if hud._save_btn.disabled:
+		hud.queue_free()
+		return false
+	if "1 block(s)" not in hud._save_info_label.text:
+		hud.queue_free()
+		return false
+
+	hud.close_all_modals()
+	hud.queue_free()
+	return true
+
+func test_hud_save_blueprint_confirm_flow() -> bool:
+	var grid := _make_grid()
+	grid.place_block(Vector3i(2, 0, 2), BlockData.new(&"brick", 0.9))
+	var hud = _make_hud(grid)
+
+	hud.open_save_blueprint_dialog()
+	hud._save_name_input.text = "hud_save_test"
+	hud._on_save_confirm_pressed()
+
+	# BlueprintManager must have saved it
+	var bp_mgr: Node = hud._get_blueprint_manager()
+	if bp_mgr == null or not bp_mgr.has_blueprint("hud_save_test"):
+		hud.queue_free()
+		return false
+
+	var loaded = bp_mgr.load_blueprint("hud_save_test")
+	if loaded == null or loaded.blocks.size() != 1:
+		bp_mgr.delete_blueprint("hud_save_test")
+		hud.queue_free()
+		return false
+
+	bp_mgr.delete_blueprint("hud_save_test")
+	hud.close_all_modals()
+	hud.queue_free()
+	return true
+
+func test_hud_load_modal_populates_anchor_and_list() -> bool:
+	var grid := _make_grid()
+	var hud = _make_hud(grid)
+
+	# Save a test blueprint so list is not empty
+	var bp_mgr: Node = hud._get_blueprint_manager()
+	if bp_mgr != null:
+		var bp := BlueprintDataScript.new("hud_load_list_test")
+		bp.blocks = [{"rel_pos": [0, 0, 0], "block_type": "wood", "durability": 1.0, "metadata": {}}]
+		bp_mgr.save_blueprint(bp, true)
+
+	var target_anchor := Vector3i(15, 3, -8)
+	hud.open_load_blueprint_dialog(target_anchor)
+
+	if not hud._load_modal.visible:
+		hud.queue_free()
+		return false
+	if int(hud._anchor_x.value) != 15 or int(hud._anchor_y.value) != 3 or int(hud._anchor_z.value) != -8:
+		hud.queue_free()
+		return false
+	if hud._load_item_list.item_count == 0:
+		hud.queue_free()
+		return false
+
+	if bp_mgr != null:
+		bp_mgr.delete_blueprint("hud_load_list_test")
+	hud.close_all_modals()
+	hud.queue_free()
+	return true
+
+func test_hud_load_placement_validation_rejection_feedback() -> bool:
+	var grid := _make_grid()
+	# Pre-occupy cell (5, 0, 5)
+	grid.place_block(Vector3i(5, 0, 5), BlockData.new(&"stone", 1.0))
+	var hud = _make_hud(grid)
+
+	var bp_mgr: Node = hud._get_blueprint_manager()
+	if bp_mgr != null:
+		var bp := BlueprintDataScript.new("conflict_test_bp")
+		bp.blocks = [{"rel_pos": [0, 0, 0], "block_type": "gold", "durability": 1.0, "metadata": {}}]
+		bp_mgr.save_blueprint(bp, true)
+
+	hud.open_load_blueprint_dialog(Vector3i(5, 0, 5))
+	# Ensure conflict_test_bp is selected
+	for i in range(hud._load_item_list.item_count):
+		if hud._load_item_list.get_item_text(i) == "conflict_test_bp":
+			hud._load_item_list.select(i)
+			break
+
+	# Attempt to place without allow_replacement
+	hud._replace_checkbox.button_pressed = false
+	hud._on_load_confirm_pressed()
+
+	# Rejection feedback must be shown
+	if "Cannot place [CELL_OCCUPIED]" not in hud._load_feedback_label.text:
+		hud.queue_free()
+		return false
+
+	# Original block must still be stone, not gold
+	var b: BlockData = grid.get_block(Vector3i(5, 0, 5))
+	if b == null or b.block_type != &"stone":
+		hud.queue_free()
+		return false
+
+	if bp_mgr != null:
+		bp_mgr.delete_blueprint("conflict_test_bp")
+	hud.close_all_modals()
+	hud.queue_free()
+	return true
+
+func test_hud_load_placement_success_flow() -> bool:
+	var grid := _make_grid()
+	var hud = _make_hud(grid)
+
+	var bp_mgr: Node = hud._get_blueprint_manager()
+	if bp_mgr != null:
+		var bp := BlueprintDataScript.new("hud_place_success_bp")
+		bp.blocks = [{"rel_pos": [0, 0, 0], "block_type": "wood", "durability": 0.75, "metadata": {}}]
+		bp_mgr.save_blueprint(bp, true)
+
+	hud.open_load_blueprint_dialog(Vector3i(30, 0, 30))
+	for i in range(hud._load_item_list.item_count):
+		if hud._load_item_list.get_item_text(i) == "hud_place_success_bp":
+			hud._load_item_list.select(i)
+			break
+
+	hud._on_load_confirm_pressed()
+
+	# Block must now be placed at (30, 0, 30)
+	if not grid.has_block(Vector3i(30, 0, 30)):
+		hud.queue_free()
+		return false
+	var b: BlockData = grid.get_block(Vector3i(30, 0, 30))
+	if b == null or b.block_type != &"wood" or absf(b.durability - 0.75) > 0.01:
+		hud.queue_free()
+		return false
+
+	if bp_mgr != null:
+		bp_mgr.delete_blueprint("hud_place_success_bp")
+	hud.close_all_modals()
+	hud.queue_free()
+	return true
+
+func test_hud_is_modal_open_and_close() -> bool:
+	var grid := _make_grid()
+	var hud = _make_hud(grid)
+
+	if hud.is_modal_open():
+		hud.queue_free()
+		return false
+
+	hud.open_save_blueprint_dialog()
+	if not hud.is_modal_open():
+		hud.queue_free()
+		return false
+
+	hud.close_all_modals()
+	if hud.is_modal_open():
+		hud.queue_free()
+		return false
+
+	hud.open_load_blueprint_dialog(Vector3i.ZERO)
+	if not hud.is_modal_open():
+		hud.queue_free()
+		return false
+
+	hud.close_all_modals()
+	if hud.is_modal_open():
+		hud.queue_free()
+		return false
+
+	hud.queue_free()
+	return true
+
+func test_player_controller_k_l_emits_signals() -> bool:
+	var player = PlayerControllerScript.new()
+	var state: Dictionary = {
+		"saved": false,
+		"loaded": false,
+		"anchor": Vector3i.ZERO
+	}
+
+	player.save_blueprint_requested.connect(func() -> void: state["saved"] = true)
+	player.load_blueprint_requested.connect(func(a: Vector3i) -> void:
+		state["loaded"] = true
+		state["anchor"] = a
+	)
+
+	player._handle_save_blueprint_action()
+	if not state["saved"]:
+		player.queue_free()
+		return false
+
+	player.has_target = true
+	player.target_place_cell = Vector3i(7, 2, 9)
+	player._handle_load_blueprint_action()
+	if not state["loaded"] or state["anchor"] != Vector3i(7, 2, 9):
+		player.queue_free()
+		return false
+
+	player.queue_free()
+	return true
+
+func test_player_controller_modal_blocks_gameplay_input() -> bool:
+	var grid := _make_grid()
+	var hud = _make_hud(grid)
+	var player = PlayerControllerScript.new()
+	player.build_hud = hud
+
+	hud.open_save_blueprint_dialog()
+	if not player._is_ui_modal_open():
+		hud.queue_free()
+		player.queue_free()
+		return false
+
+	hud.close_all_modals()
+	if player._is_ui_modal_open():
+		hud.queue_free()
+		player.queue_free()
+		return false
+
+	hud.queue_free()
+	player.queue_free()
 	return true

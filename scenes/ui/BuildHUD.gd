@@ -16,11 +16,37 @@ extends CanvasLayer
 
 var grid_system: Node
 var orchestrator: CollapseOrchestrator
+var player: CharacterBody3D = null
+@export var blueprint_manager: Node = null
 
 ## Dynamically created label for raw material counts (no .tscn edit required).
 var _raw_mats_label: Label = null
 
+## Blueprint Save Modal Nodes
+var _save_modal: PanelContainer = null
+var _save_name_input: LineEdit = null
+var _save_info_label: Label = null
+var _save_feedback_label: Label = null
+var _save_btn: Button = null
+
+## Blueprint Load Modal Nodes
+var _load_modal: PanelContainer = null
+var _load_item_list: ItemList = null
+var _load_details_label: Label = null
+var _load_feedback_label: Label = null
+var _anchor_x: SpinBox = null
+var _anchor_y: SpinBox = null
+var _anchor_z: SpinBox = null
+var _replace_checkbox: CheckBox = null
+var _load_place_btn: Button = null
+var _load_delete_btn: Button = null
+
+func _init() -> void:
+	_create_blueprint_dialogs()
+
 func _ready() -> void:
+	if _save_modal == null:
+		_create_blueprint_dialogs()
 	if grid_system == null and has_node("/root/GridSystem"):
 		grid_system = get_node("/root/GridSystem")
 	# Create raw materials label dynamically so no .tscn modification is needed.
@@ -33,6 +59,8 @@ func _ready() -> void:
 	var hbox := get_node_or_null("PanelTop/HBox")
 	if hbox != null:
 		hbox.add_child(_raw_mats_label)
+
+	_create_blueprint_dialogs()
 
 func set_cement(current: int, max_val: int) -> void:
 	if cement_label == null:
@@ -47,9 +75,11 @@ func set_target_face_info(has_target: bool, _cell: Vector3i, _face_dir: Vector3i
 		if has_target and not status_text.is_empty():
 			target_info_label.text = "[%s]" % status_text
 			target_info_label.visible = true
-			if "Depleted" in status_text or "Insufficient" in status_text:
-				target_info_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
-			elif "Mortared" in status_text or "Bonded" in status_text or "Ready" in status_text:
+			if "CRITICAL" in status_text or "Depleted" in status_text or "Insufficient" in status_text:
+				target_info_label.add_theme_color_override("font_color", Color(1.0, 0.25, 0.25))
+			elif "Damaged" in status_text:
+				target_info_label.add_theme_color_override("font_color", Color(1.0, 0.6, 0.1))
+			elif "Mortared" in status_text or "Bonded" in status_text or "Ready" in status_text or "Integrity" in status_text:
 				target_info_label.add_theme_color_override("font_color", Color(0.3, 1.0, 0.4))
 			else:
 				target_info_label.add_theme_color_override("font_color", Color(1.0, 0.85, 0.2))
@@ -111,3 +141,416 @@ func set_raw_materials(materials: Dictionary) -> void:
 		return
 	_raw_mats_label.text = "Raw: " + ", ".join(parts)
 	_raw_mats_label.visible = true
+
+# ==============================================================================
+# BLUEPRINT MODAL DIALOGS & CONTROLS
+# ==============================================================================
+
+## Returns true if either the Save or Load blueprint modal is currently open.
+func is_modal_open() -> bool:
+	return (_save_modal != null and _save_modal.visible) or (_load_modal != null and _load_modal.visible)
+
+## Closes all blueprint modals and restores mouse capture.
+func close_all_modals() -> void:
+	if _save_modal != null:
+		_save_modal.visible = false
+	if _load_modal != null:
+		_load_modal.visible = false
+	if player != null and player.has_method("set_mouse_capture"):
+		player.set_mouse_capture(true)
+
+## Opens the Save Blueprint dialog, releases mouse capture, and focuses input.
+func open_save_blueprint_dialog() -> void:
+	close_all_modals()
+	if _save_modal == null:
+		return
+	var count: int = grid_system.get_block_count() if grid_system != null else 0
+	_save_info_label.text = "Structure to Save: %d block(s) in grid" % count
+	_save_feedback_label.text = ""
+	if count == 0:
+		_save_feedback_label.text = "Grid is empty! Place blocks first to save a blueprint."
+		_save_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.7, 0.3))
+		_save_btn.disabled = true
+	else:
+		_save_btn.disabled = false
+	_save_modal.visible = true
+	if player != null and player.has_method("set_mouse_capture"):
+		player.set_mouse_capture(false)
+	if _save_name_input != null and _save_name_input.is_inside_tree():
+		_save_name_input.grab_focus()
+		_save_name_input.select_all()
+
+## Opens the Load Blueprint dialog at the specified grid anchor.
+func open_load_blueprint_dialog(anchor: Vector3i = Vector3i.ZERO) -> void:
+	close_all_modals()
+	if _load_modal == null:
+		return
+
+	_anchor_x.value = anchor.x
+	_anchor_y.value = anchor.y
+	_anchor_z.value = anchor.z
+	_load_feedback_label.text = ""
+	_refresh_blueprint_list()
+
+	_load_modal.visible = true
+	if player != null and player.has_method("set_mouse_capture"):
+		player.set_mouse_capture(false)
+
+func _create_blueprint_dialogs() -> void:
+	_create_save_modal()
+	_create_load_modal()
+
+func _make_modal_panel_style() -> StyleBoxFlat:
+	var style := StyleBoxFlat.new()
+	style.bg_color = Color(0.1, 0.12, 0.16, 0.95)
+	style.border_color = Color(0.25, 0.5, 0.8, 0.9)
+	style.set_border_width_all(2)
+	style.set_corner_radius_all(8)
+	style.content_margin_left = 18
+	style.content_margin_right = 18
+	style.content_margin_top = 16
+	style.content_margin_bottom = 16
+	return style
+
+func _create_save_modal() -> void:
+	_save_modal = PanelContainer.new()
+	_save_modal.name = "SaveBlueprintModal"
+	_save_modal.add_theme_stylebox_override("panel", _make_modal_panel_style())
+	_save_modal.anchors_preset = Control.PRESET_CENTER
+	_save_modal.custom_minimum_size = Vector2(460, 230)
+	_save_modal.offset_left = -230
+	_save_modal.offset_top = -115
+	_save_modal.offset_right = 230
+	_save_modal.offset_bottom = 115
+	_save_modal.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_save_modal.grow_vertical = Control.GROW_DIRECTION_BOTH
+	_save_modal.visible = false
+	add_child(_save_modal)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 10)
+	_save_modal.add_child(vbox)
+
+	var title := Label.new()
+	title.text = "SAVE BLUEPRINT"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 18)
+	title.add_theme_color_override("font_color", Color(0.35, 0.85, 1.0))
+	vbox.add_child(title)
+
+	_save_info_label = Label.new()
+	_save_info_label.text = "Structure to Save: 0 block(s) in grid"
+	_save_info_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_save_info_label.add_theme_font_size_override("font_size", 13)
+	_save_info_label.add_theme_color_override("font_color", Color(0.8, 0.8, 0.8))
+	vbox.add_child(_save_info_label)
+
+	var name_hbox := HBoxContainer.new()
+	name_hbox.add_theme_constant_override("separation", 8)
+	vbox.add_child(name_hbox)
+
+	var lbl_name := Label.new()
+	lbl_name.text = "Name:"
+	name_hbox.add_child(lbl_name)
+
+	_save_name_input = LineEdit.new()
+	_save_name_input.text = "my_blueprint"
+	_save_name_input.placeholder_text = "Enter blueprint name"
+	_save_name_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_save_name_input.text_submitted.connect(func(_t: String) -> void: _on_save_confirm_pressed())
+	name_hbox.add_child(_save_name_input)
+
+	_save_feedback_label = Label.new()
+	_save_feedback_label.text = ""
+	_save_feedback_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_save_feedback_label.add_theme_font_size_override("font_size", 13)
+	_save_feedback_label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	vbox.add_child(_save_feedback_label)
+
+	var btns_hbox := HBoxContainer.new()
+	btns_hbox.alignment = BoxContainer.ALIGNMENT_CENTER
+	btns_hbox.add_theme_constant_override("separation", 16)
+	vbox.add_child(btns_hbox)
+
+	_save_btn = Button.new()
+	_save_btn.text = "Save"
+	_save_btn.custom_minimum_size = Vector2(110, 32)
+	_save_btn.pressed.connect(_on_save_confirm_pressed)
+	btns_hbox.add_child(_save_btn)
+
+	var cancel_btn := Button.new()
+	cancel_btn.text = "Cancel"
+	cancel_btn.custom_minimum_size = Vector2(110, 32)
+	cancel_btn.pressed.connect(close_all_modals)
+	btns_hbox.add_child(cancel_btn)
+
+func _create_load_modal() -> void:
+	_load_modal = PanelContainer.new()
+	_load_modal.name = "LoadBlueprintModal"
+	_load_modal.add_theme_stylebox_override("panel", _make_modal_panel_style())
+	_load_modal.anchors_preset = Control.PRESET_CENTER
+	_load_modal.custom_minimum_size = Vector2(560, 420)
+	_load_modal.offset_left = -280
+	_load_modal.offset_top = -210
+	_load_modal.offset_right = 280
+	_load_modal.offset_bottom = 210
+	_load_modal.grow_horizontal = Control.GROW_DIRECTION_BOTH
+	_load_modal.grow_vertical = Control.GROW_DIRECTION_BOTH
+	_load_modal.visible = false
+	add_child(_load_modal)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 8)
+	_load_modal.add_child(vbox)
+
+	var title := Label.new()
+	title.text = "LOAD BLUEPRINT"
+	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	title.add_theme_font_size_override("font_size", 18)
+	title.add_theme_color_override("font_color", Color(0.35, 0.85, 1.0))
+	vbox.add_child(title)
+
+	_load_item_list = ItemList.new()
+	_load_item_list.custom_minimum_size = Vector2(0, 130)
+	_load_item_list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	_load_item_list.item_selected.connect(_on_blueprint_item_selected)
+	vbox.add_child(_load_item_list)
+
+	_load_details_label = Label.new()
+	_load_details_label.text = "Select a blueprint from the list above."
+	_load_details_label.add_theme_font_size_override("font_size", 13)
+	_load_details_label.add_theme_color_override("font_color", Color(0.9, 0.82, 0.4))
+	vbox.add_child(_load_details_label)
+
+	var anchor_hbox := HBoxContainer.new()
+	anchor_hbox.add_theme_constant_override("separation", 6)
+	vbox.add_child(anchor_hbox)
+
+	var lbl_anchor := Label.new()
+	lbl_anchor.text = "Grid Anchor:"
+	anchor_hbox.add_child(lbl_anchor)
+
+	var lx := Label.new()
+	lx.text = "X:"
+	anchor_hbox.add_child(lx)
+	_anchor_x = SpinBox.new()
+	_anchor_x.min_value = -999
+	_anchor_x.max_value = 999
+	_anchor_x.step = 1
+	anchor_hbox.add_child(_anchor_x)
+
+	var ly := Label.new()
+	ly.text = "Y:"
+	anchor_hbox.add_child(ly)
+	_anchor_y = SpinBox.new()
+	_anchor_y.min_value = -999
+	_anchor_y.max_value = 999
+	_anchor_y.step = 1
+	anchor_hbox.add_child(_anchor_y)
+
+	var lz := Label.new()
+	lz.text = "Z:"
+	anchor_hbox.add_child(lz)
+	_anchor_z = SpinBox.new()
+	_anchor_z.min_value = -999
+	_anchor_z.max_value = 999
+	_anchor_z.step = 1
+	anchor_hbox.add_child(_anchor_z)
+
+	var btn_aim := Button.new()
+	btn_aim.text = "Target Cell"
+	btn_aim.tooltip_text = "Set anchor to current crosshair aim position"
+	btn_aim.pressed.connect(_on_use_aim_pressed)
+	anchor_hbox.add_child(btn_aim)
+
+	_replace_checkbox = CheckBox.new()
+	_replace_checkbox.text = "Allow Replacing Existing Blocks"
+	_replace_checkbox.tooltip_text = "If checked, removes occupied blocks at target position prior to placement."
+	vbox.add_child(_replace_checkbox)
+
+	_load_feedback_label = Label.new()
+	_load_feedback_label.text = ""
+	_load_feedback_label.add_theme_font_size_override("font_size", 13)
+	_load_feedback_label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	vbox.add_child(_load_feedback_label)
+
+	var btns_hbox := HBoxContainer.new()
+	btns_hbox.alignment = BoxContainer.ALIGNMENT_CENTER
+	btns_hbox.add_theme_constant_override("separation", 14)
+	vbox.add_child(btns_hbox)
+
+	_load_place_btn = Button.new()
+	_load_place_btn.text = "Place Blueprint"
+	_load_place_btn.custom_minimum_size = Vector2(130, 32)
+	_load_place_btn.pressed.connect(_on_load_confirm_pressed)
+	btns_hbox.add_child(_load_place_btn)
+
+	_load_delete_btn = Button.new()
+	_load_delete_btn.text = "Delete"
+	_load_delete_btn.custom_minimum_size = Vector2(90, 32)
+	_load_delete_btn.pressed.connect(_on_delete_blueprint_pressed)
+	btns_hbox.add_child(_load_delete_btn)
+
+	var cancel_btn := Button.new()
+	cancel_btn.text = "Cancel"
+	cancel_btn.custom_minimum_size = Vector2(90, 32)
+	cancel_btn.pressed.connect(close_all_modals)
+	btns_hbox.add_child(cancel_btn)
+
+func _get_blueprint_manager() -> Node:
+	if blueprint_manager != null:
+		return blueprint_manager
+	if is_inside_tree() and has_node("/root/BlueprintManager"):
+		return get_node("/root/BlueprintManager")
+	return null
+
+func _refresh_blueprint_list() -> void:
+	_load_item_list.clear()
+	var bp_mgr := _get_blueprint_manager()
+	if bp_mgr == null:
+		_load_details_label.text = "BlueprintManager autoload not found."
+		_load_place_btn.disabled = true
+		_load_delete_btn.disabled = true
+		return
+
+	var names: Array[String] = bp_mgr.list_blueprints()
+	if names.is_empty():
+		_load_details_label.text = "No saved blueprints found in user://blueprints/"
+		_load_place_btn.disabled = true
+		_load_delete_btn.disabled = true
+		return
+
+	for n in names:
+		_load_item_list.add_item(n)
+
+	_load_place_btn.disabled = false
+	_load_delete_btn.disabled = false
+	_load_item_list.select(0)
+	_on_blueprint_item_selected(0)
+
+func _on_blueprint_item_selected(index: int) -> void:
+	if index < 0 or index >= _load_item_list.item_count:
+		return
+	var bp_name: String = _load_item_list.get_item_text(index)
+	var bp_mgr := _get_blueprint_manager()
+	if bp_mgr == null:
+		return
+
+	var bp = bp_mgr.load_blueprint(bp_name)
+	if bp != null:
+		var dims: Vector3i = bp.get_dimensions()
+		_load_details_label.text = "Blueprint: %s  |  Blocks: %d  |  Size: %dx%dx%d  |  Joints: %d" % [
+			bp.name, bp.get_block_count(), dims.x, dims.y, dims.z, bp.joints.size()
+		]
+
+func _on_use_aim_pressed() -> void:
+	if player != null and player.has_target:
+		_anchor_x.value = player.target_place_cell.x
+		_anchor_y.value = player.target_place_cell.y
+		_anchor_z.value = player.target_place_cell.z
+		_load_feedback_label.text = "Anchor set to targeted cell: (%d, %d, %d)" % [
+			player.target_place_cell.x, player.target_place_cell.y, player.target_place_cell.z
+		]
+		_load_feedback_label.add_theme_color_override("font_color", Color(0.4, 0.85, 1.0))
+	else:
+		_anchor_x.value = 0
+		_anchor_y.value = 0
+		_anchor_z.value = 0
+		_load_feedback_label.text = "No raycast target. Anchor set to (0, 0, 0)."
+		_load_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.8, 0.3))
+
+func _on_save_confirm_pressed() -> void:
+	var bp_mgr := _get_blueprint_manager()
+	if bp_mgr == null:
+		_save_feedback_label.text = "Error: BlueprintManager not found"
+		_save_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
+		return
+
+	var raw_name: String = _save_name_input.text.strip_edges()
+	if raw_name.is_empty():
+		_save_feedback_label.text = "Please enter a valid blueprint name."
+		_save_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
+		return
+
+	var bp = bp_mgr.capture_blueprint(raw_name)
+	if bp == null:
+		_save_feedback_label.text = "Failed to capture blueprint: grid is empty."
+		_save_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
+		return
+
+	var ok: bool = bp_mgr.save_blueprint(bp, true)
+	if ok:
+		_save_feedback_label.text = "✓ Blueprint '%s' saved successfully (%d blocks)!" % [bp.name, bp.get_block_count()]
+		_save_feedback_label.add_theme_color_override("font_color", Color(0.3, 1.0, 0.4))
+		if is_inside_tree() and get_tree() != null:
+			var timer := get_tree().create_timer(0.6)
+			timer.timeout.connect(close_all_modals)
+		else:
+			close_all_modals()
+	else:
+		_save_feedback_label.text = "Failed to save blueprint file."
+		_save_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
+
+func _on_load_confirm_pressed() -> void:
+	var selected_items: PackedInt32Array = _load_item_list.get_selected_items()
+	if selected_items.is_empty():
+		_load_feedback_label.text = "Please select a blueprint to load."
+		_load_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
+		return
+
+	var bp_name: String = _load_item_list.get_item_text(selected_items[0])
+	var bp_mgr := _get_blueprint_manager()
+	if bp_mgr == null:
+		_load_feedback_label.text = "Error: BlueprintManager not found."
+		_load_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
+		return
+
+	var bp = bp_mgr.load_blueprint(bp_name)
+	if bp == null:
+		_load_feedback_label.text = "Failed to load blueprint file '%s'." % bp_name
+		_load_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
+		return
+
+	var anchor := Vector3i(int(_anchor_x.value), int(_anchor_y.value), int(_anchor_z.value))
+	var allow_rep: bool = _replace_checkbox.button_pressed
+
+	# Reusing BlueprintManager.validate_placement directly
+	var val: Dictionary = bp_mgr.validate_placement(bp, anchor, allow_rep, player)
+	if not val.get("valid", false):
+		var reason: String = val.get("reason", "UNKNOWN")
+		var conflicts: Array = val.get("conflicts", [])
+		var conflict_str := ""
+		if not conflicts.is_empty():
+			var sample: Array = conflicts.slice(0, 3)
+			conflict_str = " (at %s%s)" % [str(sample), "..." if conflicts.size() > 3 else ""]
+		_load_feedback_label.text = "Cannot place [%s]: %d conflict(s)%s" % [reason, conflicts.size(), conflict_str]
+		_load_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
+		return
+
+	# Apply placement
+	var res: Dictionary = bp_mgr.apply_blueprint(bp, anchor, allow_rep, player)
+	if res.get("success", false):
+		_load_feedback_label.text = "✓ Blueprint '%s' placed successfully at (%d, %d, %d)!" % [
+			bp.name, anchor.x, anchor.y, anchor.z
+		]
+		_load_feedback_label.add_theme_color_override("font_color", Color(0.3, 1.0, 0.4))
+		if is_inside_tree() and get_tree() != null:
+			var timer := get_tree().create_timer(0.6)
+			timer.timeout.connect(close_all_modals)
+		else:
+			close_all_modals()
+	else:
+		_load_feedback_label.text = "Failed to apply blueprint: %s" % res.get("reason", "")
+		_load_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
+
+func _on_delete_blueprint_pressed() -> void:
+	var selected_items: PackedInt32Array = _load_item_list.get_selected_items()
+	if selected_items.is_empty():
+		return
+	var bp_name: String = _load_item_list.get_item_text(selected_items[0])
+	var bp_mgr := _get_blueprint_manager()
+	if bp_mgr != null:
+		bp_mgr.delete_blueprint(bp_name)
+		_load_feedback_label.text = "Deleted blueprint '%s'." % bp_name
+		_load_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.8, 0.2))
+		_refresh_blueprint_list()

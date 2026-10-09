@@ -41,6 +41,7 @@ func _ready() -> void:
 	if build_hud != null:
 		build_hud.grid_system = grid_system
 		build_hud.orchestrator = collapse_orchestrator
+		build_hud.player = player
 
 	# Wire Player (primary gameplay controller)
 	if player != null:
@@ -48,6 +49,7 @@ func _ready() -> void:
 		player.stability_system = stability_system
 		player.orchestrator = collapse_orchestrator
 		player.preview_ghost = preview_ghost
+		player.build_hud = build_hud
 		player.block_type_changed.connect(build_hud.set_selected_block_type)
 		player.state_changed.connect(build_hud.set_player_state)
 		if player.has_signal("carried_block_changed"):
@@ -78,9 +80,19 @@ func _ready() -> void:
 	spawn_test_tower(Vector3i(0, 0, 0))
 
 func _unhandled_input(event: InputEvent) -> void:
+	if build_hud != null and build_hud.has_method("is_modal_open") and build_hud.is_modal_open():
+		return
+
 	if event is InputEventKey and event.pressed and not event.echo:
 		if event.is_action_pressed(&"debug_camera") or event.keycode == KEY_F1:
 			toggle_debug_camera()
+		elif event.is_action_pressed(&"save_blueprint") or event.keycode == KEY_K:
+			if build_hud != null and build_hud.has_method("open_save_blueprint_dialog"):
+				build_hud.open_save_blueprint_dialog()
+		elif event.is_action_pressed(&"load_blueprint") or event.keycode == KEY_L:
+			if build_hud != null and build_hud.has_method("open_load_blueprint_dialog"):
+				var anchor: Vector3i = player.target_place_cell if (player != null and player.has_target) else Vector3i.ZERO
+				build_hud.open_load_blueprint_dialog(anchor)
 		elif event.keycode == KEY_T:
 			spawn_test_tower(Vector3i(0, 0, 0))
 		elif event.keycode == KEY_B:

@@ -91,7 +91,7 @@ anchors_preset = 2
 anchor_top = 1.0
 anchor_bottom = 1.0
 offset_left = 10.0
-offset_top = -280.0
+offset_top = -305.0
 offset_right = 490.0
 offset_bottom = -10.0
 grow_vertical = 0
@@ -149,3 +149,9 @@ text = "• 1-4 / Wheel: Material  |  Esc / Tab: Release/Capture Mouse"
 layout_mode = 2
 mouse_filter = 2
 text = "• T: Tower  |  B: Bridge  |  H: Arch  |  C: Clear World"
+
+[node name="Help8" type="Label" parent="PanelControls/Margin/VBox"]
+layout_mode = 2
+mouse_filter = 2
+theme_override_colors/font_color = Color(0.95, 0.82, 0.35, 1)
+text = "• K: Save Blueprint  |  L: Load Blueprint"

@@ -577,4 +577,14 @@ O sistema de Blueprints permite salvar, carregar, atualizar, validar e instancia
   - Renderização de sobreposição de argamassa em DebrisIsland após colapso (`test_debris_island_mortar_overlay_spawned_on_collapse`)
   - Ausência de sobreposição quando não há revestimento (`test_mortar_overlay_absent_when_no_coated_faces`)
   - Verificação de ausência de conflitos de atalhos de entrada (`test_blueprint_actions_no_conflict_with_existing_bindings`)
-- **Total geral de testes automatizados da base de código: 132/132 aprovados com 0 falhas** (8 Pincel de Argamassa, 11 M1, 11 M1.1, 7 M2, 13 M2.1, 13 M2.2, 14 M2.3, 29 M3, 26 M4).
+  - Estado inicial dos modais no HUD (`test_hud_blueprint_modals_initial_state`)
+  - Feedback ao tentar salvar com grid vazio (`test_hud_open_save_modal_empty_grid_feedback`)
+  - Abertura de modal de salvar com blocos presentes (`test_hud_open_save_modal_with_blocks`)
+  - Fluxo completo de confirmação de salvamento via UI (`test_hud_save_blueprint_confirm_flow`)
+  - Preenchimento de âncora e lista no modal de carregar (`test_hud_load_modal_populates_anchor_and_list`)
+  - Rejeição e feedback visual de conflitos no carregamento (`test_hud_load_placement_validation_rejection_feedback`)
+  - Fluxo bem-sucedido de posicionamento de blueprint via UI (`test_hud_load_placement_success_flow`)
+  - Gerenciamento de estado aberto/fechado de modais (`test_hud_is_modal_open_and_close`)
+  - Emissão de sinais das teclas K e L pelo controlador (`test_player_controller_k_l_emits_signals`)
+  - Bloqueio de inputs de gameplay durante interação com modais (`test_player_controller_modal_blocks_gameplay_input`)
+- **Total geral de testes automatizados da base de código: 142/142 aprovados com 0 falhas** (8 Pincel de Argamassa, 11 M1, 11 M1.1, 7 M2, 13 M2.1, 13 M2.2, 14 M2.3, 29 M3, 36 M4).
