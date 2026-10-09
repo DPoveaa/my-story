@@ -55,6 +55,7 @@ func run_all() -> bool:
 	_run_test("test_durability_damage_updates_block_and_destroys_at_zero")
 	_run_test("test_blueprint_save_requires_overwrite_confirmation")
 	_run_test("test_mortar_coated_debris_ground_placement")
+	_run_test("test_hud_modal_created_in_scene_tree")
 
 	print("==================================================")
 	print("M4 TEST RESULTS: %d PASSED, %d FAILED" % [_passed, _failed])
@@ -865,21 +866,59 @@ func test_player_controller_modal_blocks_gameplay_input() -> bool:
 
 func test_durability_damage_updates_block_and_destroys_at_zero() -> bool:
 	var grid := _make_grid()
+	var joint_sys = JointSystemScript.new()
+	joint_sys.grid_system = grid
+
 	grid.place_block(Vector3i(0, 0, 0), &"stone")
 	var b: BlockData = grid.get_block(Vector3i(0, 0, 0))
 	if b == null or absf(b.durability - 1.0) > 0.001:
+		joint_sys.queue_free()
 		return false
 
-	# Apply damage to grid block
-	grid.apply_damage(Vector3i(0, 0, 0), 0.4)
-	if absf(b.durability - 0.6) > 0.001:
+	# Light impact (< 8.0 J) causes 0 damage (bump immunity)
+	joint_sys.apply_impact_to_block_joints(Vector3i(0, 0, 0), 5.0)
+	if absf(b.durability - 1.0) > 0.001:
+		joint_sys.queue_free()
 		return false
 
-	# Apply destroying damage
-	var destroyed: bool = grid.apply_damage(Vector3i(0, 0, 0), 0.7)
-	if not destroyed or grid.has_block(Vector3i(0, 0, 0)):
+	# Moderate impact (20 J) causes small durability reduction
+	joint_sys.apply_impact_to_block_joints(Vector3i(0, 0, 0), 20.0)
+	var expected_dur: float = 1.0 - (20.0 / 200.0) # 0.90
+	if absf(b.durability - expected_dur) > 0.01:
+		joint_sys.queue_free()
 		return false
 
+	# Heavy repeated damage eventually destroys block
+	grid.apply_damage(Vector3i(0, 0, 0), 0.95)
+	if grid.has_block(Vector3i(0, 0, 0)):
+		joint_sys.queue_free()
+		return false
+
+	joint_sys.queue_free()
+	return true
+
+func test_hud_modal_created_in_scene_tree() -> bool:
+	var grid := _make_grid()
+	var hud = _make_hud(grid)
+
+	if hud._save_modal == null or hud._load_modal == null:
+		hud.queue_free()
+		return false
+	if hud._save_modal.get_parent() != hud or hud._load_modal.get_parent() != hud:
+		hud.queue_free()
+		return false
+
+	hud.open_save_blueprint_dialog()
+	if not hud.is_modal_open() or not hud._save_modal.visible:
+		hud.queue_free()
+		return false
+
+	hud.close_all_modals()
+	if hud.is_modal_open() or hud._save_modal.visible:
+		hud.queue_free()
+		return false
+
+	hud.queue_free()
 	return true
 
 func test_blueprint_save_requires_overwrite_confirmation() -> bool:

@@ -349,16 +349,33 @@ func _unhandled_input(event: InputEvent) -> void:
 		elif event.is_action_pressed(&"select_slot_4") or event.keycode == KEY_4:
 			_select_type_by_index(3)
 
+func _get_build_hud() -> Node:
+	if build_hud != null and is_instance_valid(build_hud):
+		return build_hud
+	if is_inside_tree():
+		if get_parent() != null and get_parent().has_node("BuildHUD"):
+			build_hud = get_parent().get_node("BuildHUD")
+			return build_hud
+		var root := get_tree().root
+		if root != null:
+			var found = root.find_child("BuildHUD", true, false)
+			if found != null:
+				build_hud = found
+				return build_hud
+	return null
+
 func _handle_save_blueprint_action() -> void:
 	save_blueprint_requested.emit()
-	if build_hud != null and build_hud.has_method("open_save_blueprint_dialog"):
-		build_hud.open_save_blueprint_dialog()
+	var hud := _get_build_hud()
+	if hud != null and hud.has_method("open_save_blueprint_dialog"):
+		hud.open_save_blueprint_dialog()
 
 func _handle_load_blueprint_action() -> void:
 	var anchor: Vector3i = target_place_cell if has_target else Vector3i.ZERO
 	load_blueprint_requested.emit(anchor)
-	if build_hud != null and build_hud.has_method("open_load_blueprint_dialog"):
-		build_hud.open_load_blueprint_dialog(anchor)
+	var hud := _get_build_hud()
+	if hud != null and hud.has_method("open_load_blueprint_dialog"):
+		hud.open_load_blueprint_dialog(anchor)
 
 func _handle_mouse_look(relative: Vector2) -> void:
 	match current_state:

@@ -42,12 +42,7 @@ var _replace_checkbox: CheckBox = null
 var _load_place_btn: Button = null
 var _load_delete_btn: Button = null
 
-func _init() -> void:
-	_create_blueprint_dialogs()
-
 func _ready() -> void:
-	if _save_modal == null:
-		_create_blueprint_dialogs()
 	if grid_system == null and has_node("/root/GridSystem"):
 		grid_system = get_node("/root/GridSystem")
 	# Create raw materials label dynamically so no .tscn modification is needed.
@@ -61,7 +56,8 @@ func _ready() -> void:
 	if hbox != null:
 		hbox.add_child(_raw_mats_label)
 
-	_create_blueprint_dialogs()
+	if _save_modal == null:
+		_create_blueprint_dialogs()
 
 func set_cement(current: int, max_val: int) -> void:
 	if cement_label == null:

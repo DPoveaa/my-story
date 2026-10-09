@@ -402,8 +402,8 @@ func _apply_block_durability_damage(cell: Vector3i, energy: float) -> void:
 		return
 	var block: BlockData = constituent_blocks[cell]
 	var dur_resistance: float = maxf(0.1, BlockTypeCatalog.get_max_durability(block.block_type))
-	# Normalise: 1 unit of energy removes (1 / dur_resistance) * scale durability.
-	var dmg: float = energy / (dur_resistance * 10.0)
+	# Normalise: 200 Joules cumulative impact energy reduces 1.0 durability to 0.0
+	var dmg: float = energy / (dur_resistance * 200.0)
 	block.durability = maxf(0.0, block.durability - dmg)
 	if block.durability <= 0.0:
 		remove_block(cell)
