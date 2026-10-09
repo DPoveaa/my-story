@@ -58,6 +58,19 @@ func trigger_collapse(unsupported_cells: Array[Vector3i]) -> Array[DebrisIsland]
 	if valid_cells.is_empty():
 		return []
 
+	# Ensure coated faces tracked by JointSystem are copied to block metadata prior to grid removal
+	var joint_sys: Node = null
+	if is_inside_tree() and has_node("/root/JointSystem"):
+		joint_sys = get_node("/root/JointSystem")
+
+	if joint_sys != null and joint_sys.has_method("get_coated_faces_for_cell"):
+		for c in valid_cells:
+			var bdata: BlockData = grid.get_block(c)
+			if bdata != null:
+				var c_faces: Array = joint_sys.get_coated_faces_for_cell(c)
+				for f in c_faces:
+					joint_sys._add_coated_face_to_metadata(bdata, f)
+
 	# 2. Atomically remove valid cells from GridSystem to prevent duplicates
 	var removed_block_data: Dictionary = grid.remove_cells_batch(valid_cells)
 	if removed_block_data.is_empty():
@@ -71,8 +84,7 @@ func trigger_collapse(unsupported_cells: Array[Vector3i]) -> Array[DebrisIsland]
 	var island_groups: Array = IslandBuilder.group_islands(actually_removed_cells)
 
 	# Extract any structural joints among the collapsing cells to preserve compound debris
-	var joint_sys: Node = null
-	if is_inside_tree() and has_node("/root/JointSystem"):
+	if joint_sys == null and is_inside_tree() and has_node("/root/JointSystem"):
 		joint_sys = get_node("/root/JointSystem")
 
 	var extracted_joints: Array = []

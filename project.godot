@@ -21,6 +21,7 @@ GridSystem="*res://autoloads/GridSystem.gd"
 JointSystem="*res://autoloads/JointSystem.gd"
 StabilitySystem="*res://autoloads/StabilitySystem.gd"
 InputManager="*res://autoloads/InputManager.gd"
+BlueprintManager="*res://autoloads/BlueprintManager.gd"
 
 [display]
 

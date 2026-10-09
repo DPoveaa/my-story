@@ -33,6 +33,10 @@ func setup_default_input_actions() -> void:
 	_add_key_action(&"soul_projection", KEY_P)
 	_add_key_action(&"debug_camera", KEY_F1)
 
+	# Construction Blueprints
+	_add_key_action(&"save_blueprint", KEY_K)
+	_add_key_action(&"load_blueprint", KEY_L)
+
 	# Interaction
 	_add_mouse_action(&"place_block", MOUSE_BUTTON_LEFT)
 	_add_mouse_action(&"remove_block", MOUSE_BUTTON_RIGHT)

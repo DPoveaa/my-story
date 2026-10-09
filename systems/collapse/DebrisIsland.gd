@@ -22,6 +22,15 @@ var local_offsets: Dictionary = {}
 ## Node references per constituent block cell
 var _block_col_shapes: Dictionary = {} # Vector3i -> CollisionShape3D
 var _block_meshes: Dictionary = {}     # Vector3i -> MeshInstance3D
+## Mortar overlay meshes per face key
+var _mortar_overlays: Dictionary = {}  # String -> MeshInstance3D
+
+## Mortar overlay constants (matches MortarOverlayRenderer)
+const MORTAR_COLOR: Color = Color(0.84, 0.77, 0.61, 1.0)
+const MORTAR_ROUGHNESS: float = 0.97
+const FACE_COVERAGE: float = 0.96
+const OVERLAY_THICKNESS: float = 0.03
+const MORTAR_Z_OFFSET: float = 0.002
 
 ## Grid cell size
 var cell_size: float = 1.0
@@ -110,6 +119,9 @@ func setup_island(cells: Array, block_data_map: Dictionary, p_cell_size: float, 
 		add_child(mesh_instance)
 		_block_meshes[c] = mesh_instance
 
+		# Restore mortar overlays from block metadata coated_faces
+		_spawn_mortar_overlays_for_block(c, block_data, local_pos)
+
 		total_mass += BlockTypeCatalog.get_mass(block_data.block_type)
 
 	# 3. Configure physics parameters for reliable falling and natural tumbling.
@@ -170,6 +182,9 @@ func setup_island_split(cells: Array, block_data_map: Dictionary, orig_offsets: 
 		mesh_instance.position = new_local_pos
 		add_child(mesh_instance)
 		_block_meshes[c] = mesh_instance
+
+		# Restore mortar overlays from block metadata coated_faces
+		_spawn_mortar_overlays_for_block(c, block_data, new_local_pos)
 
 		total_mass += BlockTypeCatalog.get_mass(block_data.block_type)
 
@@ -236,6 +251,9 @@ func remove_block(cell: Vector3i) -> BlockData:
 				mesh_inst.get_parent().remove_child(mesh_inst)
 			mesh_inst.queue_free()
 		_block_meshes.erase(cell)
+
+	# Clean up mortar overlays for this block's faces
+	_remove_mortar_overlays_for_block(cell)
 
 	local_offsets.erase(cell)
 	constituent_blocks.erase(cell)
@@ -515,3 +533,85 @@ func _on_sleeping_state_changed() -> void:
 	elif not sleeping:
 		is_settled = false
 
+# ==============================================================================
+# MORTAR OVERLAY HELPERS (mirrors MortarOverlayRenderer geometry)
+# ==============================================================================
+
+## Computes a face-key string identical to MortarOverlayRenderer's format.
+func _mortar_face_key(cell: Vector3i, face_dir: Vector3i) -> String:
+	return "%d,%d,%d:%d,%d,%d" % [cell.x, cell.y, cell.z, face_dir.x, face_dir.y, face_dir.z]
+
+## Returns the local-space BoxMesh size for a mortar overlay on the given face.
+func _mortar_overlay_box_size(face_dir: Vector3i) -> Vector3:
+	var face: float = cell_size * FACE_COVERAGE
+	var thick: float = OVERLAY_THICKNESS
+	if face_dir.x != 0:
+		return Vector3(thick, face, face)
+	elif face_dir.y != 0:
+		return Vector3(face, thick, face)
+	else:
+		return Vector3(face, face, thick)
+
+## Returns the local-space center position for a mortar overlay relative to block_local_pos.
+func _mortar_overlay_local_pos(block_local_pos: Vector3, face_dir: Vector3i) -> Vector3:
+	var face_center := block_local_pos + Vector3(face_dir) * (cell_size * 0.5)
+	var outward := Vector3(face_dir).normalized() * (MORTAR_Z_OFFSET + OVERLAY_THICKNESS * 0.5)
+	return face_center + outward
+
+## Spawns mortar overlay MeshInstance3Ds for each coated face listed in block_data.metadata.
+func _spawn_mortar_overlays_for_block(cell: Vector3i, block_data: BlockData, block_local_pos: Vector3) -> void:
+	if block_data == null or not block_data.metadata.has("coated_faces"):
+		return
+
+	var c_faces = block_data.metadata["coated_faces"]
+	if not (c_faces is Array):
+		return
+
+	var mortar_mat := StandardMaterial3D.new()
+	mortar_mat.albedo_color = MORTAR_COLOR
+	mortar_mat.roughness = MORTAR_ROUGHNESS
+	mortar_mat.metallic = 0.0
+	mortar_mat.depth_draw_mode = BaseMaterial3D.DEPTH_DRAW_ALWAYS
+	mortar_mat.cull_mode = BaseMaterial3D.CULL_BACK
+
+	for f in c_faces:
+		var fdir := Vector3i.ZERO
+		if f is Vector3i:
+			fdir = f
+		elif f is Array and f.size() == 3:
+			fdir = Vector3i(int(f[0]), int(f[1]), int(f[2]))
+		if fdir == Vector3i.ZERO:
+			continue
+
+		var fk := _mortar_face_key(cell, fdir)
+		if _mortar_overlays.has(fk):
+			continue # Already spawned
+
+		var mesh_inst := MeshInstance3D.new()
+		var box := BoxMesh.new()
+		box.size = _mortar_overlay_box_size(fdir)
+		box.material = mortar_mat
+		mesh_inst.mesh = box
+		mesh_inst.position = _mortar_overlay_local_pos(block_local_pos, fdir)
+		add_child(mesh_inst)
+		_mortar_overlays[fk] = mesh_inst
+
+## Removes all mortar overlay meshes associated with a given cell.
+func _remove_mortar_overlays_for_block(cell: Vector3i) -> void:
+	var dirs: Array[Vector3i] = [
+		Vector3i(1, 0, 0), Vector3i(-1, 0, 0),
+		Vector3i(0, 1, 0), Vector3i(0, -1, 0),
+		Vector3i(0, 0, 1), Vector3i(0, 0, -1)
+	]
+	for d in dirs:
+		var fk := _mortar_face_key(cell, d)
+		if _mortar_overlays.has(fk):
+			var inst: MeshInstance3D = _mortar_overlays[fk]
+			if is_instance_valid(inst):
+				inst.queue_free()
+			_mortar_overlays.erase(fk)
+
+## Returns true if a mortar overlay exists for this cell+face direction (for tests).
+func has_mortar_overlay(cell: Vector3i, face_dir: Vector3i) -> bool:
+	var fk := _mortar_face_key(cell, face_dir)
+	return _mortar_overlays.has(fk) and is_instance_valid(_mortar_overlays[fk])

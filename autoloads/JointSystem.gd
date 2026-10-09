@@ -140,6 +140,36 @@ func is_face_coated(cell: Vector3i, face_dir: Vector3i) -> bool:
 func is_face_cemented(cell: Vector3i, face_dir: Vector3i) -> bool:
 	return is_face_coated(cell, face_dir)
 
+## Returns an Array of all face directions coated with mortar on this cell.
+func get_coated_faces_for_cell(cell: Vector3i) -> Array[Vector3i]:
+	var result: Array[Vector3i] = []
+	for offset in NEIGHBORS_6:
+		if is_face_coated(cell, offset):
+			result.append(offset)
+	return result
+
+## Sets a face as coated with mortar, emits face_coated, and updates block metadata.
+func set_face_coated(cell: Vector3i, face_dir: Vector3i) -> void:
+	if face_dir == Vector3i.ZERO:
+		return
+	var fk := _face_key(cell, face_dir)
+	_coated_faces[fk] = true
+	var grid := _get_grid()
+	if grid != null and grid.has_block(cell):
+		var b: BlockData = grid.get_block(cell)
+		if b != null:
+			_add_coated_face_to_metadata(b, face_dir)
+	face_coated.emit(cell, face_dir)
+
+func _add_coated_face_to_metadata(block: BlockData, face_dir: Vector3i) -> void:
+	if block == null or face_dir == Vector3i.ZERO:
+		return
+	var cf: Array = block.metadata.get("coated_faces", [])
+	var dir_arr = [face_dir.x, face_dir.y, face_dir.z]
+	if not cf.has(dir_arr):
+		cf.append(dir_arr)
+	block.metadata["coated_faces"] = cf
+
 ## Applies the mortar brush to an exposed face of a block.
 ## Reinforces connections with coplanar neighbors in a 2D '+' pattern on that surface.
 ## Does NOT connect blocks through the wall's depth or behind the surface.
@@ -160,9 +190,13 @@ func apply_mortar_brush(cell: Vector3i, face_dir: Vector3i) -> Dictionary:
 
 	# Mark face as coated
 	_coated_faces[fk] = true
-	face_coated.emit(cell, face_dir)
 
 	var block_a: BlockData = grid.get_block(cell)
+	if block_a != null:
+		_add_coated_face_to_metadata(block_a, face_dir)
+
+	face_coated.emit(cell, face_dir)
+
 	var mat_a: StringName = block_a.block_type if block_a != null else &"stone"
 
 	var reinforced: Array = []
@@ -486,6 +520,16 @@ func extract_joints_for_cells(cells: Array[Vector3i]) -> Array:
 	for ij in internal_joints:
 		_unregister_joint(ij)
 
+	# Ensure coated faces are saved to block metadata before removal
+	var grid = _get_grid()
+	if grid != null:
+		for c in cells:
+			var b: BlockData = grid.get_block(c)
+			if b != null:
+				for offset in NEIGHBORS_6:
+					if is_face_coated(c, offset):
+						_add_coated_face_to_metadata(b, offset)
+
 	# Clean up coated faces on collapsing cells
 	for c in cells:
 		remove_joints_for_cell(c)
@@ -506,6 +550,21 @@ func _on_grid_block_placed(cell: Vector3i, _data: BlockData) -> void:
 	var grid := _get_grid()
 	if grid == null:
 		return
+
+	# Restore coated faces from BlockData metadata if present
+	if _data != null and _data.metadata.has("coated_faces"):
+		var c_faces = _data.metadata["coated_faces"]
+		if c_faces is Array:
+			for f in c_faces:
+				var fdir := Vector3i.ZERO
+				if f is Vector3i:
+					fdir = f
+				elif f is Array and f.size() == 3:
+					fdir = Vector3i(int(f[0]), int(f[1]), int(f[2]))
+				if fdir != Vector3i.ZERO:
+					var fk := _face_key(cell, fdir)
+					_coated_faces[fk] = true
+					face_coated.emit(cell, fdir)
 
 	# Automatically create default connections with adjacent existing blocks
 	for offset in NEIGHBORS_6:

@@ -493,7 +493,88 @@ explicitamente definidos ou alterados.
   - Teste de Integração em Tempo Real (`tests/test_scene_runtime.gd`): aprovado com sucesso.
 
 ### 13.8 Limitações Restantes e Próximos Passos
-- Prensagem/fabricação de novos blocos a partir de matéria-prima acumulada (`raw_materials`), ferramentas de raspagem/remoção manual de argamassa, ajudantes automatizados (workers), mineração e persistência de projetos salvos (blueprints) permanecem como etapas para os próximos marcos.
+- Prensagem/fabricação de novos blocos a partir de matéria-prima acumulada (`raw_materials`), ferramentas de raspagem/remoção manual de argamassa, ajudantes automatizados (workers) e mineração permanecem como etapas para os próximos marcos.
 
+---
 
+## 14. Marco 4: Sistema de Blueprints de Construção (Construction Blueprints)
 
+### 14.1 Visão Geral e Arquitetura de Dados
+O sistema de Blueprints permite salvar, carregar, atualizar, validar e instanciar arranjos arquitetônicos do grid de construção, garantindo fidelidade de tipos de bloco, durabilidades individuais, revestimentos de argamassa e juntas estruturais internas, preparando a infraestrutura para futura reconstrução automatizada por trabalhadores.
+
+```
+[Mundo / GridSystem / JointSystem]
+               │
+               ▼ (capture_blueprint / update_or_replace_blueprint)
+       [BlueprintData] (Serialização limpa / Desacoplada da física)
+               │
+               ▼ (save_to_file / load_from_file)
+       [Disco: user://blueprints/<name>.json]
+               │
+               ▼ (validate_placement: Bounds, Debris, Occupied, Player)
+       [BlueprintManager.apply_blueprint]
+               │
+               ▼ (Posicionamento atômico seguro / Restauração de juntas e argamassa)
+[GridSystem + JointSystem + StabilitySystem]
+```
+
+### 14.2 Componentes Implementados
+
+1. **`BlueprintData` (`res://data/BlueprintData.gd`):**
+   - Estrutura de dados canônica serializável para JSON (versão 1).
+   - Independente de instâncias de nós e da simulação de física, evitando que blocos caídos como destroços corrompam projetos salvos.
+   - Armazena metadados do projeto (`name`, `description`, `created_at`, `anchor_cell`, `bounds_min`, `bounds_max`).
+   - Armazena blocos relativos à âncora: coordenadas relativas `[x, y, z]`, tipo do bloco (`block_type`), durabilidade exata (`durability`), metadados (`coated_faces`).
+   - Armazena juntas estruturais internas estritamente contidas no projeto (`rel_a`, `rel_b`, resistência, estado de argamassa, materiais).
+
+2. **`BlueprintManager` (`res://autoloads/BlueprintManager.gd`):**
+   - Gerenciador global (Autoload) para persistência em `user://blueprints/`.
+   - **Captura do Mundo:** `capture_blueprint(name, cells, custom_anchor)` extrai blocos e juntas internas do `GridSystem` e `JointSystem` sem alterar o mundo.
+   - **Validação Rigorosa de Aplicação (`validate_placement`):**
+     - Checagem de limites espaciais (`OUT_OF_BOUNDS`).
+     - Detecção de colisão com destroços físicos em movimento ou assentados (`DEBRIS_COLLISION`).
+     - Detecção de células já ocupadas por blocos estáticos (`CELL_OCCUPIED`).
+     - Detecção de sobreposição com o jogador (`PLAYER_OVERLAP`).
+     - Rejeição limpa sem alterar o mundo caso ocorram conflitos.
+   - **Aplicação no Mundo (`apply_blueprint`):**
+     - Instanciação de blocos com durabilidade e metadados preservados.
+     - Suporte ao modo de substituição (`allow_replacement = true`) para evitar duplicações quando o jogador deseja atualizar o local.
+     - Restauração de juntas estruturais coladas com argamassa (`bond_adjacent`) e faces revestidas (`set_face_coated`).
+     - Disparo de recálculo da estabilidade estrutural (`StabilitySystem.recalculate_stability`).
+   - **Gerenciamento de Arquivos:** `list_blueprints()`, `load_blueprint()`, `save_blueprint()`, `delete_blueprint()`, `sanitize_name()`.
+
+3. **Persistência Visual de Argamassa em Destroços (`DebrisIsland.gd`):**
+   - As faces revestidas de argamassa salvas no metadado do bloco são agora renderizadas como sobreposições visuais 3D (`MeshInstance3D`) na própria ilha de destroços durante o colapso, garantindo que o revestimento permaneça visível nas peças caídas.
+
+4. **Mapeamento de Entrada Seguro (`InputManager.gd`):**
+   - Ações `save_blueprint` (tecla `K`) e `load_blueprint` (tecla `L`) registradas sem colisão com comandos reservados de movimentação, interação, câmera ou construção.
+
+### 14.3 Validação e Testes Automatizados Executados
+- Suíte M4 criada (`tests/test_m4.gd`): **26/26 testes aprovados com 0 falhas**:
+  - Serialização bidirecional to_dict / from_dict (`test_blueprintdata_to_dict_and_from_dict`)
+  - Roundtrip JSON (`test_blueprintdata_json_roundtrip`)
+  - Validação de formato e rejeição de dados sem blocos (`test_blueprintdata_empty_blocks_returns_null`)
+  - Compatibilidade e aviso de versão de formato (`test_blueprintdata_version_mismatch_warning`)
+  - Sanitização de nomes de arquivo (`test_blueprint_sanitize_name`)
+  - Salvamento e carregamento em disco (`test_blueprint_save_and_load_roundtrip`)
+  - Listagem de blueprints no diretório (`test_blueprint_list_includes_saved`)
+  - Exclusão de arquivos de blueprint (`test_blueprint_delete`)
+  - Proteção contra sobrescrita indevida (`test_blueprint_overwrite_false_rejects`)
+  - Captura de todas as células (`test_blueprint_capture_all_cells`)
+  - Captura de subconjunto de células (`test_blueprint_capture_specific_cells`)
+  - Preservação de tipo e durabilidade na captura (`test_blueprint_capture_preserves_block_type_and_durability`)
+  - Preservação de juntas na captura (`test_blueprint_capture_preserves_joints`)
+  - Rejeição de blueprint vazio (`test_blueprint_validate_empty_is_invalid`)
+  - Rejeição de sobreposição com células ocupadas (`test_blueprint_validate_occupied_rejects`)
+  - Rejeição de posicionamento fora dos limites (`test_blueprint_validate_out_of_bounds_rejects`)
+  - Aplicação e posicionamento correto de blocos (`test_blueprint_apply_places_blocks`)
+  - Rejeição atômica sem modificar o grid quando inválido (`test_blueprint_apply_invalid_rejects_without_modification`)
+  - Aplicação com substituição permitida (`test_blueprint_apply_allow_replacement_succeeds`)
+  - Preservação de durabilidade individual na aplicação (`test_blueprint_apply_preserves_durability`)
+  - Garantia de não corrupção do mundo em posicionamento rejeitado (`test_blueprint_apply_invalid_does_not_corrupt_world`)
+  - Atualização/substituição de blueprint existente (`test_blueprint_update_or_replace`)
+  - Armazenamento de faces revestidas nos metadados (`test_mortar_coated_faces_saved_in_blockdata_metadata`)
+  - Renderização de sobreposição de argamassa em DebrisIsland após colapso (`test_debris_island_mortar_overlay_spawned_on_collapse`)
+  - Ausência de sobreposição quando não há revestimento (`test_mortar_overlay_absent_when_no_coated_faces`)
+  - Verificação de ausência de conflitos de atalhos de entrada (`test_blueprint_actions_no_conflict_with_existing_bindings`)
+- **Total geral de testes automatizados da base de código: 132/132 aprovados com 0 falhas** (8 Pincel de Argamassa, 11 M1, 11 M1.1, 7 M2, 13 M2.1, 13 M2.2, 14 M2.3, 29 M3, 26 M4).
