@@ -70,6 +70,15 @@ func trigger_collapse(unsupported_cells: Array[Vector3i]) -> Array[DebrisIsland]
 	# 3. Group actually removed cells into connected component islands
 	var island_groups: Array = IslandBuilder.group_islands(actually_removed_cells)
 
+	# Extract any structural joints among the collapsing cells to preserve compound debris
+	var joint_sys: Node = null
+	if is_inside_tree() and has_node("/root/JointSystem"):
+		joint_sys = get_node("/root/JointSystem")
+
+	var extracted_joints: Array = []
+	if joint_sys != null and joint_sys.has_method("extract_joints_for_cells"):
+		extracted_joints = joint_sys.extract_joints_for_cells(actually_removed_cells)
+
 	# 4. Instantiate one DebrisIsland per disconnected island group
 	var spawned_islands: Array[DebrisIsland] = []
 
@@ -78,10 +87,19 @@ func trigger_collapse(unsupported_cells: Array[Vector3i]) -> Array[DebrisIsland]
 		if cell_group.is_empty():
 			continue
 
+		var group_set: Dictionary = {}
+		for c_var in cell_group:
+			group_set[c_var] = true
+
+		var group_joints: Array = []
+		for j in extracted_joints:
+			if group_set.has(j.cell_a) and group_set.has(j.cell_b):
+				group_joints.append(j)
+
 		var island := DebrisIsland.new()
 		island.orchestrator = self
 		debris_container.add_child(island)
-		island.setup_island(cell_group, removed_block_data, grid.cell_size)
+		island.setup_island(cell_group, removed_block_data, grid.cell_size, group_joints)
 
 		island.island_settled.connect(_on_island_settled)
 		island.island_fell_out_of_world.connect(_on_island_destroyed)
@@ -91,6 +109,8 @@ func trigger_collapse(unsupported_cells: Array[Vector3i]) -> Array[DebrisIsland]
 
 	if not spawned_islands.is_empty():
 		collapse_occurred.emit(spawned_islands)
+		# Wake any existing settled debris so stacked islands resume falling
+		_wake_all_active_debris_except(spawned_islands)
 
 	return spawned_islands
 
@@ -138,7 +158,16 @@ func split_debris_island(original: DebrisIsland, groups: Array) -> Array[DebrisI
 		new_island.linear_velocity = orig_lin_vel + orig_ang_vel.cross(r_offset)
 		new_island.angular_velocity = orig_ang_vel
 
-		new_island.setup_island_split(group, group_data, orig_local_offsets, local_centroid, orig_cell_size)
+		var group_joints: Array = []
+		if "internal_joints" in original and original.internal_joints is Dictionary:
+			var g_set: Dictionary = {}
+			for cv in group:
+				g_set[cv] = true
+			for j in original.internal_joints.values():
+				if g_set.has(j.cell_a) and g_set.has(j.cell_b):
+					group_joints.append(j)
+
+		new_island.setup_island_split(group, group_data, orig_local_offsets, local_centroid, orig_cell_size, group_joints)
 
 		new_island.island_settled.connect(_on_island_settled)
 		new_island.island_fell_out_of_world.connect(_on_island_destroyed)
@@ -151,6 +180,35 @@ func split_debris_island(original: DebrisIsland, groups: Array) -> Array[DebrisI
 
 	debris_split.emit(original, spawned_islands)
 	return spawned_islands
+
+## Converts an unbonded grid block into an active dynamic debris island moving under physics.
+func push_unbonded_block(cell: Vector3i, impulse_velocity: Vector3 = Vector3.ZERO) -> DebrisIsland:
+	var grid := grid_system
+	if grid == null and has_node("/root/GridSystem"):
+		grid = get_node("/root/GridSystem")
+	if grid == null or not grid.has_block(cell):
+		return null
+
+	var block_data: BlockData = grid.remove_block(cell)
+	if block_data == null:
+		return null
+
+	var data_map: Dictionary = {cell: block_data}
+	var island := DebrisIsland.new()
+	island.orchestrator = self
+	var container: Node = debris_container if debris_container != null else self
+	container.add_child(island)
+	island.setup_island([cell], data_map, grid.cell_size, [])
+
+	if impulse_velocity.length_squared() > 0.001:
+		island.linear_velocity = impulse_velocity
+
+	island.island_settled.connect(_on_island_settled)
+	island.island_fell_out_of_world.connect(_on_island_destroyed)
+
+	_active_debris.append(island)
+	_wake_all_active_debris_except([island])
+	return island
 
 ## Checks if any active debris currently physically occupies the space of a grid cell.
 func is_cell_blocked_by_debris(cell: Vector3i, p_cell_size: float = 1.0) -> bool:
@@ -178,6 +236,8 @@ func register_debris_island(island: DebrisIsland) -> void:
 func unregister_debris_island(island: DebrisIsland) -> void:
 	_active_debris.erase(island)
 	debris_removed.emit(island)
+	# Wake all remaining debris so islands stacked above the freed one resume falling
+	_wake_all_active_debris_except([])
 
 func _on_island_settled(island: DebrisIsland) -> void:
 	debris_settled.emit(island)
@@ -201,3 +261,13 @@ func clear_all_debris() -> void:
 			island.queue_free()
 	_active_debris.clear()
 
+## Wakes all active debris islands that are not in the exclusion list.
+## Prevents settled debris from staying asleep when a supporting island beneath it was removed.
+func _wake_all_active_debris_except(exclude: Array) -> void:
+	for island in _active_debris:
+		if not is_instance_valid(island):
+			continue
+		if island in exclude:
+			continue
+		if island.is_settled or island.sleeping:
+			island.wake_and_disable_sleep()

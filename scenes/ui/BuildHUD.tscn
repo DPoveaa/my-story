@@ -56,6 +56,12 @@ layout_mode = 2
 mouse_filter = 2
 text = "Material: Stone"
 
+[node name="CementLabel" type="Label" parent="PanelTop/HBox"]
+layout_mode = 2
+mouse_filter = 2
+theme_override_colors/font_color = Color(0.9, 0.75, 0.3, 1)
+text = "Cement: 25/100"
+
 [node name="BlockCountLabel" type="Label" parent="PanelTop/HBox"]
 layout_mode = 2
 mouse_filter = 2
@@ -73,13 +79,20 @@ mouse_filter = 2
 theme_override_colors/font_color = Color(1, 0.85, 0.2, 1)
 text = "[HOLDING STONE] E: Drop | R/LMB: Recover"
 
+[node name="TargetInfoLabel" type="Label" parent="PanelTop/HBox"]
+visible = false
+layout_mode = 2
+mouse_filter = 2
+theme_override_colors/font_color = Color(0.3, 1, 0.4, 1)
+text = "[Face: Unbonded (G to Cement)]"
+
 [node name="PanelControls" type="PanelContainer" parent="."]
 anchors_preset = 2
 anchor_top = 1.0
 anchor_bottom = 1.0
 offset_left = 10.0
-offset_top = -240.0
-offset_right = 470.0
+offset_top = -280.0
+offset_right = 490.0
 offset_bottom = -10.0
 grow_vertical = 0
 mouse_filter = 2
@@ -120,14 +133,19 @@ text = "• LMB: Place Block  |  RMB: Remove Block (Grid/Debris)"
 [node name="Help4" type="Label" parent="PanelControls/Margin/VBox"]
 layout_mode = 2
 mouse_filter = 2
-text = "• E: Grab/Release Debris  |  R / LMB: Recover to Grid"
+text = "• G: Apply Cement to Face  |  Shift+G: Bond Adjacent Neighbors"
 
 [node name="Help5" type="Label" parent="PanelControls/Margin/VBox"]
 layout_mode = 2
 mouse_filter = 2
-text = "• 1-4 / Wheel: Material  |  Esc / Tab: Release/Capture Mouse"
+text = "• E: Grab/Release Debris  |  F: Throw  |  R / LMB: Recover to Grid"
 
 [node name="Help6" type="Label" parent="PanelControls/Margin/VBox"]
+layout_mode = 2
+mouse_filter = 2
+text = "• 1-4 / Wheel: Material  |  Esc / Tab: Release/Capture Mouse"
+
+[node name="Help7" type="Label" parent="PanelControls/Margin/VBox"]
 layout_mode = 2
 mouse_filter = 2
 text = "• T: Tower  |  B: Bridge  |  H: Arch  |  C: Clear World"

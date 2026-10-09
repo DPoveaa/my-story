@@ -19,6 +19,16 @@ func _init() -> void:
 
 	stab_sys.grid_system = grid_sys
 
+	var joint_sys: Node = root.get_node_or_null("JointSystem")
+	if joint_sys == null:
+		joint_sys = preload("res://autoloads/JointSystem.gd").new()
+		joint_sys.name = "JointSystem"
+		root.add_child(joint_sys)
+
+	joint_sys.grid_system = grid_sys
+	joint_sys.stability_system = stab_sys
+	stab_sys.joint_system = joint_sys
+
 	var world_scene: Node = load("res://scenes/world/GameWorld.tscn").instantiate()
 	root.add_child(world_scene)
 

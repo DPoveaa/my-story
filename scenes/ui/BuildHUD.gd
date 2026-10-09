@@ -11,6 +11,8 @@ extends CanvasLayer
 @onready var debris_count_label: Label = $PanelTop/HBox/DebrisCountLabel
 @onready var color_rect_badge: ColorRect = $PanelTop/HBox/ColorBadge
 @onready var prompt_label: Label = get_node_or_null("PanelTop/HBox/PromptLabel")
+@onready var cement_label: Label = get_node_or_null("PanelTop/HBox/CementLabel")
+@onready var target_info_label: Label = get_node_or_null("PanelTop/HBox/TargetInfoLabel")
 
 var grid_system: Node
 var orchestrator: CollapseOrchestrator
@@ -18,6 +20,28 @@ var orchestrator: CollapseOrchestrator
 func _ready() -> void:
 	if grid_system == null and has_node("/root/GridSystem"):
 		grid_system = get_node("/root/GridSystem")
+
+func set_cement(current: int, max_val: int) -> void:
+	if cement_label == null:
+		cement_label = get_node_or_null("PanelTop/HBox/CementLabel")
+	if cement_label != null:
+		cement_label.text = "Cement: %d/%d" % [current, max_val]
+
+func set_target_face_info(has_target: bool, _cell: Vector3i, _face_dir: Vector3i, status_text: String) -> void:
+	if target_info_label == null:
+		target_info_label = get_node_or_null("PanelTop/HBox/TargetInfoLabel")
+	if target_info_label != null:
+		if has_target and not status_text.is_empty():
+			target_info_label.text = "[%s]" % status_text
+			target_info_label.visible = true
+			if "Insufficient" in status_text:
+				target_info_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
+			elif "Bonded" in status_text or "Ready" in status_text:
+				target_info_label.add_theme_color_override("font_color", Color(0.3, 1.0, 0.4))
+			else:
+				target_info_label.add_theme_color_override("font_color", Color(1.0, 0.85, 0.2))
+		else:
+			target_info_label.visible = false
 
 func set_player_mode(mode_text: String) -> void:
 	if mode_label != null:
@@ -44,7 +68,7 @@ func set_carried_block(is_carrying: bool, block_type: StringName) -> void:
 	if prompt_label != null:
 		if is_carrying:
 			var mat_name := BlockTypeCatalog.get_display_name(block_type)
-			prompt_label.text = "[HOLDING %s] E: Drop  |  R / LMB: Recover" % mat_name.to_upper()
+			prompt_label.text = "[HOLDING %s] E: Drop  |  F: Throw  |  R / LMB: Recover to Grid" % mat_name.to_upper()
 			prompt_label.visible = true
 		else:
 			prompt_label.visible = false

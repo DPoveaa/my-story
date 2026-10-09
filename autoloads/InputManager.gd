@@ -22,9 +22,11 @@ func setup_default_input_actions() -> void:
 	_add_key_action(&"fly_down", KEY_CTRL)
 	_add_key_action(&"fly_down", KEY_Q)
 
-	# Interaction: Grab/Release/Recover debris block
+	# Interaction: Grab/Release/Recover/Throw debris block
 	_add_key_action(&"interact", KEY_E)
 	_add_key_action(&"recover_block", KEY_R)
+	_add_key_action(&"throw_debris", KEY_F)
+	_add_key_action(&"apply_cement", KEY_G)
 
 	# Abilities and Modes
 	_add_key_action(&"soul_projection", KEY_V)

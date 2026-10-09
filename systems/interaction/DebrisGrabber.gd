@@ -1,19 +1,17 @@
 class_name DebrisGrabber
 extends Node3D
 
-## M2.1 — Modular debris grab/carry/release/recover system.
+## M2.2 — Modular debris grab/carry/release/recover/throw system.
 ## Attach as a child of the Player node.
 ## Grabbing is only supported in BODY_CONTROL mode for safety.
 ## In SOUL_PROJECTION mode grabbing is disabled.
 ##
-## Design Rationale:
-##   The physical body is frozen during Soul Projection. Dragging a RigidBody
-##   via the projection camera while the body stays put causes inconsistent
-##   physics, potential tunneling, and high desync risk.
-##   If Soul Projection is triggered while holding a block, the block is dropped.
+## M2.2 additions: throw_debris (F) launches the held block forward with a
+## configurable impulse relative to the active camera.
 
 signal grabbed_block(island: DebrisIsland, cell: Vector3i, block_data: BlockData)
 signal released_block()
+signal thrown_block(island: DebrisIsland, impulse: Vector3)
 signal recovered_block_to_grid(cell: Vector3i, block_type: StringName)
 signal recover_failed(reason: String)
 
@@ -23,6 +21,16 @@ signal recover_failed(reason: String)
 @export var carry_max_force: float = 80.0
 @export var max_grabbable_mass: float = 8.0
 @export var recovery_max_distance: float = 12.0
+
+@export_group("Throw Settings")
+## Forward impulse magnitude when throwing (m/s)
+@export var throw_speed: float = 16.0
+## Maximum allowed throw speed (clamped)
+@export var throw_speed_max: float = 28.0
+## Upward component added to the throw vector (slight loft)
+@export var throw_loft: float = 0.15
+## Subtle angular spin applied on throw (rad/s, random axis)
+@export var throw_spin: float = 4.0
 
 @export_group("Recovery Settings")
 @export var preview_ghost: PreviewGhost
@@ -189,6 +197,51 @@ func try_recover() -> bool:
 	if preview_ghost != null:
 		preview_ghost.hide_preview()
 	recovered_block_to_grid.emit(target_cell, recovered_type)
+	return true
+
+## Throws the carried block forward from the active camera direction.
+## Applies a clamped forward impulse + subtle loft + randomised spin.
+## Returns false if nothing is held or the camera cannot be determined.
+func try_throw() -> bool:
+	if not is_grabbing or not is_instance_valid(_grabbed_island):
+		return false
+
+	var cam: Camera3D = _get_active_camera()
+	if cam == null:
+		return false
+
+	# Build throw direction: camera forward + slight loft
+	var throw_dir: Vector3 = (-cam.global_transform.basis.z).normalized()
+	throw_dir.y += throw_loft
+	throw_dir = throw_dir.normalized()
+
+	# Clamp speed to configured max
+	var speed: float = clampf(throw_speed, 0.0, throw_speed_max)
+	var throw_impulse: Vector3 = throw_dir * speed * _grabbed_island.mass
+
+	# Release hold first so the spring force stops competing
+	var island: RigidBody3D = _grabbed_island
+	_grabbed_island = null
+	_grabbed_cell = Vector3i.ZERO
+	_grabbed_data = null
+	is_grabbing = false
+	if preview_ghost != null:
+		preview_ghost.hide_preview()
+
+	# Apply throw impulse and subtle random spin
+	island.can_sleep = false
+	island.apply_central_impulse(throw_impulse)
+	var rng := RandomNumberGenerator.new()
+	rng.randomize()
+	var spin_axis: Vector3 = Vector3(
+		rng.randf_range(-1.0, 1.0),
+		rng.randf_range(-0.3, 0.3),
+		rng.randf_range(-1.0, 1.0)
+	).normalized()
+	island.apply_torque_impulse(spin_axis * throw_spin * island.mass)
+
+	thrown_block.emit(island, throw_impulse)
+	released_block.emit()
 	return true
 
 func _update_recovery_preview(cam: Camera3D) -> void:

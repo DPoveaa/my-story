@@ -55,6 +55,24 @@ limites de desempenho. 5. Quando os destroços ficam estáveis, o jogo
 pode reduzir o custo da simulação, sem eliminar automaticamente seu
 valor como material.
 
+### 3.3 Juntas Estruturais e Argamassa / Cimento
+
+-   **Estado Padrão:** Blocos recém-posicionados ocupam a grade, mas iniciam
+    desvinculados (sem argamassa/cimento). Blocos desvinculados podem repousar
+    em apoio vertical, mas podem ser empurrados ou deslocados por forças físicas.
+-   **Aplicação de Argamassa/Cimento:** O jogador pode aplicar argamassa
+    nas faces adjacentes de blocos compatíveis para formar juntas estruturais rígidas.
+    Também é possível preparar previamente uma face com argamassa para que o próximo
+    bloco posicionado se conecte automaticamente.
+-   **Resistência e Danos:** As juntas suportam esforços e cargas normais até seu
+    limite. Forças dinâmicas e impactos (baseados na energia de impacto $E = 0.5 m v^2$)
+    causam desgaste cumulativo ou ruptura imediata em impactos extremos.
+-   **Ruptura e Destroços Compostos:** Ao quebrar uma junta, a sustentação lateral é
+    reavaliada. Corpos de destroços mantêm suas juntas internas íntegras, quebrando-se
+    em subgrupos coerentes apenas quando suas juntas internas atingirem falha mecânica.
+-   **Recursos:** Aplicação de argamassa consome recursos do inventário do jogador,
+    com feedback na interface e opções de depuração para testes (cimento ilimitado).
+
 A física deve ser convincente, mas não precisa ser uma simulação
 perfeita de engenharia. Priorizar jogabilidade, previsibilidade e
 desempenho.

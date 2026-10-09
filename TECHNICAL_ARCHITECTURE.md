@@ -360,7 +360,66 @@ explicitamente definidos ou alterados.
   - Teste de Integração em Tempo Real (`tests/test_scene_runtime.gd`): aprovado com sucesso.
   - Renderização no Godot 4.7.2 Forward+ D3D12 Standard (GPU AMD Radeon RX 6700 XT): inicialização do mundo com o jogador em primeira pessoa validada sem erros.
 
-### 13.4 Limitações Restantes e Próximos Passos
-- Ajudantes (workers), projetos salvos (blueprints), sistema de durabilidade detalhada, reciclagem com prensa, mineração e inventário permanecem em aberto para os marcos futuros (M3+).
+### 13.4 Milestone 2.1 — Câmera, Movimentação e Interação com Física (Implementado e Validado)
+- **Manipulação de Destroços (`DebrisGrabber.gd`):**
+  - Implementado como componente acoplado ao jogador (`Player/DebrisGrabber`).
+  - Suporte a segurar (`interact`, tecla `E`) e soltar corpos rígidos dinâmicos (`DebrisIsland`) e blocos destacados.
+  - Limite de massa configurável (`max_carry_mass = 120.0`), rejeitando carregar estruturas excessivamente massivas.
+  - Desconexão alvejada de blocos individuais em ilhas compostas de destroços (`try_grab_block`).
+  - Recuperação direta para o inventário (`recover`, tecla `R`), convertendo blocos segurados em itens.
+- **Empurrão Físico (`push_unbonded_block`):**
+  - Jogador exerce força de empurrão em blocos dinâmicos e blocos não cimentados através do `CharacterBody3D.move_and_slide()` e contato físico.
+- **Validação e Testes Executados:**
+  - Suíte M2.1 (`tests/test_m2_1.gd`): 13/13 testes aprovados com sucesso.
+
+### 13.5 Milestone 2.2 — Ajustes de Física de Destroços e Arremesso (Implementado e Validado)
+- **Ajustes de Comportamento e Dinâmica de Destroços (`DebrisIsland.gd`):**
+  - Desativação de repouso prematuro (`can_sleep = false`, contador de quadros ativos mínimos).
+  - Redução de amortecimento linear e angular para rotação e deslizamento convincentes sem congelamento no ar.
+  - Reativação forçada de destroços vizinhos pelo `CollapseOrchestrator` durante novos desmoronamentos ou alterações estruturais.
+  - Preservação da velocidade linear e do momento angular durante partições e cisões de corpos rígidos.
+- **Mecânica de Arremesso (`throw_debris`, tecla `F`):**
+  - Arremesso direcional baseado no vetor de visão da câmera ativa com força e impulso configuráveis (`throw_force = 12.0`).
+- **Validação e Testes Executados:**
+  - Suíte M2.2 (`tests/test_m2_2.gd`): 13/13 testes aprovados com sucesso.
+
+### 13.6 Milestone 2.3 — Juntas Estruturais e Ligação por Cimento / Argamassa (Implementado e Validado)
+- **Modelo de Dados de Juntas (`data/StructuralJoint.gd`):**
+  - Classe `StructuralJoint` encapsula o par canônico de células conectadas (`cell_a`, `cell_b`), resistência máxima (`max_strength`), integridade atual (`current_health`) e estado de ruptura.
+  - Suporte completo a cálculo de dano, quebra e serialização em dicionário (`to_dict` / `from_dict`).
+- **Gerenciador de Juntas Singleton (`autoloads/JointSystem.gd`):**
+  - Autoload `JointSystem` registrado em `project.godot`.
+  - Mapeamento determinístico de chaves canônicas com ordenação lexicográfica de coordenadas (`make_joint_key`).
+  - Cálculo de resistência de junta baseado na compatibilidade e dureza de materiais (`BlockTypeCatalog`), garantindo resistências configuradas (ex.: pedra/ouro vs madeira).
+  - Preparação prévia de faces (`mortar_faces`): o jogador pode cimentar a face de um bloco exposto (`prime_mortar_face`), fazendo com que o próximo bloco posicionado naquela face forme a junta estrutural automaticamente.
+  - Aplicação de cimento em lote (`bond_all_adjacent_neighbors` via `Shift+G`).
+  - Distribuição de impacto físico: calcula energia cinética de impacto ($E = 0.5 m v^2$), distribuindo o dano uniformemente entre as juntas estruturais conectadas ao ponto de colisão.
+  - Limpeza imediata e sanitização: remoção de bloco no `GridSystem` limpa automaticamente todas as juntas associadas, eliminando juntas órfãs, duplicadas ou inválidas.
+- **Integração com Sistema de Estabilidade (`autoloads/StabilitySystem.gd`):**
+  - Adicionada propriedade `require_joints_for_lateral_support`: blocos sobrepostos verticalmente apoiam-se por gravidade, mas apoios laterais (cantilevers, pontes suspensas, balanços) exigem juntas cimentadas ativas para transmitir sustentação.
+  - Ruptura de junta reavalia instantaneamente a estabilidade estrutural da região afetada, desencadeando desmoronamento automático de elementos que perderam ancoragem.
+- **Física de Blocos Desvinculados e Destroços Compostos (`DebrisIsland.gd` / `CollapseOrchestrator.gd`):**
+  - Blocos recém-posicionados iniciam desvinculados por padrão; o jogador e forças físicas podem deslocá-los (`push_unbonded_block`).
+  - Durante o colapso, juntas intactas entre blocos sem suporte são preservadas como `internal_joints` dentro da `DebrisIsland`.
+  - Corpos de destroços compostos sofrem danos de impacto nas juntas internas (`apply_impact_damage`) ao colidirem com alta energia.
+  - Quando uma junta interna se rompe, a `DebrisIsland` avalia a conectividade remanescente e divide-se deterministicamente em sub-ilhas compostas através de `check_and_split_on_broken_joints`, preservando os subgrupos que ainda mantêm juntas íntegras.
+- **Inventário de Cimento e Feedback no HUD (`PlayerController.gd` / `BuildHUD.tscn`):**
+  - Inventário finito de cimento (`cement_count = 25`, `max_cement = 100`) com flag de depuração (`unlimited_cement = false`).
+  - Consumo de 1 unidade por junta criada. Sinal sonoro/visual e aviso de "Cimento insuficiente!" ao tentar aplicar sem recursos.
+  - Mira precisa de face (`get_targeted_face`): exibe no HUD o status da face (`Cimentada`, `Sem cimento`, `Junta ativa: saúde/máx`) e contador em tempo real (`Cimento: X/100`).
+  - Mapeamento de ações limpo sem conflitos: tecla `G` para aplicar cimento na face mirada, `Shift+G` para ligar todos os vizinhos adjacentes.
+- **Validação e Testes Executados:**
+  - Suíte M1 (`tests/test_m1.gd`): 11/11 testes aprovados.
+  - Suíte M1.1 (`tests/test_m1_1.gd`): 11/11 testes aprovados.
+  - Suíte M2 (`tests/test_m2.gd`): 7/7 testes aprovados.
+  - Suíte M2.1 (`tests/test_m2_1.gd`): 13/13 testes aprovados.
+  - Suíte M2.2 (`tests/test_m2_2.gd`): 13/13 testes aprovados.
+  - Suíte M2.3 (`tests/test_m2_3.gd`): 14/14 testes aprovados.
+  - **Total de testes automatizados: 69/69 aprovados (0 falhas)**.
+  - Teste de Integração em Tempo Real (`tests/test_scene_runtime.gd`): executado com sucesso e saída 0.
+
+### 13.7 Limitações Restantes e Próximos Passos
+- Ajudantes (workers), projetos salvos (blueprints), sistema de durabilidade detalhada de materiais brutos, reciclagem com prensa, mineração e inventário geral permanecem em aberto para os marcos futuros (M3+).
+
 
 

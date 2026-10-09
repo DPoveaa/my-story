@@ -13,6 +13,9 @@ signal island_split(original_island: DebrisIsland, new_islands: Array)
 ## Stored constituent blocks: Dictionary[Vector3i, BlockData]
 var constituent_blocks: Dictionary = {}
 
+## Internal structural joints within this island: Dictionary[String, StructuralJoint]
+var internal_joints: Dictionary = {}
+
 ## Local offsets of constituent blocks relative to the island's center: Dictionary[Vector3i, Vector3]
 var local_offsets: Dictionary = {}
 
@@ -26,14 +29,24 @@ var cell_size: float = 1.0
 ## Settled state flag
 var is_settled: bool = false
 
+## Frames the body has been awake since spawn — used to defer sleep re-enabling
+var _awake_frames: int = 0
+## Minimum awake frames before the body is allowed to sleep (prevents premature sleep)
+const _MIN_AWAKE_FRAMES: int = 12
+
 ## Optional back-reference to CollapseOrchestrator for managing active debris registrations
 var orchestrator: Node = null
 
 func _ready() -> void:
 	sleeping_state_changed.connect(_on_sleeping_state_changed)
 
-func setup_island(cells: Array, block_data_map: Dictionary, p_cell_size: float) -> void:
+func setup_island(cells: Array, block_data_map: Dictionary, p_cell_size: float, p_joints: Array = []) -> void:
 	cell_size = p_cell_size
+	internal_joints.clear()
+	for j in p_joints:
+		if j != null:
+			internal_joints[j.get_key()] = j
+
 	if cells.is_empty():
 		return
 
@@ -99,20 +112,32 @@ func setup_island(cells: Array, block_data_map: Dictionary, p_cell_size: float) 
 
 		total_mass += BlockTypeCatalog.get_mass(block_data.block_type)
 
-	# 3. Configure physics parameters for reliable settling
+	# 3. Configure physics parameters for reliable falling and natural tumbling.
+	# linear_damp=0.0: no artificial drag so blocks continue falling even when stacked.
+	# angular_damp=0.3: allows tumbling and rolling without permanent spinning.
+	# can_sleep=false on spawn: prevents premature sleep from stale contact cache when
+	#   a lower island is removed (the Jolt engine may not reactivate sleeping bodies
+	#   that were resting on the freed body within the same frame).
+	#   Sleep is re-enabled in _physics_process once the body has been awake for a few
+	#   frames and has low velocity, allowing the engine to settle it correctly.
 	mass = maxf(1.0, total_mass)
-	linear_damp = 0.6
-	angular_damp = 0.8
-	can_sleep = true
+	linear_damp = 0.0
+	angular_damp = 0.3
+	can_sleep = false
+	_awake_frames = 0
 	contact_monitor = true
-	max_contacts_reported = 4
-	# Layer 3 = debris; mask 7 = collides with ground(1), player(2), other debris(4 is bit3)
-	collision_layer = 4   # bit 3 = layer 3 in Godot (1-indexed)
-	collision_mask = 7    # bits 1+2+3 = layers 1(ground)+2(player)+3(debris)
+	max_contacts_reported = 6
+	# Layer 4 = debris (bit 3); mask 7 = layers 1(ground)+2(player)+4(debris)
+	collision_layer = 4
+	collision_mask = 7
 
 ## Sets up an island resulting from a split of an existing debris island.
-func setup_island_split(cells: Array, block_data_map: Dictionary, orig_offsets: Dictionary, centroid_offset: Vector3, p_cell_size: float) -> void:
+func setup_island_split(cells: Array, block_data_map: Dictionary, orig_offsets: Dictionary, centroid_offset: Vector3, p_cell_size: float, p_joints: Array = []) -> void:
 	cell_size = p_cell_size
+	internal_joints.clear()
+	for j in p_joints:
+		if j != null:
+			internal_joints[j.get_key()] = j
 	var total_mass: float = 0.0
 
 	for cell_var in cells:
@@ -149,11 +174,12 @@ func setup_island_split(cells: Array, block_data_map: Dictionary, orig_offsets: 
 		total_mass += BlockTypeCatalog.get_mass(block_data.block_type)
 
 	mass = maxf(1.0, total_mass)
-	linear_damp = 0.6
-	angular_damp = 0.8
-	can_sleep = true
+	linear_damp = 0.0
+	angular_damp = 0.3
+	can_sleep = false
+	_awake_frames = 0
 	contact_monitor = true
-	max_contacts_reported = 4
+	max_contacts_reported = 6
 	collision_layer = 4
 	collision_mask = 7
 
@@ -296,12 +322,146 @@ func _split_without_orchestrator(groups: Array) -> Array:
 		new_island.linear_velocity = orig_lin_vel + orig_ang_vel.cross(r_offset)
 		new_island.angular_velocity = orig_ang_vel
 
-		new_island.setup_island_split(group, group_data, orig_offsets, local_centroid, orig_cell_size)
+		var group_joints: Array = []
+		var g_set: Dictionary = {}
+		for cv in group:
+			g_set[cv] = true
+		for j in internal_joints.values():
+			if g_set.has(j.cell_a) and g_set.has(j.cell_b):
+				group_joints.append(j)
+
+		new_island.setup_island_split(group, group_data, orig_offsets, local_centroid, orig_cell_size, group_joints)
 		spawned.append(new_island)
 
 	island_split.emit(self, spawned)
 	queue_free()
 	return spawned
+
+## Applies impact energy to the internal structural joints connected to a constituent cell.
+## Breaks joints if impact energy or accumulated damage exceeds strength limits.
+## Splits the island if broken joints disconnect constituent blocks.
+func apply_impact_damage(hit_cell: Vector3i, impact_energy: float) -> Array:
+	var broken: Array = []
+	if impact_energy < 8.0:
+		return broken
+
+	var relevant_joints: Array = []
+	for j in internal_joints.values():
+		if not j.is_broken and j.connects_cell(hit_cell):
+			relevant_joints.append(j)
+
+	if relevant_joints.is_empty():
+		return broken
+
+	var energy_per_joint: float = impact_energy / float(relevant_joints.size())
+
+	for j in relevant_joints:
+		if energy_per_joint >= j.max_strength * 1.8:
+			j.break_joint()
+			broken.append(j)
+		else:
+			var dur_res: float = maxf(0.5, BlockTypeCatalog.get_max_durability(j.material_a) * BlockTypeCatalog.get_max_durability(j.material_b))
+			var dmg: float = energy_per_joint / dur_res
+			if j.apply_damage(dmg):
+				broken.append(j)
+
+	if not broken.is_empty():
+		call_deferred("check_and_split_on_broken_joints")
+
+	return broken
+
+## Evaluates connectivity among remaining blocks based strictly on intact internal joints.
+## If broken joints disconnect the blocks, splits into independent compound bodies.
+## Preserves compound debris groups where internal joints remain intact.
+func check_and_split_on_broken_joints() -> Array:
+	if constituent_blocks.size() <= 1:
+		return []
+
+	# Check connectivity based on intact internal joints
+	var cells: Array = constituent_blocks.keys()
+	var unvisited: Dictionary = {}
+	for c in cells:
+		unvisited[c] = true
+
+	var groups: Array = []
+
+	for c in cells:
+		if not unvisited.has(c):
+			continue
+
+		var group: Array = []
+		var queue: Array = [c]
+		unvisited.erase(c)
+
+		var head: int = 0
+		while head < queue.size():
+			var curr: Vector3i = queue[head]
+			head += 1
+			group.append(curr)
+
+			for j in internal_joints.values():
+				if not j.is_broken and j.connects_cell(curr):
+					var other: Vector3i = j.get_other_cell(curr)
+					if unvisited.has(other):
+						unvisited.erase(other)
+						queue.append(other)
+
+		groups.append(group)
+
+	if groups.size() > 1:
+		if orchestrator != null and orchestrator.has_method("split_debris_island"):
+			return orchestrator.split_debris_island(self, groups)
+		else:
+			return _split_without_orchestrator(groups)
+
+	return []
+
+func _integrate_forces(state: PhysicsDirectBodyState3D) -> void:
+	if is_settled or sleeping:
+		return
+	var speed_sq: float = state.linear_velocity.length_squared()
+	if speed_sq < 9.0: # speed < 3.0 m/s
+		return
+
+	var contact_count: int = state.get_contact_count()
+	if contact_count == 0:
+		return
+
+	var impact_energy: float = 0.5 * mass * speed_sq
+
+	for i in range(mini(contact_count, 2)):
+		var collider_obj: Object = state.get_contact_collider_object(i)
+		var contact_pos: Vector3 = state.get_contact_collider_position(i)
+
+		# Resolve local cell hit
+		var hit_cell = get_cell_from_shape_hit(0, contact_pos)
+		if hit_cell != null and hit_cell is Vector3i:
+			apply_impact_damage(hit_cell, impact_energy)
+
+		# If collider is static grid body, transfer impact to grid joints
+		if collider_obj is StaticBody3D:
+			var joint_sys: Node = null
+			if has_node("/root/JointSystem"):
+				joint_sys = get_node("/root/JointSystem")
+			var grid_sys: Node = null
+			if has_node("/root/GridSystem"):
+				grid_sys = get_node("/root/GridSystem")
+
+			var shape_idx: int = state.get_contact_collider_shape(i)
+			var owner_id: int = collider_obj.shape_find_owner(shape_idx)
+			if owner_id >= 0:
+				var owner_shape = collider_obj.shape_owner_get_owner(owner_id)
+				if owner_shape != null and owner_shape.has_meta("grid_cell"):
+					var grid_cell: Vector3i = owner_shape.get_meta("grid_cell")
+					if joint_sys != null and grid_sys != null and grid_sys.has_block(grid_cell):
+						if joint_sys.is_block_bonded(grid_cell):
+							joint_sys.apply_impact_to_block_joints(grid_cell, impact_energy)
+						else:
+							# Unbonded block hit by high-speed debris: knock free!
+							if orchestrator != null and orchestrator.has_method("push_unbonded_block"):
+								var push_vel: Vector3 = state.linear_velocity * 0.5
+								orchestrator.call_deferred("push_unbonded_block", grid_cell, push_vel)
+
 
 func _physics_process(_delta: float) -> void:
 	# Out of world bounds check
@@ -310,6 +470,25 @@ func _physics_process(_delta: float) -> void:
 			orchestrator.unregister_debris_island(self)
 		island_fell_out_of_world.emit(self)
 		queue_free()
+		return
+
+	# Gradually re-enable sleeping after the body has been active for enough frames.
+	# This prevents stale contact-cache sleep from freezing debris mid-air after a
+	# supporting body beneath it was removed.
+	if not can_sleep:
+		_awake_frames += 1
+		if _awake_frames >= _MIN_AWAKE_FRAMES:
+			can_sleep = true
+
+## Wake this island and all debris islands resting on top of it.
+## Called by CollapseOrchestrator when an island is removed/freed,
+## so stacked bodies above it resume falling.
+func wake_and_disable_sleep() -> void:
+	can_sleep = false
+	_awake_frames = 0
+	is_settled = false
+	if sleeping:
+		sleeping = false
 
 func _on_sleeping_state_changed() -> void:
 	if sleeping and not is_settled:

@@ -25,6 +25,9 @@ func _ready() -> void:
 	if stability_system == null and has_node("/root/StabilitySystem"):
 		stability_system = get_node("/root/StabilitySystem")
 
+	if stability_system != null:
+		stability_system.require_joints_for_lateral_support = true
+
 	# Wire HUD
 	if build_hud != null:
 		build_hud.grid_system = grid_system
@@ -40,8 +43,13 @@ func _ready() -> void:
 		player.state_changed.connect(build_hud.set_player_state)
 		if player.has_signal("carried_block_changed"):
 			player.carried_block_changed.connect(build_hud.set_carried_block)
+		if player.has_signal("cement_changed"):
+			player.cement_changed.connect(build_hud.set_cement)
+		if player.has_signal("target_face_changed"):
+			player.target_face_changed.connect(build_hud.set_target_face_info)
 		build_hud.set_selected_block_type(player.get_selected_type())
 		build_hud.set_player_state(player.current_state)
+		build_hud.set_cement(player.get_cement_count(), player.max_cement)
 
 	# Wire BuildCamera as secondary/debug tool
 	if build_camera != null:
@@ -95,18 +103,21 @@ func spawn_test_tower(origin: Vector3i = Vector3i.ZERO) -> void:
 	if grid_system == null:
 		return
 
+	var placed: Array[Vector3i] = []
 	# 2x2 Pillar, 7 blocks tall
 	for y in range(0, 7):
 		for x in range(0, 2):
 			for z in range(0, 2):
 				var cell := origin + Vector3i(x, y, z)
 				grid_system.place_block(cell, &"stone")
+				placed.append(cell)
 
 	# 4x4 Overhanging platform at top (y = 7)
 	for x in range(-1, 3):
 		for z in range(-1, 3):
 			var cell := origin + Vector3i(x, 7, z)
 			grid_system.place_block(cell, &"wood")
+			placed.append(cell)
 
 	# 4 crenellations/parapets on platform rim (y = 8)
 	var battlements := [
@@ -117,6 +128,9 @@ func spawn_test_tower(origin: Vector3i = Vector3i.ZERO) -> void:
 	]
 	for c in battlements:
 		grid_system.place_block(c, &"brick")
+		placed.append(c)
+
+	_bond_preset_cells(placed)
 
 ## Spawns a bridge between two pillars.
 ## Demonstrates lateral support propagation: horizontal walkway supported by pillars.
@@ -124,35 +138,67 @@ func spawn_test_bridge(origin: Vector3i = Vector3i.ZERO) -> void:
 	if grid_system == null:
 		return
 
+	var placed: Array[Vector3i] = []
 	# Left Pillar (height 5)
 	for y in range(0, 5):
-		grid_system.place_block(origin + Vector3i(0, y, 0), &"stone")
+		var c := origin + Vector3i(0, y, 0)
+		grid_system.place_block(c, &"stone")
+		placed.append(c)
 
 	# Right Pillar (height 5, distance 6 blocks away)
 	for y in range(0, 5):
-		grid_system.place_block(origin + Vector3i(6, y, 0), &"stone")
+		var c := origin + Vector3i(6, y, 0)
+		grid_system.place_block(c, &"stone")
+		placed.append(c)
 
 	# Walkway spanning between pillars (y = 4)
 	for x in range(1, 6):
-		grid_system.place_block(origin + Vector3i(x, 4, 0), &"wood")
+		var c := origin + Vector3i(x, 4, 0)
+		grid_system.place_block(c, &"wood")
+		placed.append(c)
+
+	_bond_preset_cells(placed)
 
 ## Spawns a rounded stone archway.
 func spawn_test_arch(origin: Vector3i = Vector3i.ZERO) -> void:
 	if grid_system == null:
 		return
 
+	var placed: Array[Vector3i] = []
 	# Left column
 	for y in range(0, 4):
-		grid_system.place_block(origin + Vector3i(0, y, 0), &"brick")
+		var c := origin + Vector3i(0, y, 0)
+		grid_system.place_block(c, &"brick")
+		placed.append(c)
 
 	# Right column
 	for y in range(0, 4):
-		grid_system.place_block(origin + Vector3i(4, y, 0), &"brick")
+		var c := origin + Vector3i(4, y, 0)
+		grid_system.place_block(c, &"brick")
+		placed.append(c)
 
 	# Arch curves and keystone
-	grid_system.place_block(origin + Vector3i(1, 4, 0), &"stone")
-	grid_system.place_block(origin + Vector3i(2, 5, 0), &"gold") # Keystone
-	grid_system.place_block(origin + Vector3i(3, 4, 0), &"stone")
+	var c1 := origin + Vector3i(1, 4, 0)
+	var c2 := origin + Vector3i(2, 5, 0)
+	var c3 := origin + Vector3i(3, 4, 0)
+	grid_system.place_block(c1, &"stone")
+	grid_system.place_block(c2, &"gold") # Keystone
+	grid_system.place_block(c3, &"stone")
+	placed.append_array([c1, c2, c3])
+
+	_bond_preset_cells(placed)
+
+func _bond_preset_cells(cells: Array[Vector3i]) -> void:
+	var joint_sys: Node = null
+	if is_inside_tree() and get_tree() != null:
+		joint_sys = get_tree().root.get_node_or_null("JointSystem")
+	if joint_sys == null:
+		var loop = Engine.get_main_loop()
+		if loop is SceneTree and loop.root != null:
+			joint_sys = loop.root.get_node_or_null("JointSystem")
+	if joint_sys != null:
+		for c in cells:
+			joint_sys.bond_all_adjacent_neighbors(c)
 
 ## Clears all blocks and active debris.
 func clear_world() -> void:

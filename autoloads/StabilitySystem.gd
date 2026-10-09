@@ -28,13 +28,21 @@ var _is_evaluating: bool = false
 
 ## Reference to GridSystem
 @export var grid_system: Node
+## Reference to JointSystem
+@export var joint_system: Node
+## Whether lateral / hanging support strictly requires cemented structural joints (M2.3)
+@export var require_joints_for_lateral_support: bool = false
 
 func _ready() -> void:
 	if grid_system == null and has_node("/root/GridSystem"):
 		grid_system = get_node("/root/GridSystem")
+	if joint_system == null and has_node("/root/JointSystem"):
+		joint_system = get_node("/root/JointSystem")
 
 	if grid_system != null:
 		_connect_grid_signals()
+	if joint_system != null:
+		_connect_joint_signals()
 
 func _connect_grid_signals() -> void:
 	if not grid_system.block_placed.is_connected(_on_block_placed):
@@ -44,17 +52,45 @@ func _connect_grid_signals() -> void:
 	if not grid_system.grid_cleared.is_connected(_on_grid_cleared):
 		grid_system.grid_cleared.connect(_on_grid_cleared)
 
+func _connect_joint_signals() -> void:
+	if not joint_system.joint_broken.is_connected(_on_joint_broken):
+		joint_system.joint_broken.connect(_on_joint_broken)
+	if not joint_system.joint_created.is_connected(_on_joint_created):
+		joint_system.joint_created.connect(_on_joint_created)
+
+func _on_joint_broken(_joint: Variant) -> void:
+	if not _is_evaluating:
+		call_deferred("recalculate_stability")
+
+func _on_joint_created(_joint: Variant) -> void:
+	if not _is_evaluating:
+		call_deferred("recalculate_stability")
+
 func _on_block_placed(cell: Vector3i, _data: BlockData) -> void:
 	# If placed cell directly connects to an anchor or an already supported block, mark supported immediately
 	if is_anchor_cell(cell):
 		_supported_cells[cell] = true
 	else:
-		var has_supported_neighbor: bool = false
-		for offset in NEIGHBORS_6:
-			if _supported_cells.has(cell + offset):
-				has_supported_neighbor = true
-				break
-		if has_supported_neighbor:
+		var has_support: bool = false
+		var check_joints: bool = (joint_system != null and require_joints_for_lateral_support)
+		if check_joints:
+			# Directly on top of an already supported block (vertical resting)
+			if _supported_cells.has(cell + Vector3i.DOWN):
+				has_support = true
+			else:
+				# Or connected via intact joint to any supported neighbor
+				for offset in NEIGHBORS_6:
+					var neighbor: Vector3i = cell + offset
+					if _supported_cells.has(neighbor) and joint_system.has_intact_joint(cell, neighbor):
+						has_support = true
+						break
+		else:
+			for offset in NEIGHBORS_6:
+				if _supported_cells.has(cell + offset):
+					has_support = true
+					break
+
+		if has_support:
 			_supported_cells[cell] = true
 		else:
 			# Placed in midair without immediate support - trigger evaluation
@@ -143,8 +179,9 @@ func evaluate_stability() -> Array[Vector3i]:
 			visited[cell] = true
 			queue.append(cell)
 
-	# 2. Propagate support via 6-connectivity graph search
+	# 2. Propagate support via graph search
 	var head: int = 0
+	var check_joints: bool = (joint_system != null and require_joints_for_lateral_support)
 	while head < queue.size():
 		var current: Vector3i = queue[head]
 		head += 1
@@ -152,8 +189,17 @@ func evaluate_stability() -> Array[Vector3i]:
 		for offset in NEIGHBORS_6:
 			var neighbor: Vector3i = current + offset
 			if not visited.has(neighbor) and grid.has_block(neighbor):
-				visited[neighbor] = true
-				queue.append(neighbor)
+				if check_joints:
+					# Vertical resting support: current is directly below neighbor
+					var is_resting_vertical: bool = (offset == Vector3i.UP)
+					# Or structural joint connects current and neighbor
+					var has_joint: bool = joint_system.has_intact_joint(current, neighbor)
+					if is_resting_vertical or has_joint:
+						visited[neighbor] = true
+						queue.append(neighbor)
+				else:
+					visited[neighbor] = true
+					queue.append(neighbor)
 
 	# 3. Identify all occupied cells that were NOT reached
 	var unsupported: Array[Vector3i] = []

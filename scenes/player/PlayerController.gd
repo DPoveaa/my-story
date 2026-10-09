@@ -14,6 +14,13 @@ enum State {
 signal state_changed(new_state: State)
 signal block_type_changed(type_id: StringName)
 signal carried_block_changed(is_carrying: bool, block_type: StringName)
+signal cement_changed(current_count: int, max_count: int)
+signal target_face_changed(has_target: bool, cell: Vector3i, face_dir: Vector3i, status_text: String)
+
+@export_group("Cement & Bonding")
+@export var cement_count: int = 25
+@export var max_cement: int = 100
+@export var unlimited_cement: bool = false # Explicit debug/test flag
 
 @export_group("First-Person Locomotion")
 @export var walk_speed: float = 6.0
@@ -74,6 +81,8 @@ var selected_type_index: int = 0
 var has_target: bool = false
 var target_place_cell: Vector3i = Vector3i.ZERO
 var target_remove_cell: Vector3i = Vector3i.ZERO
+var target_face_dir: Vector3i = Vector3i.ZERO
+var target_face_status: String = ""
 var can_place_target: bool = false
 
 # Debris targeting state
@@ -133,6 +142,23 @@ func _ready() -> void:
 
 	set_state(State.BODY_CONTROL)
 	block_type_changed.emit(get_selected_type())
+	cement_changed.emit(cement_count, max_cement)
+
+func get_cement_count() -> int:
+	return cement_count
+
+func add_cement(amount: int) -> void:
+	cement_count = clampi(cement_count + amount, 0, max_cement)
+	cement_changed.emit(cement_count, max_cement)
+
+func use_cement(amount: int = 1) -> bool:
+	if unlimited_cement:
+		return true
+	if cement_count >= amount:
+		cement_count -= amount
+		cement_changed.emit(cement_count, max_cement)
+		return true
+	return false
 
 func _on_grabbed_block(_island: DebrisIsland, _cell: Vector3i, data: BlockData) -> void:
 	var b_type: StringName = data.block_type if data != null else &""
@@ -270,6 +296,12 @@ func _unhandled_input(event: InputEvent) -> void:
 		elif event.is_action_pressed(&"recover_block") or event.keycode == KEY_R:
 			_handle_recover_action()
 			return
+		elif event.is_action_pressed(&"throw_debris") or event.keycode == KEY_F:
+			_handle_throw_action()
+			return
+		elif event.is_action_pressed(&"apply_cement") or event.keycode == KEY_G:
+			_handle_cement_action()
+			return
 		elif event.is_action_pressed(&"soul_projection") or event.keycode == KEY_V or event.keycode == KEY_P:
 			toggle_soul_projection()
 		elif event.is_action_pressed(&"select_slot_1") or event.keycode == KEY_1:
@@ -351,7 +383,7 @@ func _process_body_movement(delta: float) -> void:
 
 	move_and_slide()
 
-	# Push dynamic RigidBody3D (debris) upon physical contact
+	# Push dynamic RigidBody3D (debris) and unbonded grid blocks upon physical contact
 	for i in get_slide_collision_count():
 		var col := get_slide_collision(i)
 		var collider := col.get_collider()
@@ -361,6 +393,24 @@ func _process_body_movement(delta: float) -> void:
 			if push_dir.length_squared() > 0.001:
 				push_dir = push_dir.normalized()
 				collider.apply_central_impulse(push_dir * push_force * delta)
+		elif collider is StaticBody3D:
+			var shape_idx: int = col.get_collider_shape_index()
+			var owner_id: int = collider.shape_find_owner(shape_idx)
+			if owner_id >= 0:
+				var owner_shape = collider.shape_owner_get_owner(owner_id)
+				if owner_shape != null and owner_shape.has_meta("grid_cell"):
+					var hit_cell: Vector3i = owner_shape.get_meta("grid_cell")
+					var is_anchor: bool = (stability_system != null and stability_system.is_anchor_cell(hit_cell)) or (hit_cell.y <= 0)
+					var joint_sys: Node = null
+					if has_node("/root/JointSystem"):
+						joint_sys = get_node("/root/JointSystem")
+					if not is_anchor and joint_sys != null and not joint_sys.is_block_bonded(hit_cell):
+						if orchestrator != null and orchestrator.has_method("push_unbonded_block"):
+							var push_dir := -col.get_normal()
+							push_dir.y = 0.0
+							if push_dir.length_squared() > 0.001:
+								push_dir = push_dir.normalized()
+								orchestrator.call_deferred("push_unbonded_block", hit_cell, push_dir * 3.5)
 
 	# Step-up mechanic for voxel terrain: climb ledges up to step_up_height
 	if is_on_wall() and direction.length_squared() > 0.001:
@@ -482,6 +532,9 @@ func _update_raycast() -> void:
 		target_is_debris = false
 		target_debris_island = null
 		target_debris_cell = null
+		target_face_dir = Vector3i.ZERO
+		target_face_status = ""
+		target_face_changed.emit(false, Vector3i.ZERO, Vector3i.ZERO, "")
 		if preview_ghost != null and (debris_grabber == null or not debris_grabber.is_grabbing):
 			preview_ghost.hide_preview()
 		return
@@ -505,10 +558,12 @@ func _update_raycast() -> void:
 		if col_shape != null and col_shape.has_meta("grid_cell"):
 			var hit_cell: Vector3i = col_shape.get_meta("grid_cell")
 			target_remove_cell = hit_cell
-			target_place_cell = hit_cell + _normal_to_cell_offset(hit_normal)
+			target_face_dir = _normal_to_cell_offset(hit_normal)
+			target_place_cell = hit_cell + target_face_dir
 		else:
 			target_place_cell = grid.world_to_cell(hit_pos + hit_normal * (grid.cell_size * 0.5))
 			target_remove_cell = grid.world_to_cell(hit_pos - hit_normal * (grid.cell_size * 0.5))
+			target_face_dir = _normal_to_cell_offset(hit_normal)
 
 		var grid_valid: bool = grid.can_place_block(target_place_cell)
 		var blocked_by_debris: bool = false
@@ -517,6 +572,25 @@ func _update_raycast() -> void:
 		var overlaps_player: bool = is_cell_overlapping_player(target_place_cell, grid.cell_size)
 
 		can_place_target = grid_valid and not blocked_by_debris and not overlaps_player
+
+		var joint_sys: Node = null
+		if has_node("/root/JointSystem"):
+			joint_sys = get_node("/root/JointSystem")
+
+		if joint_sys != null and grid.has_block(target_remove_cell):
+			var adj_cell := target_remove_cell + target_face_dir
+			if joint_sys.has_intact_joint(target_remove_cell, adj_cell):
+				var j = joint_sys.get_joint(target_remove_cell, adj_cell)
+				target_face_status = "Bonded (%d/%d HP)" % [int(j.current_health), int(j.max_strength)]
+			elif joint_sys.is_face_cemented(target_remove_cell, target_face_dir):
+				target_face_status = "Cement Applied (Ready)"
+			elif grid.has_block(adj_cell):
+				target_face_status = "Unbonded Contact (G to Bond)"
+			else:
+				target_face_status = "Unbonded Face (G to Cement)"
+		else:
+			target_face_status = ""
+		target_face_changed.emit(true, target_remove_cell, target_face_dir, target_face_status)
 
 	elif hit_collider is DebrisIsland:
 		target_is_debris = true
@@ -627,3 +701,66 @@ func _handle_remove_action() -> void:
 			grid = get_node("/root/GridSystem")
 		if grid != null and grid.has_block(target_remove_cell):
 			grid.remove_block(target_remove_cell)
+
+func _handle_throw_action() -> void:
+	if debris_grabber == null:
+		return
+	if current_state != State.BODY_CONTROL:
+		return
+	if debris_grabber.is_grabbing:
+		debris_grabber.try_throw()
+
+func _handle_cement_action() -> void:
+	if not has_target or target_is_debris:
+		return
+
+	var grid := grid_system
+	if grid == null and has_node("/root/GridSystem"):
+		grid = get_node("/root/GridSystem")
+	if grid == null or not grid.has_block(target_remove_cell):
+		return
+
+	var joint_sys: Node = null
+	if has_node("/root/JointSystem"):
+		joint_sys = get_node("/root/JointSystem")
+	if joint_sys == null:
+		return
+
+	# Shift+G: Batch bond all adjacent touching neighbors
+	if Input.is_key_pressed(KEY_SHIFT):
+		if not unlimited_cement and cement_count <= 0:
+			target_face_status = "Insufficient Cement! (0 left)"
+			target_face_changed.emit(has_target, target_remove_cell, target_face_dir, target_face_status)
+			return
+
+		var bonded: Array = joint_sys.bond_all_adjacent_neighbors(target_remove_cell)
+		if not bonded.is_empty():
+			use_cement(bonded.size())
+			target_face_status = "Bonded %d neighbors! (Remaining: %d)" % [bonded.size(), cement_count]
+		else:
+			target_face_status = "No unbonded neighbors to bond"
+		target_face_changed.emit(has_target, target_remove_cell, target_face_dir, target_face_status)
+		return
+
+	# Single targeted face
+	if target_face_dir == Vector3i.ZERO:
+		return
+
+	var adj_cell := target_remove_cell + target_face_dir
+	if joint_sys.has_intact_joint(target_remove_cell, adj_cell):
+		target_face_status = "Face already bonded!"
+		target_face_changed.emit(has_target, target_remove_cell, target_face_dir, target_face_status)
+		return
+
+	if not unlimited_cement and cement_count <= 0:
+		target_face_status = "Insufficient Cement! (0 left)"
+		target_face_changed.emit(has_target, target_remove_cell, target_face_dir, target_face_status)
+		return
+
+	if use_cement(1):
+		var joint = joint_sys.apply_cement_to_face(target_remove_cell, target_face_dir)
+		if joint != null:
+			target_face_status = "Joint created & bonded! (Strength: %d)" % int(joint.max_strength)
+		else:
+			target_face_status = "Face cemented! Ready for bonding."
+		target_face_changed.emit(has_target, target_remove_cell, target_face_dir, target_face_status)
