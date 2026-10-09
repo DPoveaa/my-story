@@ -16,6 +16,7 @@ signal block_type_changed(type_id: StringName)
 signal carried_block_changed(is_carrying: bool, block_type: StringName)
 signal cement_changed(current_count: int, max_count: int)
 signal target_face_changed(has_target: bool, cell: Vector3i, face_dir: Vector3i, status_text: String)
+signal raw_materials_changed(materials: Dictionary)
 
 @export_group("Cement & Bonding")
 @export var cement_count: int = 25
@@ -90,6 +91,10 @@ var target_is_debris: bool = false
 var target_debris_island: DebrisIsland = null
 var target_debris_cell: Variant = null
 
+## Accumulated raw materials recovered from low-durability debris.
+## Dictionary[StringName, int] — block_type -> amount
+var raw_materials: Dictionary = {}
+
 func _ensure_nodes() -> void:
 	if collision_shape == null:
 		collision_shape = get_node_or_null("CollisionShape3D")
@@ -132,6 +137,8 @@ func _ready() -> void:
 			debris_grabber.released_block.connect(_on_released_block)
 		if not debris_grabber.recovered_block_to_grid.is_connected(_on_recovered_block):
 			debris_grabber.recovered_block_to_grid.connect(_on_recovered_block)
+		if not debris_grabber.recovered_as_raw_material.is_connected(_on_recovered_raw_material):
+			debris_grabber.recovered_as_raw_material.connect(_on_recovered_raw_material)
 
 	# Ensure projection camera is top_level so it flies independently of body transform
 	if projection_camera != null:
@@ -169,6 +176,12 @@ func _on_released_block() -> void:
 
 func _on_recovered_block(_cell: Vector3i, _b_type: StringName) -> void:
 	carried_block_changed.emit(false, &"")
+
+func _on_recovered_raw_material(block_type: StringName, amount: int) -> void:
+	var current: int = raw_materials.get(block_type, 0)
+	raw_materials[block_type] = current + amount
+	carried_block_changed.emit(false, &"")
+	raw_materials_changed.emit(raw_materials)
 
 func get_selected_type() -> StringName:
 	return available_types[selected_type_index]
@@ -660,9 +673,14 @@ func _handle_recover_action() -> void:
 		debris_grabber.try_recover()
 
 func _handle_place_action() -> void:
+	_ensure_nodes()
 	if debris_grabber != null and debris_grabber.is_grabbing:
-		if debris_grabber.try_recover():
-			return
+		# When holding debris, placement action exclusively attempts to place the held debris block.
+		# If the target position is invalid or the block is damaged (<= 50%), placement is safely
+		# rejected without consuming, converting, dropping, duplicating, or modifying the held block.
+		# Never fall through to placing fresh blocks from inventory while carrying debris.
+		debris_grabber.try_place_to_grid()
+		return
 
 	if not has_target:
 		return

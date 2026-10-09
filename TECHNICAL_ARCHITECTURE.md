@@ -413,11 +413,87 @@ explicitamente definidos ou alterados.
   - Suíte M2.1 (`tests/test_m2_1.gd`): 13/13 testes aprovados.
   - Suíte M2.2 (`tests/test_m2_2.gd`): 13/13 testes aprovados.
   - Suíte M2.3 (`tests/test_m2_3.gd`): 14/14 testes aprovados.
-  - **Total de testes automatizados: 77/77 aprovados com 0 falhas**.
   - Teste de Integração em Tempo Real (`tests/test_scene_runtime.gd`): executado com sucesso e saída 0.
 
-### 13.7 Limitações Restantes e Próximos Passos
-- Ajudantes (workers), projetos salvos (blueprints), sistema de durabilidade detalhada de materiais brutos, reciclagem com prensa, mineração e inventário geral permanecem em aberto para os marcos futuros (M3+).
+### 13.7 Milestone 3 — Visual de Argamassa por Face, Durabilidade de Blocos e Classificação de Recuperação de Destroços (Implementado e Validado)
+- **Renderizador de Sobreposição Visual de Argamassa (`systems/rendering/MortarOverlayRenderer.gd`):**
+  - Implementado como subclasse autônoma de `Node3D`, instanciado no `GameWorld` e conectado via sinais (`JointSystem.face_coated`, `GridSystem.block_removed`, `GridSystem.blocks_removed_batch`, `GridSystem.grid_cleared`).
+  - Totalmente orientado a eventos: não executa lógica por quadro (`_process` desativado), atualizando malhas estáticas apenas quando uma face é revestida ou removida.
+  - **Tratamento Visual Específico por Face:** Cria sobreposições de malha fina (`BoxMesh`) de 0.03m de espessura, com recuo lateral (fator 0.96) e deslocamento de 0.002m para fora do bloco, prevenindo *z-fighting* sem tingir o bloco por inteiro.
+  - **Material Compartilhado:** Utiliza uma única instância de `StandardMaterial3D` em tom arenoso-creme (`Color(0.84, 0.77, 0.61)` com rugosidade 0.95), eliminando desperdício e spam de materiais na GPU.
+  - Idempotência rigorosa: dicionário indexado pela tupla `[cell, face_dir]` impede duplicação visual de sobreposições em múltiplas aplicações do pincel.
+- **Degradação de Durabilidade de Blocos em Destroços (`systems/collapse/DebrisIsland.gd`):**
+  - O método `apply_impact_damage(hit_cell, impact_energy)` agora desgasta a durabilidade individual do bloco atingido (`_apply_block_durability_damage`):
+    - Se o destroço possui juntas internas, 8% da energia de impacto restante é absorvida pela durabilidade do bloco após o dano às juntas.
+    - Se o bloco está isolado (sem juntas internas), absorve dano de impacto diretamente com resistência proporcional a `BlockTypeCatalog.get_max_durability`.
+  - A durabilidade original (`BlockData.durability`) é integralmente preservada durante o colapso e empacotamento em corpos rígidos de destroços.
+- **Classificação de Recuperação de Destroços (`systems/interaction/DebrisGrabber.gd`):**
+  - O limiar de classificação é parametrizado pelo export `@export_range(0.0, 1.0) var recovery_durability_threshold: float = 0.5`.
+  - **Classificação Acima do Limiar (`ratio > 0.5`):**
+    - O bloco recolhido é classificado como bloco reutilizável.
+    - É removido atomicamente do destroço físico (`remove_block`) e reposicionado no grid estático com seu objeto `BlockData` completo, preservando durabilidade, tipo e metadados.
+    - Emite `recovered_block_to_grid(target_cell, block_type)`.
+  - **Classificação No ou Abaixo do Limiar (`ratio <= 0.5`):**
+    - O bloco recolhido é classificado como matéria-prima.
+    - É removido atomicamente do destroço físico (`remove_block`), NÃO é reposicionado no grid, e emite o sinal `recovered_as_raw_material(raw_type, 1)`.
+    - Impede duplicações de blocos no grid ou recompensas duplicadas de materiais em tentativas subsequentes sem carregar bloco.
+-   **Resolução Padrão de Janela 1920×1080 e Layout Responsivo (`project.godot` / `scenes/ui/BuildHUD.tscn`):**
+    - Configurado `window/size/viewport_width = 1920` e `window/size/viewport_height = 1080` com `window/size/resizable = true`.
+    - Modo janela preservado (sem impor tela cheia exclusiva forçada).
+    - Modo de esticamento mantido em `canvas_items` com aspecto `expand`, garantindo fidelidade geométrica da câmera 3D (FOV e proporções de mundo inalterados) e escalonamento limpo da interface.
+    - Mira central (`Crosshair`) ancorada no centro matemático da tela (`anchors_preset = 8`, `anchor_left = 0.5`, `anchor_top = 0.5`, `anchor_right = 0.5`, `anchor_bottom = 0.5`).
+    - Barra superior (`PanelTop`) ancorada na largura total (`anchor_right = 1.0`) com separação de 18px entre componentes, acomodando confortavelmente todos os status sem cortes.
+    - Painel de atalhos (`PanelControls`) ancorado no canto inferior esquerdo (`anchor_top = 1.0`, `anchor_bottom = 1.0`, `grow_vertical = 0`), garantindo usabilidade em qualquer redimensionamento de janela.
+-   **Correção de Posicionamento de Destroços em Regiões Inválidas (`DebrisGrabber.gd` / `PlayerController.gd`):**
+    - **Causa Raiz Identificada:** Anteriormente, o clique esquerdo (`_handle_place_action`) chamava diretamente `try_recover()`. Quando o destroço segurado possuía durabilidade $\le 50\%$ (por dano de impacto), `try_recover()` executava o ramo de matéria-prima sem validar a viabilidade do grid, convertendo o bloco imediatamente em `raw:stone` mesmo mirando em terreno inválido. Adicionalmente, quando `try_recover()` retornava `false`, a ação caía em *fallthrough*, posicionando um novo bloco a partir do inventário.
+    - **Desacoplamento de Ações:**
+      - Criado método dedicado `try_place_to_grid()` em `DebrisGrabber`:
+        - Requer célula válida (`_recover_preview_valid == true`). Se a região for inválida (fantasma vermelho, célula ocupada, obstruída por destroço ou sobreposta com o jogador), rejeita o posicionamento retornando `false`.
+        - Verifica a elegibilidade de durabilidade: apenas blocos acima do limiar (`dur_ratio > recovery_durability_threshold`) podem ser posicionados no grid como blocos reutilizáveis.
+        - Blocos danificados ($\le 50\%$) rejeitam posicionamento no grid sem qualquer modificação, consumo ou conversão.
+        - Em nenhuma circunstância o fluxo de posicionamento converte destroços em matéria-prima.
+        - O bloco físico segurado, sua durabilidade exata, objeto `BlockData`, metadados e estado segurado são 100% preservados.
+      - `_handle_place_action()` atualizado para chamar `try_place_to_grid()` e retornar imediatamente, eliminando qualquer possibilidade de *fallthrough* para colocação de blocos do inventário enquanto destroços estiverem sendo carregados.
+    - **Recuperação Explícita Preservada (`try_recover()` / tecla `R`):**
+      - A conversão de destroços para matéria-prima ocorre exclusivamente através da ação intencional de recuperação (`R`), nunca acidentalmente durante tentativas de posicionamento no grid.
+-   - **Visualização de Fantasma (`PreviewGhost`):** Atualizado para refletir tanto a validade espacial quanto a elegibilidade do bloco; blocos danificados apresentam prévia vermelha/inválida para posicionamento no grid, orientando o jogador a usar `R` para reciclagem.
+-   - **Limiar Configurável:** Parametrizado via `@export_range(0.0, 1.0) var recovery_durability_threshold: float = 0.5`, inspecionável via métodos utilitários `is_grabbed_block_reusable()` e `get_grabbed_durability_ratio()`.
+- **Validação e Testes Automatizados Executados:**
+  - Suíte M3 expandida (`tests/test_m3.gd`): **29/29 testes aprovados (10 novos testes adicionados)**:
+    - Sobreposição criada na face revestida (`test_overlay_created_on_coated_face`)
+    - Ausência de sobreposição nas 5 faces não revestidas (`test_overlay_absent_on_uncoated_faces`)
+    - Remoção de sobreposição na exclusão de bloco individual (`test_overlay_removed_on_block_removal`)
+    - Remoção de sobreposição na exclusão em lote de colapso (`test_overlay_removed_on_batch_removal`)
+    - Remoção de sobreposição na limpeza total do grid (`test_overlay_removed_on_grid_cleared`)
+    - Proteção contra sobreposições duplicadas (`test_no_duplicate_overlays`)
+    - Durabilidade afetada por `apply_damage` (`test_durability_via_apply_damage`)
+    - Recuperação acima do limiar posiciona bloco no grid (`test_recovery_above_threshold`)
+    - Recuperação exatamente no limiar (0.5) concede matéria-prima (`test_recovery_at_threshold`)
+    - Recuperação abaixo do limiar (0.2) concede matéria-prima (`test_recovery_below_threshold`)
+    - Durabilidade preservada no reposicionamento no grid (`test_durability_preserved_on_grid_place`)
+    - Garantia de não-duplicação de blocos recuperados (`test_no_duplicate_blocks_on_recovery`)
+    - Garantia de não-duplicação de matéria-prima (`test_no_duplicate_raw_material_rewards`)
+    - Redução de durabilidade do bloco em impacto de destroço (`test_debris_durability_from_impact`)
+    - Preservação de condição/durabilidade ao entrar em destroço (`test_condition_preserved_in_debris`)
+    - Regressão: consumo do pincel de argamassa e juntas (`test_regression_brush_consumption`)
+    - Regressão: colapso sem blocos duplicados (`test_regression_collapse_no_duplicates`)
+    - Regressão: sinais de captura e liberação de destroços (`test_regression_grab_release_signals`)
+    - Regressão: projeção espiritual e sinal de materiais (`test_regression_soul_projection_signal`)
+    - **Novo (M3+):** Rejeição de posicionamento inválido preserva destroço segurado >50% (`test_invalid_placement_rejects_and_preserves_held_debris_above_threshold`)
+    - **Novo (M3+):** Rejeição de posicionamento inválido preserva destroço segurado <=50% sem converter em matéria-prima (`test_invalid_placement_rejects_and_preserves_held_debris_below_threshold`)
+    - **Novo (M3+):** Fluxo de posicionamento nunca converte destroço danificado para matéria-prima (`test_placement_never_converts_low_durability_debris_to_raw_material`)
+    - **Novo (M3+):** Posicionamento válido posiciona destroço reutilizável preservando durabilidade (`test_valid_placement_places_reusable_debris_and_preserves_durability`)
+    - **Novo (M3+):** Ação explícita de recuperação converte destroço danificado em matéria-prima (`test_explicit_recovery_action_converts_low_durability_debris`)
+    - **Novo (M3+):** Ação explícita de recuperação falha com segurança em célula inválida para bloco reutilizável (`test_explicit_recovery_action_fails_on_invalid_cell_for_reusable_debris`)
+    - **Novo (M3+):** Ação de posicionamento do jogador com destroço segurado impede fallthrough (`test_player_controller_place_action_with_held_debris_prevents_fallthrough`)
+    - **Novo (M3+):** Limiar de durabilidade de recuperação configurável (`test_configurable_recovery_durability_threshold`)
+    - **Novo (M3+):** Resolução padrão 1920x1080 e janela redimensionável nas configurações do projeto (`test_default_resolution_1920x1080_project_settings`)
+    - **Novo (M3+):** Ancoragem e centralização do layout do HUD para 1920x1080 (`test_hud_layout_anchors_and_centering`)
+  - **Total geral de testes automatizados: 106/106 aprovados com 0 falhas** (8 Pincel de Argamassa, 11 M1, 11 M1.1, 7 M2, 13 M2.1, 13 M2.2, 14 M2.3, 29 M3).
+  - Teste de Integração em Tempo Real (`tests/test_scene_runtime.gd`): aprovado com sucesso.
+
+### 13.8 Limitações Restantes e Próximos Passos
+- Prensagem/fabricação de novos blocos a partir de matéria-prima acumulada (`raw_materials`), ferramentas de raspagem/remoção manual de argamassa, ajudantes automatizados (workers), mineração e persistência de projetos salvos (blueprints) permanecem como etapas para os próximos marcos.
 
 
 

@@ -340,6 +340,7 @@ func _split_without_orchestrator(groups: Array) -> Array:
 ## Applies impact energy to the internal structural joints connected to a constituent cell.
 ## Breaks joints if impact energy or accumulated damage exceeds strength limits.
 ## Splits the island if broken joints disconnect constituent blocks.
+## Also reduces the hit block's own durability, so condition is tracked through debris phase.
 func apply_impact_damage(hit_cell: Vector3i, impact_energy: float) -> Array:
 	var broken: Array = []
 	if impact_energy < 8.0:
@@ -351,6 +352,8 @@ func apply_impact_damage(hit_cell: Vector3i, impact_energy: float) -> Array:
 			relevant_joints.append(j)
 
 	if relevant_joints.is_empty():
+		# No internal joints — still damage block durability from direct impact.
+		_apply_block_durability_damage(hit_cell, impact_energy)
 		return broken
 
 	var energy_per_joint: float = impact_energy / float(relevant_joints.size())
@@ -365,10 +368,25 @@ func apply_impact_damage(hit_cell: Vector3i, impact_energy: float) -> Array:
 			if j.apply_damage(dmg):
 				broken.append(j)
 
+	# Reduce block durability: 8% of energy absorbed by the block material itself.
+	# Scaled by material resistance so durable blocks degrade more slowly.
+	_apply_block_durability_damage(hit_cell, impact_energy * 0.08)
+
 	if not broken.is_empty():
 		call_deferred("check_and_split_on_broken_joints")
 
 	return broken
+
+## Reduces the durability of a constituent block from impact energy.
+## Clamped so durability never goes below 0.0.
+func _apply_block_durability_damage(cell: Vector3i, energy: float) -> void:
+	if not constituent_blocks.has(cell):
+		return
+	var block: BlockData = constituent_blocks[cell]
+	var dur_resistance: float = maxf(0.1, BlockTypeCatalog.get_max_durability(block.block_type))
+	# Normalise: 1 unit of energy removes (1 / dur_resistance) * scale durability.
+	var dmg: float = energy / (dur_resistance * 10.0)
+	block.durability = maxf(0.0, block.durability - dmg)
 
 ## Evaluates connectivity among remaining blocks based strictly on intact internal joints.
 ## If broken joints disconnect the blocks, splits into independent compound bodies.

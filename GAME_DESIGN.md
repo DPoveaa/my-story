@@ -121,20 +121,17 @@ quando o terreno ou o acesso mudar.
 
 ## 5. Durabilidade e recuperação de destroços
 
-Os blocos possuem durabilidade/condição, que determina como seus
+Os blocos possuem durabilidade/condição (`BlockData.durability`), que determina como seus
 destroços podem ser reaproveitados.
 
-Regra inicial proposta: - **Mais de 50% de durabilidade:** o bloco
-recuperado pode voltar a ser um bloco de construção utilizável, caso
-seja possível recolhê-lo e transportá-lo. - **50% ou menos:** o destroço
-é convertido em matéria-prima recuperável para fabricar novos blocos. -
-O limite exato, a perda de material e a possibilidade de reparar blocos
-parcialmente danificados poderão ser balanceados durante os testes.
+**Regra implementada no Milestone 3:**
+- **Mais de 50% de durabilidade (`durability / max_durability > 0.5`):** o bloco recuperado (via ação `R` / `recover_block`) volta a ser um bloco de construção utilizável no grid estático, preservando sua durabilidade atual e tipo de material.
+- **50% ou menos (`durability / max_durability <= 0.5`):** o destroço é classificado e recuperado como matéria-prima (`raw_materials`), removido atomicamente do destroço físico e contabilizado no inventário de materiais brutos do jogador (exibido dinamicamente no HUD).
+- O limiar de classificação é configurável via propriedade exportada (`recovery_durability_threshold = 0.5`).
+- **Visual de Argamassa:** superfícies revestidas com o pincel de argamassa exibem uma fina camada sobreposta específica por face (`MortarOverlayRenderer`), com cor arenosa distinta, espessura mínima (0.03m), recuo sutil (0.96) e offset para evitar z-fighting, indicando com clareza quais faces foram pintadas sem tingir o bloco inteiro.
+- **Escopo Futuro:** prensagem/fabricação de novos blocos a partir de matéria-prima bruta, reciclagem com perda de massa e reparo de blocos antes do colapso permanecem como etapas para marcos futuros.
 
-Os destroços devem continuar existindo como objetos ou materiais do
-mundo tempo suficiente para que o jogador e os ajudantes possam
-recolhê-los. Não devem desaparecer apenas porque uma estrutura
-desmoronou.
+Os destroços continuam existindo como corpos rígidos físicos (`DebrisIsland`) no mundo tempo suficiente para que o jogador possa recolhê-los ou arremessá-los. Não desaparecem apenas porque uma estrutura desmoronou.
 
 ## 6. Mineração e fabricação de blocos
 
@@ -213,8 +210,12 @@ destruição.
 -   Construir e remover blocos é intuitivo.
 -   Uma construção estável não desmorona sem motivo.
 -   Remover uma sustentação produz um desmoronamento coerente.
--   Os destroços podem ser recuperados e convertidos em materiais
-    conforme sua condição.
+-   Os destroços podem ser manipulados, arremessados e recuperados:
+    - Destroços com durabilidade acima de 50% são elegíveis como blocos reutilizáveis para construção direta no grid.
+    - Destroços com durabilidade igual ou inferior a 50% são classificados como matéria-prima.
+    - Tentativas de posicionamento de destroços em regiões inválidas (vermelhas/bloqueadas) rejeitam o posicionamento sem consumir, converter, dropar ou modificar o bloco segurado.
+    - Conversão para matéria-prima ocorre exclusivamente através de ação explícita de recuperação (`R`), impedindo conversão acidental durante posicionamento inválido.
+-   Resolução padrão de exibição em 1920×1080 (modo janela redimensionável) com interface responsiva ancorada.
 -   O núcleo controla corretamente a disponibilidade da reconstrução
     automática.
 -   Os ajudantes conseguem reconstruir projetos salvos com materiais

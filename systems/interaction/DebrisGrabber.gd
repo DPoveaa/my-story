@@ -13,6 +13,7 @@ signal grabbed_block(island: DebrisIsland, cell: Vector3i, block_data: BlockData
 signal released_block()
 signal thrown_block(island: DebrisIsland, impulse: Vector3)
 signal recovered_block_to_grid(cell: Vector3i, block_type: StringName)
+signal recovered_as_raw_material(block_type: StringName, amount: int)
 signal recover_failed(reason: String)
 
 @export_group("Carry Settings")
@@ -36,6 +37,10 @@ signal recover_failed(reason: String)
 @export var preview_ghost: PreviewGhost
 @export var grid_system: Node
 @export var orchestrator: CollapseOrchestrator
+## Durability fraction threshold for recovery classification.
+## Above this value: block is recovered as a reusable construction block.
+## At or below this value: block is recovered as raw material.
+@export_range(0.0, 1.0) var recovery_durability_threshold: float = 0.5
 
 var _grabbed_island: DebrisIsland = null
 var _grabbed_cell: Vector3i = Vector3i.ZERO
@@ -153,7 +158,63 @@ func release(throw_impulse: Vector3 = Vector3.ZERO) -> void:
 		preview_ghost.hide_preview()
 	released_block.emit()
 
-## Snaps the carried block back onto the static grid at the previewed cell.
+	## Attempts to place the held debris block onto the static grid.
+	## Only eligible reusable blocks (durability > recovery_durability_threshold) can be placed.
+	## If the target position is invalid, rejects placement without consuming, converting,
+	## dropping, duplicating, or modifying the held debris in any way.
+	## Under no circumstances does this placement path convert debris into raw materials.
+func try_place_to_grid() -> bool:
+	if not is_grabbing or not is_instance_valid(_grabbed_island):
+		return false
+	if _grabbed_data == null:
+		return false
+	var grid := _get_grid()
+	if grid == null:
+		return false
+
+	# Must target a valid grid cell
+	if not _recover_preview_valid:
+		return false
+
+	var target_cell := _recover_preview_cell
+	if not grid.can_place_block(target_cell):
+		return false
+	if orchestrator != null and orchestrator.is_cell_blocked_by_debris(target_cell, grid.cell_size):
+		return false
+	if _player != null and _player.has_method("is_cell_overlapping_player"):
+		if _player.is_cell_overlapping_player(target_cell, grid.cell_size):
+			return false
+
+	# Must be classified as a reusable block (durability > threshold)
+	var max_dur: float = BlockTypeCatalog.get_max_durability(_grabbed_data.block_type)
+	var dur_ratio: float = _grabbed_data.durability / max_dur if max_dur > 0.0 else 0.0
+	if dur_ratio <= recovery_durability_threshold:
+		# Damaged block cannot be placed directly as a block on the grid.
+		# Rejects placement without modifying, converting, or consuming the held debris.
+		return false
+
+	# Atomically remove block from debris island (prevents duplicates)
+	var removed_data: BlockData = _grabbed_island.remove_block(_grabbed_cell)
+	if removed_data == null:
+		is_grabbing = false
+		_grabbed_island = null
+		return false
+
+	# Re-place on grid preserving full BlockData (durability, type, metadata)
+	grid.place_block(target_cell, removed_data)
+	var placed_type := removed_data.block_type
+	_grabbed_island = null
+	_grabbed_cell = Vector3i.ZERO
+	_grabbed_data = null
+	is_grabbing = false
+	if preview_ghost != null:
+		preview_ghost.hide_preview()
+	recovered_block_to_grid.emit(target_cell, placed_type)
+	return true
+
+	## Snaps the carried block back onto the static grid if reusable, or converts it into
+	## raw materials if damaged (<= recovery_durability_threshold).
+	## Explicit recovery action (typically triggered by key R).
 func try_recover() -> bool:
 	if not is_grabbing or not is_instance_valid(_grabbed_island):
 		recover_failed.emit("No block is held")
@@ -165,39 +226,67 @@ func try_recover() -> bool:
 	if grid == null:
 		recover_failed.emit("GridSystem unavailable")
 		return false
-	if not _recover_preview_valid:
-		recover_failed.emit("No valid grid cell targeted")
-		return false
 
-	var target_cell := _recover_preview_cell
-	if not grid.can_place_block(target_cell):
-		recover_failed.emit("Cell occupied")
-		return false
-	if orchestrator != null and orchestrator.is_cell_blocked_by_debris(target_cell, grid.cell_size):
-		recover_failed.emit("Cell blocked by debris")
-		return false
-	if _player != null and _player.has_method("is_cell_overlapping_player"):
-		if _player.is_cell_overlapping_player(target_cell, grid.cell_size):
-			recover_failed.emit("Cell overlaps player")
+	# ---- Classify by durability BEFORE removing the block from the island ----
+	var max_dur: float = BlockTypeCatalog.get_max_durability(_grabbed_data.block_type)
+	var dur_ratio: float = _grabbed_data.durability / max_dur if max_dur > 0.0 else 0.0
+	var is_raw_material: bool = dur_ratio <= recovery_durability_threshold
+
+	if not is_raw_material:
+		# Validate grid placement before removing block from island
+		if not _recover_preview_valid:
+			recover_failed.emit("No valid grid cell targeted")
+			return false
+		var target_cell := _recover_preview_cell
+		if not grid.can_place_block(target_cell):
+			recover_failed.emit("Cell occupied")
+			return false
+		if orchestrator != null and orchestrator.is_cell_blocked_by_debris(target_cell, grid.cell_size):
+			recover_failed.emit("Cell blocked by debris")
+			return false
+		if _player != null and _player.has_method("is_cell_overlapping_player"):
+			if _player.is_cell_overlapping_player(target_cell, grid.cell_size):
+				recover_failed.emit("Cell overlaps player")
+				return false
+
+		# Remove block from island (authoritative — prevents duplicates)
+		var removed_data: BlockData = _grabbed_island.remove_block(_grabbed_cell)
+		if removed_data == null:
+			recover_failed.emit("Block no longer in debris island")
+			is_grabbing = false
+			_grabbed_island = null
 			return false
 
-	var removed_data: BlockData = _grabbed_island.remove_block(_grabbed_cell)
-	if removed_data == null:
-		recover_failed.emit("Block no longer in debris island")
-		is_grabbing = false
+		# Re-place on grid preserving full BlockData (keeps durability, type, metadata)
+		grid.place_block(target_cell, removed_data)
+		var recovered_type := removed_data.block_type
 		_grabbed_island = null
-		return false
+		_grabbed_cell = Vector3i.ZERO
+		_grabbed_data = null
+		is_grabbing = false
+		if preview_ghost != null:
+			preview_ghost.hide_preview()
+		recovered_block_to_grid.emit(target_cell, recovered_type)
+		return true
 
-	grid.place_block(target_cell, removed_data.block_type)
-	var recovered_type := removed_data.block_type
-	_grabbed_island = null
-	_grabbed_cell = Vector3i.ZERO
-	_grabbed_data = null
-	is_grabbing = false
-	if preview_ghost != null:
-		preview_ghost.hide_preview()
-	recovered_block_to_grid.emit(target_cell, recovered_type)
-	return true
+	else:
+		# At or below threshold — explicit recovery converts to raw material; do NOT place on grid.
+		var removed_data: BlockData = _grabbed_island.remove_block(_grabbed_cell)
+		if removed_data == null:
+			recover_failed.emit("Block no longer in debris island")
+			is_grabbing = false
+			_grabbed_island = null
+			return false
+
+		var raw_type := removed_data.block_type
+		_grabbed_island = null
+		_grabbed_cell = Vector3i.ZERO
+		_grabbed_data = null
+		is_grabbing = false
+		if preview_ghost != null:
+			preview_ghost.hide_preview()
+		recovered_as_raw_material.emit(raw_type, 1)
+		return true
 
 ## Throws the carried block forward from the active camera direction.
 ## Applies a clamped forward impulse + subtle loft + randomised spin.
@@ -285,9 +374,15 @@ func _update_recovery_preview(cam: Camera3D) -> void:
 	if is_valid and _player != null and _player.has_method("is_cell_overlapping_player"):
 		is_valid = not _player.is_cell_overlapping_player(target, grid.cell_size)
 
+	var is_reusable: bool = true
+	if _grabbed_data != null:
+		var max_dur: float = BlockTypeCatalog.get_max_durability(_grabbed_data.block_type)
+		var dur_ratio: float = _grabbed_data.durability / max_dur if max_dur > 0.0 else 0.0
+		is_reusable = dur_ratio > recovery_durability_threshold
+
 	_recover_preview_cell = target
-	_recover_preview_valid = is_valid
-	preview_ghost.update_preview(target, is_valid, grid.cell_size)
+	_recover_preview_valid = is_valid and is_reusable
+	preview_ghost.update_preview(target, _recover_preview_valid, grid.cell_size)
 
 func _get_active_camera() -> Camera3D:
 	if _player != null and _player.has_method("get_active_camera"):
@@ -317,3 +412,16 @@ func get_grabbed_block_data() -> BlockData:
 
 func get_grabbed_cell() -> Vector3i:
 	return _grabbed_cell
+
+func is_grabbed_block_reusable() -> bool:
+	if not is_grabbing or _grabbed_data == null:
+		return false
+	var max_dur: float = BlockTypeCatalog.get_max_durability(_grabbed_data.block_type)
+	var ratio: float = _grabbed_data.durability / max_dur if max_dur > 0.0 else 0.0
+	return ratio > recovery_durability_threshold
+
+func get_grabbed_durability_ratio() -> float:
+	if not is_grabbing or _grabbed_data == null:
+		return 0.0
+	var max_dur: float = BlockTypeCatalog.get_max_durability(_grabbed_data.block_type)
+	return _grabbed_data.durability / max_dur if max_dur > 0.0 else 0.0

@@ -17,9 +17,22 @@ extends CanvasLayer
 var grid_system: Node
 var orchestrator: CollapseOrchestrator
 
+## Dynamically created label for raw material counts (no .tscn edit required).
+var _raw_mats_label: Label = null
+
 func _ready() -> void:
 	if grid_system == null and has_node("/root/GridSystem"):
 		grid_system = get_node("/root/GridSystem")
+	# Create raw materials label dynamically so no .tscn modification is needed.
+	_raw_mats_label = Label.new()
+	_raw_mats_label.name = "RawMatsLabel"
+	_raw_mats_label.text = ""
+	_raw_mats_label.visible = false
+	_raw_mats_label.add_theme_font_size_override("font_size", 14)
+	_raw_mats_label.add_theme_color_override("font_color", Color(0.95, 0.80, 0.40))
+	var hbox := get_node_or_null("PanelTop/HBox")
+	if hbox != null:
+		hbox.add_child(_raw_mats_label)
 
 func set_cement(current: int, max_val: int) -> void:
 	if cement_label == null:
@@ -68,7 +81,7 @@ func set_carried_block(is_carrying: bool, block_type: StringName) -> void:
 	if prompt_label != null:
 		if is_carrying:
 			var mat_name := BlockTypeCatalog.get_display_name(block_type)
-			prompt_label.text = "[HOLDING %s] E: Drop  |  F: Throw  |  R / LMB: Recover to Grid" % mat_name.to_upper()
+			prompt_label.text = "[HOLDING %s] E: Drop  |  F: Throw  |  LMB: Place  |  R: Recover" % mat_name.to_upper()
 			prompt_label.visible = true
 		else:
 			prompt_label.visible = false
@@ -79,3 +92,22 @@ func _process(_delta: float) -> void:
 
 	if orchestrator != null and debris_count_label != null:
 		debris_count_label.text = "Active Debris: %d" % orchestrator.get_active_debris_count()
+
+## Updates the raw materials HUD label.
+## Called via signal raw_materials_changed(materials: Dictionary).
+func set_raw_materials(materials: Dictionary) -> void:
+	if _raw_mats_label == null:
+		return
+	if materials.is_empty():
+		_raw_mats_label.visible = false
+		return
+	var parts: Array = []
+	for mat_type in materials.keys():
+		var count: int = materials[mat_type]
+		if count > 0:
+			parts.append("%s x%d" % [BlockTypeCatalog.get_display_name(mat_type), count])
+	if parts.is_empty():
+		_raw_mats_label.visible = false
+		return
+	_raw_mats_label.text = "Raw: " + ", ".join(parts)
+	_raw_mats_label.visible = true

@@ -1,11 +1,13 @@
 class_name GameWorld
 extends Node3D
 
-## Main test world scene for Milestone 1 / Milestone 2.
+## Main test world scene for Milestone 1 / Milestone 2 / Milestone 3.
 ## Demonstrates grid-based block building, support calculations, presets, physics collapse,
-## physical first-person character, and Soul Projection.
+## physical first-person character, Soul Projection, mortar face visuals, and
+## block durability recovery classification.
 
 const PlayerControllerScript = preload("res://scenes/player/PlayerController.gd")
+const MortarOverlayRendererScript = preload("res://systems/rendering/MortarOverlayRenderer.gd")
 
 @onready var grid_renderer: GridRenderer = $GridRenderer
 @onready var preview_ghost: PreviewGhost = $PreviewGhost
@@ -18,12 +20,19 @@ const PlayerControllerScript = preload("res://scenes/player/PlayerController.gd"
 var grid_system: Node
 var stability_system: Node
 var _debug_camera_active: bool = false
+var _mortar_overlay_renderer: Node3D = null
 
 func _ready() -> void:
 	if grid_system == null and has_node("/root/GridSystem"):
 		grid_system = get_node("/root/GridSystem")
 	if stability_system == null and has_node("/root/StabilitySystem"):
 		stability_system = get_node("/root/StabilitySystem")
+
+	# Spawn mortar overlay renderer as a child so face visuals work in-game.
+	_mortar_overlay_renderer = MortarOverlayRendererScript.new()
+	_mortar_overlay_renderer.name = "MortarOverlayRenderer"
+	_mortar_overlay_renderer.grid_system = grid_system
+	add_child(_mortar_overlay_renderer)
 
 	if stability_system != null:
 		stability_system.require_joints_for_lateral_support = true
@@ -47,6 +56,8 @@ func _ready() -> void:
 			player.cement_changed.connect(build_hud.set_cement)
 		if player.has_signal("target_face_changed"):
 			player.target_face_changed.connect(build_hud.set_target_face_info)
+		if player.has_signal("raw_materials_changed"):
+			player.raw_materials_changed.connect(build_hud.set_raw_materials)
 		build_hud.set_selected_block_type(player.get_selected_type())
 		build_hud.set_player_state(player.current_state)
 		build_hud.set_cement(player.get_cement_count(), player.max_cement)

@@ -7,6 +7,7 @@ const TestM2_1Script = preload("res://tests/test_m2_1.gd")
 const TestM2_2Script = preload("res://tests/test_m2_2.gd")
 const TestM2_3Script = preload("res://tests/test_m2_3.gd")
 const TestMortarBrushScript = preload("res://tests/test_mortar_brush.gd")
+const TestM3Script = preload("res://tests/test_m3.gd")
 
 func _init() -> void:
 	print("Initializing test runner...")
@@ -31,9 +32,12 @@ func _init() -> void:
 	var suite6 = TestM2_3Script.new()
 	var success6: bool = suite6.run_all()
 
-	if success_brush and success1 and success2 and success3 and success4 and success5 and success6:
+	var suite7 = TestM3Script.new()
+	var success7: bool = suite7.run_all()
+
+	if success_brush and success1 and success2 and success3 and success4 and success5 and success6 and success7:
 		print("==================================================")
-		print("ALL MORTAR BRUSH, MILESTONE 1, 1.1, 2, 2.1, 2.2 AND 2.3 TESTS PASSED SUCCESSFULLY!")
+		print("ALL MORTAR BRUSH, MILESTONE 1, 1.1, 2, 2.1, 2.2, 2.3 AND M3 TESTS PASSED SUCCESSFULLY!")
 		print("==================================================")
 		quit(0)
 	else:
