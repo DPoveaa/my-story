@@ -14,6 +14,10 @@ extends CanvasLayer
 @onready var cement_label: Label = get_node_or_null("PanelTop/HBox/CementLabel")
 @onready var target_info_label: Label = get_node_or_null("PanelTop/HBox/TargetInfoLabel")
 
+const BlueprintVisualizerScript = preload("res://systems/rendering/BlueprintVisualizer.gd")
+
+var _visualizer: BlueprintVisualizer = null
+
 var grid_system: Node
 var orchestrator: CollapseOrchestrator
 var player: CharacterBody3D = null
@@ -59,6 +63,10 @@ func _ready() -> void:
 	var hbox := get_node_or_null("PanelTop/HBox")
 	if hbox != null:
 		hbox.add_child(_raw_mats_label)
+
+	_visualizer = BlueprintVisualizerScript.new()
+	_visualizer.name = "BlueprintVisualizer"
+	add_child(_visualizer)
 
 	if _save_modal == null:
 		_create_blueprint_dialogs()
@@ -160,15 +168,17 @@ func close_all_modals() -> void:
 	_has_area_selected = false
 	_save_min_cell = Vector3i.ZERO
 	_save_max_cell = Vector3i.ZERO
+	if _visualizer != null:
+		_visualizer.clear_visuals()
 	if player != null and player.has_method("set_mouse_capture"):
 		player.set_mouse_capture(true)
 
 ## Opens the Save Blueprint dialog for a bounded area.
 func open_save_blueprint_dialog_bounded(min_cell: Vector3i, max_cell: Vector3i) -> void:
+	open_save_blueprint_dialog()
 	_save_min_cell = min_cell
 	_save_max_cell = max_cell
 	_has_area_selected = true
-	open_save_blueprint_dialog()
 	_save_info_label.text = "Bounded Area: (%d,%d,%d) to (%d,%d,%d)" % [
 		min_cell.x, min_cell.y, min_cell.z, max_cell.x, max_cell.y, max_cell.z
 	]
@@ -363,6 +373,7 @@ func _create_load_modal() -> void:
 	_anchor_x.min_value = -999
 	_anchor_x.max_value = 999
 	_anchor_x.step = 1
+	_anchor_x.value_changed.connect(func(_val: float) -> void: _on_anchor_changed())
 	anchor_hbox.add_child(_anchor_x)
 
 	var ly := Label.new()
@@ -372,6 +383,7 @@ func _create_load_modal() -> void:
 	_anchor_y.min_value = -999
 	_anchor_y.max_value = 999
 	_anchor_y.step = 1
+	_anchor_y.value_changed.connect(func(_val: float) -> void: _on_anchor_changed())
 	anchor_hbox.add_child(_anchor_y)
 
 	var lz := Label.new()
@@ -381,6 +393,7 @@ func _create_load_modal() -> void:
 	_anchor_z.min_value = -999
 	_anchor_z.max_value = 999
 	_anchor_z.step = 1
+	_anchor_z.value_changed.connect(func(_val: float) -> void: _on_anchor_changed())
 	anchor_hbox.add_child(_anchor_z)
 
 	var btn_aim := Button.new()
@@ -416,6 +429,13 @@ func _create_load_modal() -> void:
 	_load_inspect_btn.custom_minimum_size = Vector2(110, 32)
 	_load_inspect_btn.pressed.connect(_on_inspect_plan_pressed)
 	btns_hbox.add_child(_load_inspect_btn)
+
+	var update_area_btn := Button.new()
+	update_area_btn.text = "Update Area"
+	update_area_btn.tooltip_text = "Explicitly update the saved blueprint layout from current live world blocks inside its area."
+	update_area_btn.custom_minimum_size = Vector2(110, 32)
+	update_area_btn.pressed.connect(_on_update_area_pressed)
+	btns_hbox.add_child(update_area_btn)
 
 	_load_delete_btn = Button.new()
 	_load_delete_btn.text = "Delete"
@@ -525,6 +545,36 @@ func _on_inspect_plan_pressed() -> void:
 		_load_feedback_label.add_theme_color_override("font_color", Color(0.4, 0.85, 1.0))
 	else:
 		_load_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.7, 0.2))
+
+	if _visualizer != null:
+		_visualizer.render_plan(plan, grid_system.cell_size if grid_system != null else 1.0)
+
+func _on_anchor_changed() -> void:
+	var selected_items: PackedInt32Array = _load_item_list.get_selected_items()
+	if selected_items.is_empty():
+		return
+	_on_blueprint_item_selected(selected_items[0])
+
+func _on_update_area_pressed() -> void:
+	var selected_items: PackedInt32Array = _load_item_list.get_selected_items()
+	if selected_items.is_empty():
+		_load_feedback_label.text = "Select a blueprint to update."
+		_load_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
+		return
+
+	var bp_name: String = _load_item_list.get_item_text(selected_items[0])
+	var bp_mgr := _get_blueprint_manager()
+	if bp_mgr == null:
+		return
+
+	var ok: bool = bp_mgr.update_registered_blueprint_from_world(bp_name)
+	if ok:
+		_load_feedback_label.text = "✓ Blueprint '%s' updated from current area!" % bp_name
+		_load_feedback_label.add_theme_color_override("font_color", Color(0.3, 1.0, 0.4))
+		_on_blueprint_item_selected(selected_items[0])
+	else:
+		_load_feedback_label.text = "Failed to update blueprint '%s'." % bp_name
+		_load_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
 
 func _on_use_aim_pressed() -> void:
 	if player != null and player.has_target:

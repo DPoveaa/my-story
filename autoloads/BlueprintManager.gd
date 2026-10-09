@@ -29,6 +29,15 @@ func _ready() -> void:
 	if stability_system == null and has_node("/root/StabilitySystem"):
 		stability_system = get_node("/root/StabilitySystem")
 	_ensure_storage_dir()
+	load_all_registered_blueprints()
+
+## Restores all saved blueprint files from storage_dir into active_registered_blueprints.
+func load_all_registered_blueprints() -> void:
+	var names := list_blueprints()
+	for n in names:
+		var bp := load_blueprint(n)
+		if bp != null:
+			active_registered_blueprints[n] = bp
 
 func _ensure_storage_dir() -> bool:
 	if not DirAccess.dir_exists_absolute(storage_dir):
@@ -408,6 +417,29 @@ func update_or_replace_blueprint(blueprint_name: String, cells: Array[Vector3i] 
 	if bp == null:
 		return false
 	return save_blueprint(bp, true)
+
+## Explicitly updates a registered blueprint from the current live world cells inside its bounded area.
+func update_registered_blueprint_from_world(blueprint_name: String, custom_min: Variant = null, custom_max: Variant = null) -> bool:
+	var min_c := Vector3i.ZERO
+	var max_c := Vector3i.ZERO
+
+	if custom_min is Vector3i and custom_max is Vector3i:
+		min_c = custom_min
+		max_c = custom_max
+	elif active_registered_blueprints.has(blueprint_name):
+		var existing: BlueprintData = active_registered_blueprints[blueprint_name]
+		min_c = existing.anchor_cell + existing.bounds_min
+		max_c = existing.anchor_cell + existing.bounds_max
+	else:
+		push_warning("BlueprintManager: Cannot update unregistered blueprint '%s' without explicit bounds" % blueprint_name)
+		return false
+
+	var updated_bp := capture_blueprint_area(blueprint_name, min_c, max_c)
+	if updated_bp == null:
+		push_warning("BlueprintManager: No blocks found in bounded area for '%s'" % blueprint_name)
+		return false
+
+	return save_blueprint(updated_bp, true)
 
 ## Generates a ReconstructionPlanner comparison between a blueprint and current world state.
 func plan_reconstruction(blueprint: BlueprintData, anchor_cell: Vector3i, player: Node = null) -> RefCounted:

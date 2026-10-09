@@ -83,7 +83,8 @@ static func generate_plan(blueprint: BlueprintData, anchor_cell: Vector3i, grid_
 		var world_cell := anchor_cell + rel
 		var exp_type := StringName(item.get("block_type", "stone"))
 		var exp_dur := float(item.get("durability", 1.0))
-		var exp_meta: Dictionary = item.get("metadata", {}).duplicate(true)
+		var raw_meta = item.get("metadata", {})
+		var exp_meta: Dictionary = raw_meta.duplicate(true) if raw_meta is Dictionary else {}
 
 		var entry: Dictionary = {
 			"rel_pos": rel,

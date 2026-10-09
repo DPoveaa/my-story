@@ -67,6 +67,10 @@ func run_all() -> bool:
 	_run_test("test_planner_debris_and_player_obstruction")
 	_run_test("test_planner_out_of_bounds_invalid")
 	_run_test("test_planner_mixed_states_and_deterministic_reevaluation")
+	_run_test("test_translated_anchor_coordinate_transformation")
+	_run_test("test_plan_reconstruction_reevaluates_on_anchor_change")
+	_run_test("test_startup_restoration_of_saved_blueprints")
+	_run_test("test_explicit_update_registered_blueprint_from_world")
 
 	print("==================================================")
 	print("M4 TEST RESULTS: %d PASSED, %d FAILED" % [_passed, _failed])
@@ -925,7 +929,11 @@ func test_blueprint_save_requires_overwrite_confirmation() -> bool:
 	bp_mgr.grid_system = grid
 	hud.blueprint_manager = bp_mgr
 
-	hud.open_save_blueprint_dialog()
+	hud.open_save_blueprint_dialog_bounded(Vector3i(0, 0, 0), Vector3i(1, 1, 1))
+	if not hud._has_area_selected:
+		hud.queue_free()
+		return false
+
 	hud._save_name_input.text = "overwrite_test"
 
 	# First save creates the blueprint
@@ -934,8 +942,8 @@ func test_blueprint_save_requires_overwrite_confirmation() -> bool:
 		hud.queue_free()
 		return false
 
-	# Re-open save dialog and try to save again with same name
-	hud.open_save_blueprint_dialog()
+	# Re-open save dialog bounded and try to save again with same name
+	hud.open_save_blueprint_dialog_bounded(Vector3i(0, 0, 0), Vector3i(1, 1, 1))
 	hud._save_name_input.text = "overwrite_test"
 	hud._on_save_confirm_pressed()
 
@@ -995,6 +1003,88 @@ func test_area_bounded_capture_only_includes_in_bounds_blocks() -> bool:
 
 	var block_entry = bp.blocks[0]
 	if block_entry.get("rel_pos", []) != [1, 1, 1] or block_entry.get("block_type", "") != "stone":
+		return false
+
+	return true
+
+func test_translated_anchor_coordinate_transformation() -> bool:
+	var grid := _make_grid()
+	var bp_mgr := _make_manager()
+	bp_mgr.grid_system = grid
+
+	var bp := BlueprintDataScript.new("translate_test")
+	bp.blocks = [{"rel_pos": [0, 0, 0], "block_type": "stone", "durability": 1.0, "metadata": {}}]
+
+	var proposed_anchor := Vector3i(10, 5, 20)
+	var plan = bp_mgr.plan_reconstruction(bp, proposed_anchor)
+	if plan == null or plan.entries.is_empty():
+		return false
+
+	var entry = plan.entries[0]
+	if entry.get("world_cell", Vector3i.ZERO) != proposed_anchor:
+		return false
+
+	return true
+
+func test_plan_reconstruction_reevaluates_on_anchor_change() -> bool:
+	var grid := _make_grid()
+	var bp_mgr := _make_manager()
+	bp_mgr.grid_system = grid
+
+	grid.place_block(Vector3i(0, 0, 0), &"stone")
+
+	var bp := BlueprintDataScript.new("anchor_change_test")
+	bp.blocks = [{"rel_pos": [0, 0, 0], "block_type": "stone", "durability": 1.0, "metadata": {}}]
+
+	var plan1 = bp_mgr.plan_reconstruction(bp, Vector3i(0, 0, 0))
+	if plan1 == null or plan1.present_count != 1:
+		return false
+
+	var plan2 = bp_mgr.plan_reconstruction(bp, Vector3i(10, 0, 0))
+	if plan2 == null or plan2.missing_count != 1:
+		return false
+
+	return true
+
+func test_startup_restoration_of_saved_blueprints() -> bool:
+	var grid := _make_grid()
+	var bp_mgr := _make_manager()
+	bp_mgr.grid_system = grid
+
+	grid.place_block(Vector3i(0, 0, 0), &"stone")
+	var bp = bp_mgr.capture_blueprint_area("startup_bp", Vector3i(0, 0, 0), Vector3i(1, 1, 1))
+	bp_mgr.save_blueprint(bp, true)
+
+	var bp_mgr2 := _make_manager()
+	bp_mgr2.storage_dir = bp_mgr.storage_dir
+	bp_mgr2.grid_system = grid
+	bp_mgr2.load_all_registered_blueprints()
+
+	if not bp_mgr2.active_registered_blueprints.has("startup_bp"):
+		return false
+
+	return true
+
+func test_explicit_update_registered_blueprint_from_world() -> bool:
+	var grid := _make_grid()
+	var bp_mgr := _make_manager()
+	bp_mgr.grid_system = grid
+
+	grid.place_block(Vector3i(0, 0, 0), &"stone")
+	var bp = bp_mgr.capture_blueprint_area("update_area_test", Vector3i(0, 0, 0), Vector3i(2, 2, 2))
+	bp_mgr.save_blueprint(bp, true)
+
+	if bp.get_block_count() != 1:
+		return false
+
+	grid.place_block(Vector3i(2, 2, 2), &"wood")
+
+	var ok := bp_mgr.update_registered_blueprint_from_world("update_area_test")
+	if not ok:
+		return false
+
+	var updated_bp = bp_mgr.load_blueprint("update_area_test")
+	if updated_bp == null or updated_bp.get_block_count() != 2:
 		return false
 
 	return true

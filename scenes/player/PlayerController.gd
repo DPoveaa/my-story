@@ -428,7 +428,15 @@ func _update_area_selection_prompt() -> void:
 			hud.target_info_label.text = "[AREA SELECTION] Aim crosshair at Corner 1. Press LMB or K to mark. Esc: Cancel."
 			hud.target_info_label.visible = true
 		elif area_selection_step == AreaSelectionStep.CORNER_2:
-			hud.target_info_label.text = "[AREA SELECTION] Corner 1: (%d,%d,%d). Aim at Corner 2. Press LMB or K to confirm. Esc: Cancel." % [area_corner_1.x, area_corner_1.y, area_corner_1.z]
+			var grid := grid_system
+			var curr_target := target_remove_cell if (grid != null and grid.has_block(target_remove_cell)) else target_place_cell
+			var dim_x := absi(curr_target.x - area_corner_1.x) + 1
+			var dim_y := absi(curr_target.y - area_corner_1.y) + 1
+			var dim_z := absi(curr_target.z - area_corner_1.z) + 1
+			var vol := dim_x * dim_y * dim_z
+			hud.target_info_label.text = "[AREA SELECTION] Corner 1: (%d,%d,%d) | Size: %dx%dx%d (%d cells) | Press LMB/K to confirm. Esc: Cancel." % [
+				area_corner_1.x, area_corner_1.y, area_corner_1.z, dim_x, dim_y, dim_z, vol
+			]
 			hud.target_info_label.visible = true
 
 func _handle_load_blueprint_action() -> void:
