@@ -12,6 +12,7 @@ signal blueprint_rejected(name: String, anchor: Vector3i, reason: String, confli
 signal blueprint_deleted(name: String)
 
 const BlueprintDataScript = preload("res://data/BlueprintData.gd")
+const ReconstructionPlannerScript = preload("res://systems/blueprint/ReconstructionPlanner.gd")
 
 @export var storage_dir: String = "user://blueprints"
 
@@ -407,6 +408,12 @@ func update_or_replace_blueprint(blueprint_name: String, cells: Array[Vector3i] 
 	if bp == null:
 		return false
 	return save_blueprint(bp, true)
+
+## Generates a ReconstructionPlanner comparison between a blueprint and current world state.
+func plan_reconstruction(blueprint: BlueprintData, anchor_cell: Vector3i, player: Node = null) -> RefCounted:
+	var grid := _get_grid()
+	var orch := _get_orchestrator()
+	return ReconstructionPlannerScript.generate_plan(blueprint, anchor_cell, grid, orch, player)
 
 # ==============================================================================
 # INTENTIONAL PLAYER EDIT TRACKING (Vs. Collapses / Destruction)

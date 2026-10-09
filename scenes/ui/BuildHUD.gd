@@ -43,6 +43,7 @@ var _anchor_y: SpinBox = null
 var _anchor_z: SpinBox = null
 var _replace_checkbox: CheckBox = null
 var _load_place_btn: Button = null
+var _load_inspect_btn: Button = null
 var _load_delete_btn: Button = null
 
 func _ready() -> void:
@@ -410,6 +411,12 @@ func _create_load_modal() -> void:
 	_load_place_btn.pressed.connect(_on_load_confirm_pressed)
 	btns_hbox.add_child(_load_place_btn)
 
+	_load_inspect_btn = Button.new()
+	_load_inspect_btn.text = "Inspect Plan"
+	_load_inspect_btn.custom_minimum_size = Vector2(110, 32)
+	_load_inspect_btn.pressed.connect(_on_inspect_plan_pressed)
+	btns_hbox.add_child(_load_inspect_btn)
+
 	_load_delete_btn = Button.new()
 	_load_delete_btn.text = "Delete"
 	_load_delete_btn.custom_minimum_size = Vector2(90, 32)
@@ -464,9 +471,60 @@ func _on_blueprint_item_selected(index: int) -> void:
 	var bp = bp_mgr.load_blueprint(bp_name)
 	if bp != null:
 		var dims: Vector3i = bp.get_dimensions()
-		_load_details_label.text = "Blueprint: %s  |  Blocks: %d  |  Size: %dx%dx%d  |  Joints: %d" % [
-			bp.name, bp.get_block_count(), dims.x, dims.y, dims.z, bp.joints.size()
-		]
+		var anchor := Vector3i(int(_anchor_x.value), int(_anchor_y.value), int(_anchor_z.value))
+		var plan = bp_mgr.plan_reconstruction(bp, anchor, player) if bp_mgr.has_method("plan_reconstruction") else null
+		if plan != null:
+			_load_details_label.text = "Blueprint: %s (%dx%dx%d) | PRESENT: %d | MISSING: %d | CONFLICT: %d | INVALID: %d" % [
+				bp.name, dims.x, dims.y, dims.z,
+				plan.present_count, plan.missing_count, plan.conflict_count, plan.invalid_count
+			]
+		else:
+			_load_details_label.text = "Blueprint: %s  |  Blocks: %d  |  Size: %dx%dx%d  |  Joints: %d" % [
+				bp.name, bp.get_block_count(), dims.x, dims.y, dims.z, bp.joints.size()
+			]
+
+func _on_inspect_plan_pressed() -> void:
+	var selected_items: PackedInt32Array = _load_item_list.get_selected_items()
+	if selected_items.is_empty():
+		_load_feedback_label.text = "Select a blueprint to inspect."
+		_load_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
+		return
+
+	var bp_name: String = _load_item_list.get_item_text(selected_items[0])
+	var bp_mgr := _get_blueprint_manager()
+	if bp_mgr == null:
+		return
+
+	var bp = bp_mgr.load_blueprint(bp_name)
+	if bp == null:
+		return
+
+	var anchor := Vector3i(int(_anchor_x.value), int(_anchor_y.value), int(_anchor_z.value))
+	var plan = bp_mgr.plan_reconstruction(bp, anchor, player)
+	if plan == null:
+		return
+
+	var details := "Reconstruction Plan [%s] at (%d,%d,%d):\nPRESENT: %d | MISSING: %d | CONFLICT: %d | INVALID: %d" % [
+		bp.name, anchor.x, anchor.y, anchor.z,
+		plan.present_count, plan.missing_count, plan.conflict_count, plan.invalid_count
+	]
+
+	if plan.conflict_count > 0:
+		var conflicts := plan.get_conflict_entries()
+		var first_conf = conflicts[0]
+		details += "\nConflict at %s: %s" % [str(first_conf.get("world_cell", Vector3i.ZERO)), first_conf.get("reason", "UNKNOWN")]
+	elif plan.invalid_count > 0:
+		var invalids := plan.get_invalid_entries()
+		var first_inv = invalids[0]
+		details += "\nInvalid at %s: Out of Bounds" % str(first_inv.get("world_cell", Vector3i.ZERO))
+
+	_load_feedback_label.text = details
+	if plan.is_fully_intact():
+		_load_feedback_label.add_theme_color_override("font_color", Color(0.3, 1.0, 0.4))
+	elif plan.is_ready_for_reconstruction():
+		_load_feedback_label.add_theme_color_override("font_color", Color(0.4, 0.85, 1.0))
+	else:
+		_load_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.7, 0.2))
 
 func _on_use_aim_pressed() -> void:
 	if player != null and player.has_target:

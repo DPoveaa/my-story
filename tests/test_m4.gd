@@ -61,6 +61,12 @@ func run_all() -> bool:
 	_run_test("test_persisted_desired_layout_after_collapse")
 	_run_test("test_intentional_edit_vs_destructive_event")
 	_run_test("test_atomic_restoration_failure")
+	_run_test("test_planner_fully_intact_all_present")
+	_run_test("test_planner_missing_blocks")
+	_run_test("test_planner_wrong_block_type_conflict")
+	_run_test("test_planner_debris_and_player_obstruction")
+	_run_test("test_planner_out_of_bounds_invalid")
+	_run_test("test_planner_mixed_states_and_deterministic_reevaluation")
 
 	print("==================================================")
 	print("M4 TEST RESULTS: %d PASSED, %d FAILED" % [_passed, _failed])
@@ -989,6 +995,141 @@ func test_area_bounded_capture_only_includes_in_bounds_blocks() -> bool:
 
 	var block_entry = bp.blocks[0]
 	if block_entry.get("rel_pos", []) != [1, 1, 1] or block_entry.get("block_type", "") != "stone":
+		return false
+
+	return true
+
+func test_planner_fully_intact_all_present() -> bool:
+	var grid := _make_grid()
+	grid.place_block(Vector3i(0, 0, 0), &"stone")
+	grid.place_block(Vector3i(1, 0, 0), &"wood")
+
+	var bp := BlueprintDataScript.new("intact_test")
+	bp.blocks = [
+		{"rel_pos": [0, 0, 0], "block_type": "stone", "durability": 1.0, "metadata": {}},
+		{"rel_pos": [1, 0, 0], "block_type": "wood", "durability": 1.0, "metadata": {}}
+	]
+
+	var plan = ReconstructionPlanner.generate_plan(bp, Vector3i(0, 0, 0), grid)
+	if plan == null or not plan.is_fully_intact():
+		return false
+	if plan.present_count != 2 or plan.missing_count != 0 or plan.conflict_count != 0:
+		return false
+
+	return true
+
+func test_planner_missing_blocks() -> bool:
+	var grid := _make_grid()
+	grid.place_block(Vector3i(0, 0, 0), &"stone")
+
+	var bp := BlueprintDataScript.new("missing_test")
+	bp.blocks = [
+		{"rel_pos": [0, 0, 0], "block_type": "stone", "durability": 1.0, "metadata": {}},
+		{"rel_pos": [1, 0, 0], "block_type": "stone", "durability": 1.0, "metadata": {}}
+	]
+
+	var plan = ReconstructionPlanner.generate_plan(bp, Vector3i(0, 0, 0), grid)
+	if plan == null or plan.present_count != 1 or plan.missing_count != 1:
+		return false
+
+	var missing = plan.get_missing_entries()
+	if missing.size() != 1 or missing[0].get("world_cell", Vector3i.ZERO) != Vector3i(1, 0, 0):
+		return false
+
+	return true
+
+func test_planner_wrong_block_type_conflict() -> bool:
+	var grid := _make_grid()
+	grid.place_block(Vector3i(0, 0, 0), &"brick")
+
+	var bp := BlueprintDataScript.new("wrong_type_test")
+	bp.blocks = [
+		{"rel_pos": [0, 0, 0], "block_type": "stone", "durability": 1.0, "metadata": {}}
+	]
+
+	var plan = ReconstructionPlanner.generate_plan(bp, Vector3i(0, 0, 0), grid)
+	if plan == null or plan.conflict_count != 1 or plan.present_count != 0:
+		return false
+
+	var conflicts = plan.get_conflict_entries()
+	if conflicts.size() != 1 or conflicts[0].get("reason", "") != "WRONG_BLOCK_TYPE":
+		return false
+
+	return true
+
+func test_planner_debris_and_player_obstruction() -> bool:
+	var grid := _make_grid()
+	var orch := CollapseOrchestrator.new()
+	orch.grid_system = grid
+
+	var island := DebrisIsland.new()
+	island.orchestrator = orch
+	island.setup_island([Vector3i.ZERO], {Vector3i.ZERO: BlockData.new("stone", 1.0)}, 1.0)
+	island.position = Vector3(2.5, 0.5, 0.5)
+	orch.register_debris_island(island)
+
+	var bp := BlueprintDataScript.new("debris_test")
+	bp.blocks = [
+		{"rel_pos": [2, 0, 0], "block_type": "stone", "durability": 1.0, "metadata": {}}
+	]
+
+	var plan = ReconstructionPlanner.generate_plan(bp, Vector3i(0, 0, 0), grid, orch)
+	if plan == null or plan.conflict_count != 1:
+		island.queue_free()
+		orch.queue_free()
+		return false
+
+	var conflicts = plan.get_conflict_entries()
+	if conflicts.is_empty() or conflicts[0].get("reason", "") != "DEBRIS_COLLISION":
+		island.queue_free()
+		orch.queue_free()
+		return false
+
+	island.queue_free()
+	orch.queue_free()
+	return true
+
+func test_planner_out_of_bounds_invalid() -> bool:
+	var grid := _make_grid()
+	var bp := BlueprintDataScript.new("bounds_test")
+	bp.blocks = [
+		{"rel_pos": [0, -10, 0], "block_type": "stone", "durability": 1.0, "metadata": {}}
+	]
+
+	var plan = ReconstructionPlanner.generate_plan(bp, Vector3i(0, 0, 0), grid)
+	if plan == null or plan.invalid_count != 1:
+		return false
+
+	var invalids = plan.get_invalid_entries()
+	if invalids.is_empty() or invalids[0].get("reason", "") != "OUT_OF_BOUNDS":
+		return false
+
+	return true
+
+func test_planner_mixed_states_and_deterministic_reevaluation() -> bool:
+	var grid := _make_grid()
+	grid.place_block(Vector3i(0, 0, 0), &"stone")
+	grid.place_block(Vector3i(1, 0, 0), &"gold")
+
+	var bp := BlueprintDataScript.new("mixed_test")
+	bp.blocks = [
+		{"rel_pos": [0, 0, 0], "block_type": "stone", "durability": 1.0, "metadata": {}},
+		{"rel_pos": [1, 0, 0], "block_type": "wood", "durability": 1.0, "metadata": {}},
+		{"rel_pos": [2, 0, 0], "block_type": "brick", "durability": 1.0, "metadata": {}}
+	]
+
+	var plan1 = ReconstructionPlanner.generate_plan(bp, Vector3i(0, 0, 0), grid)
+	var plan2 = ReconstructionPlanner.generate_plan(bp, Vector3i(0, 0, 0), grid)
+
+	if plan1 == null or plan2 == null:
+		return false
+
+	if plan1.present_count != 1 or plan1.missing_count != 1 or plan1.conflict_count != 1:
+		return false
+	if plan1.present_count != plan2.present_count or plan1.missing_count != plan2.missing_count or plan1.conflict_count != plan2.conflict_count:
+		return false
+
+	if grid.get_block_count() != 2:
 		return false
 
 	return true
