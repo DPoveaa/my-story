@@ -510,12 +510,12 @@ func _on_inspect_plan_pressed() -> void:
 	]
 
 	if plan.conflict_count > 0:
-		var conflicts := plan.get_conflict_entries()
-		var first_conf = conflicts[0]
+		var conflicts: Array[Dictionary] = plan.get_conflict_entries()
+		var first_conf: Dictionary = conflicts[0]
 		details += "\nConflict at %s: %s" % [str(first_conf.get("world_cell", Vector3i.ZERO)), first_conf.get("reason", "UNKNOWN")]
 	elif plan.invalid_count > 0:
-		var invalids := plan.get_invalid_entries()
-		var first_inv = invalids[0]
+		var invalids: Array[Dictionary] = plan.get_invalid_entries()
+		var first_inv: Dictionary = invalids[0]
 		details += "\nInvalid at %s: Out of Bounds" % str(first_inv.get("world_cell", Vector3i.ZERO))
 
 	_load_feedback_label.text = details
