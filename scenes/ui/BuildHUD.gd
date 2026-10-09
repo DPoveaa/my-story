@@ -228,14 +228,18 @@ func _create_save_modal() -> void:
 	_save_modal = PanelContainer.new()
 	_save_modal.name = "SaveBlueprintModal"
 	_save_modal.add_theme_stylebox_override("panel", _make_modal_panel_style())
-	_save_modal.anchors_preset = Control.PRESET_CENTER
-	_save_modal.custom_minimum_size = Vector2(460, 230)
-	_save_modal.offset_left = -230
-	_save_modal.offset_top = -115
-	_save_modal.offset_right = 230
-	_save_modal.offset_bottom = 115
+	_save_modal.custom_minimum_size = Vector2(480, 240)
+	_save_modal.anchor_left = 0.5
+	_save_modal.anchor_top = 0.5
+	_save_modal.anchor_right = 0.5
+	_save_modal.anchor_bottom = 0.5
+	_save_modal.offset_left = -240
+	_save_modal.offset_top = -120
+	_save_modal.offset_right = 240
+	_save_modal.offset_bottom = 120
 	_save_modal.grow_horizontal = Control.GROW_DIRECTION_BOTH
 	_save_modal.grow_vertical = Control.GROW_DIRECTION_BOTH
+	_save_modal.z_index = 10
 	_save_modal.visible = false
 	add_child(_save_modal)
 
@@ -305,14 +309,18 @@ func _create_load_modal() -> void:
 	_load_modal = PanelContainer.new()
 	_load_modal.name = "LoadBlueprintModal"
 	_load_modal.add_theme_stylebox_override("panel", _make_modal_panel_style())
-	_load_modal.anchors_preset = Control.PRESET_CENTER
 	_load_modal.custom_minimum_size = Vector2(560, 420)
+	_load_modal.anchor_left = 0.5
+	_load_modal.anchor_top = 0.5
+	_load_modal.anchor_right = 0.5
+	_load_modal.anchor_bottom = 0.5
 	_load_modal.offset_left = -280
 	_load_modal.offset_top = -210
 	_load_modal.offset_right = 280
 	_load_modal.offset_bottom = 210
 	_load_modal.grow_horizontal = Control.GROW_DIRECTION_BOTH
 	_load_modal.grow_vertical = Control.GROW_DIRECTION_BOTH
+	_load_modal.z_index = 10
 	_load_modal.visible = false
 	add_child(_load_modal)
 
