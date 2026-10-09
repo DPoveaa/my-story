@@ -866,7 +866,7 @@ func _handle_place_action() -> void:
 		grid.place_block(target_place_cell, get_selected_type())
 		var bp_mgr := _get_blueprint_manager()
 		if bp_mgr != null and bp_mgr.has_method("notify_intentional_block_placed"):
-			var placed_b := grid.get_block(target_place_cell)
+			var placed_b: BlockData = grid.get_block(target_place_cell)
 			if placed_b != null:
 				bp_mgr.notify_intentional_block_placed(target_place_cell, placed_b)
 
