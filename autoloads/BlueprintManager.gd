@@ -127,6 +127,39 @@ func delete_blueprint(blueprint_name: String) -> bool:
 # CAPTURING FROM LIVE WORLD
 # ==============================================================================
 
+## Dictionary of active registered construction areas in current scene: Dictionary[String, BlueprintData]
+var active_registered_blueprints: Dictionary = {}
+
+## Captures a snapshot of strictly the blocks within the specified bounded area [min_cell, max_cell].
+## Never falls back to capturing the whole grid.
+func capture_blueprint_area(blueprint_name: String, min_cell: Vector3i, max_cell: Vector3i) -> BlueprintData:
+	var grid := _get_grid()
+	if grid == null:
+		push_error("BlueprintManager: GridSystem reference is null")
+		return null
+
+	var bounds_min := Vector3i(mini(min_cell.x, max_cell.x), mini(min_cell.y, max_cell.y), mini(min_cell.z, max_cell.z))
+	var bounds_max := Vector3i(maxi(min_cell.x, max_cell.x), maxi(min_cell.y, max_cell.y), maxi(min_cell.z, max_cell.z))
+
+	var target_cells: Array[Vector3i] = []
+	for x in range(bounds_min.x, bounds_max.x + 1):
+		for y in range(bounds_min.y, bounds_max.y + 1):
+			for z in range(bounds_min.z, bounds_max.z + 1):
+				var c := Vector3i(x, y, z)
+				if grid.has_block(c):
+					target_cells.append(c)
+
+	if target_cells.is_empty():
+		push_warning("BlueprintManager: No blocks found in bounded area (%s to %s) for '%s'" % [str(bounds_min), str(bounds_max), blueprint_name])
+		return null
+
+	var bp := capture_blueprint(blueprint_name, target_cells, bounds_min)
+	if bp != null:
+		bp.bounds_min = Vector3i.ZERO
+		bp.bounds_max = bounds_max - bounds_min
+		active_registered_blueprints[blueprint_name] = bp
+	return bp
+
 ## Captures a snapshot of the specified cells (or all occupied cells if empty).
 ## Preserves block type, durability, metadata (including coated faces), and structural joints.
 ## Completely detached from live scene objects so subsequent collapses do not affect it.
@@ -374,6 +407,54 @@ func update_or_replace_blueprint(blueprint_name: String, cells: Array[Vector3i] 
 	if bp == null:
 		return false
 	return save_blueprint(bp, true)
+
+# ==============================================================================
+# INTENTIONAL PLAYER EDIT TRACKING (Vs. Collapses / Destruction)
+# ==============================================================================
+
+## Called when the player intentionally builds/places a block.
+## Updates any active registered construction area that contains this world cell.
+func notify_intentional_block_placed(cell: Vector3i, data: BlockData) -> void:
+	for bp: BlueprintData in active_registered_blueprints.values():
+		if bp == null:
+			continue
+		var abs_min := bp.anchor_cell + bp.bounds_min
+		var abs_max := bp.anchor_cell + bp.bounds_max
+		if cell.x >= abs_min.x and cell.x <= abs_max.x and cell.y >= abs_min.y and cell.y <= abs_max.y and cell.z >= abs_min.z and cell.z <= abs_max.z:
+			var rel := cell - bp.anchor_cell
+			var existing_idx := -1
+			for i in range(bp.blocks.size()):
+				var b = bp.blocks[i]
+				if b is Dictionary and b.get("rel_pos", []) == [rel.x, rel.y, rel.z]:
+					existing_idx = i
+					break
+			var entry := {
+				"rel_pos": [rel.x, rel.y, rel.z],
+				"block_type": String(data.block_type),
+				"durability": data.durability,
+				"metadata": data.metadata.duplicate(true)
+			}
+			if existing_idx >= 0:
+				bp.blocks[existing_idx] = entry
+			else:
+				bp.blocks.append(entry)
+			save_blueprint(bp, true)
+
+## Called when the player intentionally removes a block.
+## Updates any active registered construction area that contains this world cell.
+func notify_intentional_block_removed(cell: Vector3i) -> void:
+	for bp: BlueprintData in active_registered_blueprints.values():
+		if bp == null:
+			continue
+		var abs_min := bp.anchor_cell + bp.bounds_min
+		var abs_max := bp.anchor_cell + bp.bounds_max
+		if cell.x >= abs_min.x and cell.x <= abs_max.x and cell.y >= abs_min.y and cell.y <= abs_max.y and cell.z >= abs_min.z and cell.z <= abs_max.z:
+			var rel := cell - bp.anchor_cell
+			for i in range(bp.blocks.size() - 1, -1, -1):
+				var b = bp.blocks[i]
+				if b is Dictionary and b.get("rel_pos", []) == [rel.x, rel.y, rel.z]:
+					bp.blocks.remove_at(i)
+			save_blueprint(bp, true)
 
 # ==============================================================================
 # SYSTEM RESOLVERS

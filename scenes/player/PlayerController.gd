@@ -66,6 +66,11 @@ const DebrisGrabberScript = preload("res://systems/interaction/DebrisGrabber.gd"
 @onready var projection_camera: Camera3D = $ProjectionCamera
 @onready var debris_grabber: Node = get_node_or_null("DebrisGrabber")
 
+enum AreaSelectionStep { NONE, CORNER_1, CORNER_2 }
+var area_selection_step: AreaSelectionStep = AreaSelectionStep.NONE
+var area_corner_1: Vector3i = Vector3i.ZERO
+var area_corner_2: Vector3i = Vector3i.ZERO
+
 # State
 var current_state: State = State.BODY_CONTROL
 var _mouse_captured: bool = false
@@ -263,6 +268,11 @@ func _is_ui_modal_open() -> bool:
 
 func _input(event: InputEvent) -> void:
 	# If a UI modal is active, ESC closes it and clicks do not recapture mouse
+	if area_selection_step != AreaSelectionStep.NONE and event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
+		cancel_area_selection()
+		get_viewport().set_input_as_handled()
+		return
+
 	if _is_ui_modal_open():
 		if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
 			if build_hud != null and build_hud.has_method("close_all_modals"):
@@ -349,6 +359,11 @@ func _unhandled_input(event: InputEvent) -> void:
 		elif event.is_action_pressed(&"select_slot_4") or event.keycode == KEY_4:
 			_select_type_by_index(3)
 
+func _get_blueprint_manager() -> Node:
+	if is_inside_tree() and has_node("/root/BlueprintManager"):
+		return get_node("/root/BlueprintManager")
+	return null
+
 func _get_build_hud() -> Node:
 	if build_hud != null and is_instance_valid(build_hud):
 		return build_hud
@@ -366,9 +381,55 @@ func _get_build_hud() -> Node:
 
 func _handle_save_blueprint_action() -> void:
 	save_blueprint_requested.emit()
+	if area_selection_step == AreaSelectionStep.NONE:
+		area_selection_step = AreaSelectionStep.CORNER_1
+		_update_area_selection_prompt()
+	elif area_selection_step == AreaSelectionStep.CORNER_1:
+		_confirm_area_corner_1()
+	elif area_selection_step == AreaSelectionStep.CORNER_2:
+		_confirm_area_corner_2()
+
+func _confirm_area_corner_1() -> void:
+	var grid := grid_system
+	var target_cell := target_place_cell
+	if has_target and grid != null and grid.has_block(target_remove_cell):
+		target_cell = target_remove_cell
+	area_corner_1 = target_cell
+	area_selection_step = AreaSelectionStep.CORNER_2
+	_update_area_selection_prompt()
+
+func _confirm_area_corner_2() -> void:
+	var grid := grid_system
+	var target_cell := target_place_cell
+	if has_target and grid != null and grid.has_block(target_remove_cell):
+		target_cell = target_remove_cell
+	area_corner_2 = target_cell
+
+	var min_c := Vector3i(mini(area_corner_1.x, area_corner_2.x), mini(area_corner_1.y, area_corner_2.y), mini(area_corner_1.z, area_corner_2.z))
+	var max_c := Vector3i(maxi(area_corner_1.x, area_corner_2.x), maxi(area_corner_1.y, area_corner_2.y), maxi(area_corner_1.z, area_corner_2.z))
+
+	area_selection_step = AreaSelectionStep.NONE
+	if preview_ghost != null:
+		preview_ghost.hide_preview()
+
 	var hud := _get_build_hud()
-	if hud != null and hud.has_method("open_save_blueprint_dialog"):
-		hud.open_save_blueprint_dialog()
+	if hud != null and hud.has_method("open_save_blueprint_dialog_bounded"):
+		hud.open_save_blueprint_dialog_bounded(min_c, max_c)
+
+func cancel_area_selection() -> void:
+	area_selection_step = AreaSelectionStep.NONE
+	if preview_ghost != null:
+		preview_ghost.hide_preview()
+
+func _update_area_selection_prompt() -> void:
+	var hud := _get_build_hud()
+	if hud != null and hud.target_info_label != null:
+		if area_selection_step == AreaSelectionStep.CORNER_1:
+			hud.target_info_label.text = "[AREA SELECTION] Aim crosshair at Corner 1. Press LMB or K to mark. Esc: Cancel."
+			hud.target_info_label.visible = true
+		elif area_selection_step == AreaSelectionStep.CORNER_2:
+			hud.target_info_label.text = "[AREA SELECTION] Corner 1: (%d,%d,%d). Aim at Corner 2. Press LMB or K to confirm. Esc: Cancel." % [area_corner_1.x, area_corner_1.y, area_corner_1.z]
+			hud.target_info_label.visible = true
 
 func _handle_load_blueprint_action() -> void:
 	var anchor: Vector3i = target_place_cell if has_target else Vector3i.ZERO
@@ -733,7 +794,12 @@ func _update_raycast() -> void:
 		can_place_target = grid_valid and not blocked_by_debris and not overlaps_player
 
 	if preview_ghost != null:
-		if debris_grabber != null and debris_grabber.is_grabbing:
+		if area_selection_step == AreaSelectionStep.CORNER_2:
+			var curr_target := target_remove_cell if (grid != null and grid.has_block(target_remove_cell)) else target_place_cell
+			var min_c := Vector3i(mini(area_corner_1.x, curr_target.x), mini(area_corner_1.y, curr_target.y), mini(area_corner_1.z, curr_target.z))
+			var max_c := Vector3i(maxi(area_corner_1.x, curr_target.x), maxi(area_corner_1.y, curr_target.y), maxi(area_corner_1.z, curr_target.z))
+			preview_ghost.update_area_preview(min_c, max_c, grid.cell_size)
+		elif debris_grabber != null and debris_grabber.is_grabbing:
 			pass # DebrisGrabber updates the preview ghost for recovery
 		elif target_is_debris and target_debris_island != null and target_debris_island.is_moving():
 			preview_ghost.hide_preview()
@@ -770,11 +836,14 @@ func _handle_recover_action() -> void:
 
 func _handle_place_action() -> void:
 	_ensure_nodes()
+	if area_selection_step != AreaSelectionStep.NONE:
+		if area_selection_step == AreaSelectionStep.CORNER_1:
+			_confirm_area_corner_1()
+		elif area_selection_step == AreaSelectionStep.CORNER_2:
+			_confirm_area_corner_2()
+		return
+
 	if debris_grabber != null and debris_grabber.is_grabbing:
-		# When holding debris, placement action exclusively attempts to place the held debris block.
-		# If the target position is invalid or the block is damaged (<= 50%), placement is safely
-		# rejected without consuming, converting, dropping, duplicating, or modifying the held block.
-		# Never fall through to placing fresh blocks from inventory while carrying debris.
 		debris_grabber.try_place_to_grid()
 		return
 
@@ -795,8 +864,17 @@ func _handle_place_action() -> void:
 		if orchestrator != null and orchestrator.is_cell_blocked_by_debris(target_place_cell, grid.cell_size):
 			return
 		grid.place_block(target_place_cell, get_selected_type())
+		var bp_mgr := _get_blueprint_manager()
+		if bp_mgr != null and bp_mgr.has_method("notify_intentional_block_placed"):
+			var placed_b := grid.get_block(target_place_cell)
+			if placed_b != null:
+				bp_mgr.notify_intentional_block_placed(target_place_cell, placed_b)
 
 func _handle_remove_action() -> void:
+	if area_selection_step != AreaSelectionStep.NONE:
+		cancel_area_selection()
+		return
+
 	if debris_grabber != null and debris_grabber.is_grabbing:
 		debris_grabber.release()
 		return
@@ -812,6 +890,9 @@ func _handle_remove_action() -> void:
 		if grid == null and has_node("/root/GridSystem"):
 			grid = get_node("/root/GridSystem")
 		if grid != null and grid.has_block(target_remove_cell):
+			var bp_mgr := _get_blueprint_manager()
+			if bp_mgr != null and bp_mgr.has_method("notify_intentional_block_removed"):
+				bp_mgr.notify_intentional_block_removed(target_remove_cell)
 			grid.remove_block(target_remove_cell)
 
 func _handle_throw_action() -> void:

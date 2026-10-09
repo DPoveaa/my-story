@@ -29,6 +29,9 @@ var _save_info_label: Label = null
 var _save_feedback_label: Label = null
 var _save_btn: Button = null
 var _save_confirm_overwrite: bool = false
+var _save_min_cell: Vector3i = Vector3i.ZERO
+var _save_max_cell: Vector3i = Vector3i.ZERO
+var _has_area_selected: bool = false
 
 ## Blueprint Load Modal Nodes
 var _load_modal: PanelContainer = null
@@ -153,26 +156,35 @@ func close_all_modals() -> void:
 		_save_modal.visible = false
 	if _load_modal != null:
 		_load_modal.visible = false
+	_has_area_selected = false
+	_save_min_cell = Vector3i.ZERO
+	_save_max_cell = Vector3i.ZERO
 	if player != null and player.has_method("set_mouse_capture"):
 		player.set_mouse_capture(true)
+
+## Opens the Save Blueprint dialog for a bounded area.
+func open_save_blueprint_dialog_bounded(min_cell: Vector3i, max_cell: Vector3i) -> void:
+	_save_min_cell = min_cell
+	_save_max_cell = max_cell
+	_has_area_selected = true
+	open_save_blueprint_dialog()
+	_save_info_label.text = "Bounded Area: (%d,%d,%d) to (%d,%d,%d)" % [
+		min_cell.x, min_cell.y, min_cell.z, max_cell.x, max_cell.y, max_cell.z
+	]
 
 ## Opens the Save Blueprint dialog, releases mouse capture, and focuses input.
 func open_save_blueprint_dialog() -> void:
 	close_all_modals()
 	if _save_modal == null:
 		return
-	var count: int = grid_system.get_block_count() if grid_system != null else 0
 	_save_confirm_overwrite = false
 	if _save_btn != null:
 		_save_btn.text = "Save"
-	_save_info_label.text = "Structure to Save: %d block(s) in grid" % count
+	if not _has_area_selected:
+		var count: int = grid_system.get_block_count() if grid_system != null else 0
+		_save_info_label.text = "Structure to Save: %d block(s) in grid" % count
 	_save_feedback_label.text = ""
-	if count == 0:
-		_save_feedback_label.text = "Grid is empty! Place blocks first to save a blueprint."
-		_save_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.7, 0.3))
-		_save_btn.disabled = true
-	else:
-		_save_btn.disabled = false
+	_save_btn.disabled = false
 	_save_modal.visible = true
 	if player != null and player.has_method("set_mouse_capture"):
 		player.set_mouse_capture(false)
@@ -484,9 +496,14 @@ func _on_save_confirm_pressed() -> void:
 		_save_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.7, 0.2))
 		return
 
-	var bp = bp_mgr.capture_blueprint(raw_name)
+	var bp: BlueprintData = null
+	if _has_area_selected:
+		bp = bp_mgr.capture_blueprint_area(raw_name, _save_min_cell, _save_max_cell)
+	else:
+		bp = bp_mgr.capture_blueprint(raw_name)
+
 	if bp == null:
-		_save_feedback_label.text = "Failed to capture blueprint: grid is empty."
+		_save_feedback_label.text = "Failed to capture blueprint: no blocks found in selection."
 		_save_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
 		return
 

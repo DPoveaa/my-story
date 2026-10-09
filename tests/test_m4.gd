@@ -7,6 +7,7 @@ const BlueprintDataScript = preload("res://data/BlueprintData.gd")
 const DebrisIslandScript = preload("res://systems/collapse/DebrisIsland.gd")
 const BuildHUDScript = preload("res://scenes/ui/BuildHUD.gd")
 const PlayerControllerScript = preload("res://scenes/player/PlayerController.gd")
+const JointSystemScript = preload("res://autoloads/JointSystem.gd")
 
 var _passed: int = 0
 var _failed: int = 0
@@ -52,10 +53,14 @@ func run_all() -> bool:
 	_run_test("test_hud_is_modal_open_and_close")
 	_run_test("test_player_controller_k_l_emits_signals")
 	_run_test("test_player_controller_modal_blocks_gameplay_input")
-	_run_test("test_durability_damage_updates_block_and_destroys_at_zero")
+	_run_test("test_impacts_do_not_alter_block_durability")
 	_run_test("test_blueprint_save_requires_overwrite_confirmation")
 	_run_test("test_mortar_coated_debris_ground_placement")
 	_run_test("test_hud_modal_created_in_scene_tree")
+	_run_test("test_area_bounded_capture_only_includes_in_bounds_blocks")
+	_run_test("test_persisted_desired_layout_after_collapse")
+	_run_test("test_intentional_edit_vs_destructive_event")
+	_run_test("test_atomic_restoration_failure")
 
 	print("==================================================")
 	print("M4 TEST RESULTS: %d PASSED, %d FAILED" % [_passed, _failed])
@@ -864,33 +869,18 @@ func test_player_controller_modal_blocks_gameplay_input() -> bool:
 	player.queue_free()
 	return true
 
-func test_durability_damage_updates_block_and_destroys_at_zero() -> bool:
+func test_impacts_do_not_alter_block_durability() -> bool:
 	var grid := _make_grid()
 	var joint_sys = JointSystemScript.new()
 	joint_sys.grid_system = grid
 
 	grid.place_block(Vector3i(0, 0, 0), &"stone")
+	grid.place_block(Vector3i(1, 0, 0), &"stone")
 	var b: BlockData = grid.get_block(Vector3i(0, 0, 0))
-	if b == null or absf(b.durability - 1.0) > 0.001:
-		joint_sys.queue_free()
-		return false
 
-	# Light impact (< 8.0 J) causes 0 damage (bump immunity)
-	joint_sys.apply_impact_to_block_joints(Vector3i(0, 0, 0), 5.0)
+	# Heavy impact breaks structural joint, but block durability remains unchanged (1.0)
+	joint_sys.apply_impact_to_block_joints(Vector3i(0, 0, 0), 100.0)
 	if absf(b.durability - 1.0) > 0.001:
-		joint_sys.queue_free()
-		return false
-
-	# Moderate impact (20 J) causes small durability reduction
-	joint_sys.apply_impact_to_block_joints(Vector3i(0, 0, 0), 20.0)
-	var expected_dur: float = 1.0 - (20.0 / 200.0) # 0.90
-	if absf(b.durability - expected_dur) > 0.01:
-		joint_sys.queue_free()
-		return false
-
-	# Heavy repeated damage eventually destroys block
-	grid.apply_damage(Vector3i(0, 0, 0), 0.95)
-	if grid.has_block(Vector3i(0, 0, 0)):
 		joint_sys.queue_free()
 		return false
 
@@ -925,7 +915,8 @@ func test_blueprint_save_requires_overwrite_confirmation() -> bool:
 	var grid := _make_grid()
 	grid.place_block(Vector3i(0, 0, 0), &"stone")
 	var hud = _make_hud(grid)
-	var bp_mgr = _make_mgr(grid)
+	var bp_mgr = _make_manager()
+	bp_mgr.grid_system = grid
 	hud.blueprint_manager = bp_mgr
 
 	hud.open_save_blueprint_dialog()
@@ -982,4 +973,81 @@ func test_mortar_coated_debris_ground_placement() -> bool:
 
 	island.queue_free()
 	orch.queue_free()
+	return true
+
+func test_area_bounded_capture_only_includes_in_bounds_blocks() -> bool:
+	var grid := _make_grid()
+	var bp_mgr := _make_manager()
+	bp_mgr.grid_system = grid
+
+	grid.place_block(Vector3i(1, 1, 1), &"stone")
+	grid.place_block(Vector3i(10, 10, 10), &"wood")
+
+	var bp = bp_mgr.capture_blueprint_area("area_test", Vector3i(0, 0, 0), Vector3i(2, 2, 2))
+	if bp == null or bp.get_block_count() != 1:
+		return false
+
+	var block_entry = bp.blocks[0]
+	if block_entry.get("rel_pos", []) != [1, 1, 1] or block_entry.get("block_type", "") != "stone":
+		return false
+
+	return true
+
+func test_persisted_desired_layout_after_collapse() -> bool:
+	var grid := _make_grid()
+	var bp_mgr := _make_manager()
+	bp_mgr.grid_system = grid
+
+	grid.place_block(Vector3i(0, 0, 0), &"stone")
+	var bp = bp_mgr.capture_blueprint_area("desired_test", Vector3i(0, 0, 0), Vector3i(1, 1, 1))
+	bp_mgr.save_blueprint(bp, true)
+
+	grid.remove_cells_batch([Vector3i(0, 0, 0)])
+	if grid.has_block(Vector3i(0, 0, 0)):
+		return false
+
+	var reloaded = bp_mgr.load_blueprint("desired_test")
+	if reloaded == null or reloaded.get_block_count() != 1:
+		return false
+
+	return true
+
+func test_intentional_edit_vs_destructive_event() -> bool:
+	var grid := _make_grid()
+	var bp_mgr := _make_manager()
+	bp_mgr.grid_system = grid
+
+	grid.place_block(Vector3i(0, 0, 0), &"stone")
+	var bp = bp_mgr.capture_blueprint_area("edit_test", Vector3i(0, 0, 0), Vector3i(2, 2, 2))
+
+	grid.place_block(Vector3i(1, 0, 0), &"wood")
+	bp_mgr.notify_intentional_block_placed(Vector3i(1, 0, 0), grid.get_block(Vector3i(1, 0, 0)))
+
+	if bp.get_block_count() != 2:
+		return false
+
+	grid.remove_cells_batch([Vector3i(0, 0, 0)])
+
+	if bp.get_block_count() != 2:
+		return false
+
+	return true
+
+func test_atomic_restoration_failure() -> bool:
+	var grid := _make_grid()
+	var bp_mgr := _make_manager()
+	bp_mgr.grid_system = grid
+
+	var bp := BlueprintDataScript.new("atomic_test")
+	bp.blocks = [{"rel_pos": [0, 0, 0], "block_type": "stone", "durability": 1.0, "metadata": {}}]
+
+	grid.place_block(Vector3i(5, 5, 5), &"gold")
+
+	var res := bp_mgr.apply_blueprint(bp, Vector3i(5, 5, 5), false)
+	if res.get("success", true):
+		return false
+
+	if grid.get_block(Vector3i(5, 5, 5)).block_type != &"gold":
+		return false
+
 	return true
