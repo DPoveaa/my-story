@@ -348,6 +348,10 @@ func _physics_process(delta: float) -> void:
 
 	_update_raycast()
 
+	if (Input.is_action_pressed(&"apply_cement") or Input.is_key_pressed(KEY_G)) and current_state != State.DEBUG_FLIGHT:
+		if debris_grabber == null or not debris_grabber.is_grabbing:
+			_handle_cement_action()
+
 func _process_body_movement(delta: float) -> void:
 	# Gravity simulation
 	if not is_on_floor():
@@ -578,16 +582,10 @@ func _update_raycast() -> void:
 			joint_sys = get_node("/root/JointSystem")
 
 		if joint_sys != null and grid.has_block(target_remove_cell):
-			var adj_cell := target_remove_cell + target_face_dir
-			if joint_sys.has_intact_joint(target_remove_cell, adj_cell):
-				var j = joint_sys.get_joint(target_remove_cell, adj_cell)
-				target_face_status = "Bonded (%d/%d HP)" % [int(j.current_health), int(j.max_strength)]
-			elif joint_sys.is_face_cemented(target_remove_cell, target_face_dir):
-				target_face_status = "Cement Applied (Ready)"
-			elif grid.has_block(adj_cell):
-				target_face_status = "Unbonded Contact (G to Bond)"
+			if joint_sys.is_face_coated(target_remove_cell, target_face_dir):
+				target_face_status = "Surface Mortared (Reinforced)"
 			else:
-				target_face_status = "Unbonded Face (G to Cement)"
+				target_face_status = "Uncoated Surface (Hold G to Paint Mortar)"
 		else:
 			target_face_status = ""
 		target_face_changed.emit(true, target_remove_cell, target_face_dir, target_face_status)
@@ -713,6 +711,8 @@ func _handle_throw_action() -> void:
 func _handle_cement_action() -> void:
 	if not has_target or target_is_debris:
 		return
+	if target_face_dir == Vector3i.ZERO:
+		return
 
 	var grid := grid_system
 	if grid == null and has_node("/root/GridSystem"):
@@ -726,41 +726,21 @@ func _handle_cement_action() -> void:
 	if joint_sys == null:
 		return
 
-	# Shift+G: Batch bond all adjacent touching neighbors
-	if Input.is_key_pressed(KEY_SHIFT):
-		if not unlimited_cement and cement_count <= 0:
-			target_face_status = "Insufficient Cement! (0 left)"
-			target_face_changed.emit(has_target, target_remove_cell, target_face_dir, target_face_status)
-			return
-
-		var bonded: Array = joint_sys.bond_all_adjacent_neighbors(target_remove_cell)
-		if not bonded.is_empty():
-			use_cement(bonded.size())
-			target_face_status = "Bonded %d neighbors! (Remaining: %d)" % [bonded.size(), cement_count]
-		else:
-			target_face_status = "No unbonded neighbors to bond"
-		target_face_changed.emit(has_target, target_remove_cell, target_face_dir, target_face_status)
-		return
-
-	# Single targeted face
-	if target_face_dir == Vector3i.ZERO:
-		return
-
-	var adj_cell := target_remove_cell + target_face_dir
-	if joint_sys.has_intact_joint(target_remove_cell, adj_cell):
-		target_face_status = "Face already bonded!"
+	if joint_sys.is_face_coated(target_remove_cell, target_face_dir):
+		target_face_status = "Surface Mortared (Reinforced)"
 		target_face_changed.emit(has_target, target_remove_cell, target_face_dir, target_face_status)
 		return
 
 	if not unlimited_cement and cement_count <= 0:
-		target_face_status = "Insufficient Cement! (0 left)"
+		target_face_status = "Mortar Depleted! (0 left)"
 		target_face_changed.emit(has_target, target_remove_cell, target_face_dir, target_face_status)
 		return
 
 	if use_cement(1):
-		var joint = joint_sys.apply_cement_to_face(target_remove_cell, target_face_dir)
-		if joint != null:
-			target_face_status = "Joint created & bonded! (Strength: %d)" % int(joint.max_strength)
+		var res: Dictionary = joint_sys.apply_mortar_brush(target_remove_cell, target_face_dir)
+		var reinforced: Array = res.get("reinforced_joints", [])
+		if not reinforced.is_empty():
+			target_face_status = "Surface Mortared! (%d joints reinforced, %d left)" % [reinforced.size(), cement_count]
 		else:
-			target_face_status = "Face cemented! Ready for bonding."
+			target_face_status = "Surface Mortared! (Ready, %d left)" % cement_count
 		target_face_changed.emit(has_target, target_remove_cell, target_face_dir, target_face_status)

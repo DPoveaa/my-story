@@ -55,23 +55,29 @@ limites de desempenho. 5. Quando os destroços ficam estáveis, o jogo
 pode reduzir o custo da simulação, sem eliminar automaticamente seu
 valor como material.
 
-### 3.3 Juntas Estruturais e Argamassa / Cimento
+### 3.3 Conexões Padrão, Juntas Estruturais e Pincel de Argamassa
 
--   **Estado Padrão:** Blocos recém-posicionados ocupam a grade, mas iniciam
-    desvinculados (sem argamassa/cimento). Blocos desvinculados podem repousar
-    em apoio vertical, mas podem ser empurrados ou deslocados por forças físicas.
--   **Aplicação de Argamassa/Cimento:** O jogador pode aplicar argamassa
-    nas faces adjacentes de blocos compatíveis para formar juntas estruturais rígidas.
-    Também é possível preparar previamente uma face com argamassa para que o próximo
-    bloco posicionado se conecte automaticamente.
--   **Resistência e Danos:** As juntas suportam esforços e cargas normais até seu
-    limite. Forças dinâmicas e impactos (baseados na energia de impacto $E = 0.5 m v^2$)
-    causam desgaste cumulativo ou ruptura imediata em impactos extremos.
--   **Ruptura e Destroços Compostos:** Ao quebrar uma junta, a sustentação lateral é
-    reavaliada. Corpos de destroços mantêm suas juntas internas íntegras, quebrando-se
-    em subgrupos coerentes apenas quando suas juntas internas atingirem falha mecânica.
--   **Recursos:** Aplicação de argamassa consome recursos do inventário do jogador,
-    com feedback na interface e opções de depuração para testes (cimento ilimitado).
+-   **Conexões Padrão Fracas:** Blocos adjacentes posicionados na grade possuem conexões
+    estruturais fracas por padrão, sem exigir argamassa em cada face. Essas conexões
+    mantêm estruturas unidas sob cargas estáticas leves e gravidade, evitando colapsos
+    em cadeia imediatos durante a colocação de novos blocos. Sob impactos ou cargas
+    suficientes, essas conexões rompem-se facilmente.
+-   **Pincel de Argamassa Baseado em Superfície:** O jogador aplica argamassa através de
+    um fluxo intuitivo de pincel, mirando e pintando faces expostas (segurando a ação de
+    argamassa/tecla `G` enquanto move a mira sobre a superfície).
+-   **Reforço no Padrão `+` 2D:** A argamassa reforça as conexões entre os blocos
+    vizinhos associados à superfície pintada no plano coplanar 2D (padrão em cruz `+`).
+-   **Sem Conexões em Profundidade:** A aplicação de argamassa na superfície NÃO conecta
+    blocos através da espessura da parede nem cria conexões ocultas com blocos atrás da
+    superfície pintada.
+-   **Consumo Racional de Recursos:** Apenas faces válidas e recém-revestidas consomem
+    argamassa do inventário (1 unidade por face revestida). O jogador pode manter o botão
+    pressionado sem consumo duplicado de recursos sobre faces já pintadas.
+-   **Danos, Ruptura e Destroços Compostos:** A argamassa reforça as juntas (aumentando
+    sua saúde/resistência), mas não torna a estrutura indestrutível. Fortes impactos
+    ($E = 0.5 m v^2$) ou cargas repetidas causam desgaste e ruptura. Ao quebrar uma junta,
+    a estabilidade é recalculada e os destroços mantêm suas juntas internas íntegras,
+    dividindo-se em subgrupos fisicamente coerentes apenas quando suas juntas internas falham.
 
 A física deve ser convincente, mas não precisa ser uma simulação
 perfeita de engenharia. Priorizar jogabilidade, previsibilidade e

@@ -25,7 +25,7 @@ func set_cement(current: int, max_val: int) -> void:
 	if cement_label == null:
 		cement_label = get_node_or_null("PanelTop/HBox/CementLabel")
 	if cement_label != null:
-		cement_label.text = "Cement: %d/%d" % [current, max_val]
+		cement_label.text = "Mortar: %d/%d" % [current, max_val]
 
 func set_target_face_info(has_target: bool, _cell: Vector3i, _face_dir: Vector3i, status_text: String) -> void:
 	if target_info_label == null:
@@ -34,9 +34,9 @@ func set_target_face_info(has_target: bool, _cell: Vector3i, _face_dir: Vector3i
 		if has_target and not status_text.is_empty():
 			target_info_label.text = "[%s]" % status_text
 			target_info_label.visible = true
-			if "Insufficient" in status_text:
+			if "Depleted" in status_text or "Insufficient" in status_text:
 				target_info_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
-			elif "Bonded" in status_text or "Ready" in status_text:
+			elif "Mortared" in status_text or "Bonded" in status_text or "Ready" in status_text:
 				target_info_label.add_theme_color_override("font_color", Color(0.3, 1.0, 0.4))
 			else:
 				target_info_label.add_theme_color_override("font_color", Color(1.0, 0.85, 0.2))

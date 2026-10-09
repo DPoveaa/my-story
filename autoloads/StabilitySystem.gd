@@ -57,6 +57,8 @@ func _connect_joint_signals() -> void:
 		joint_system.joint_broken.connect(_on_joint_broken)
 	if not joint_system.joint_created.is_connected(_on_joint_created):
 		joint_system.joint_created.connect(_on_joint_created)
+	if joint_system.has_signal("joint_reinforced") and not joint_system.joint_reinforced.is_connected(_on_joint_created):
+		joint_system.joint_reinforced.connect(_on_joint_created)
 
 func _on_joint_broken(_joint: Variant) -> void:
 	if not _is_evaluating:
@@ -81,9 +83,14 @@ func _on_block_placed(cell: Vector3i, _data: BlockData) -> void:
 				# Or connected via intact joint to any supported neighbor
 				for offset in NEIGHBORS_6:
 					var neighbor: Vector3i = cell + offset
-					if _supported_cells.has(neighbor) and joint_system.has_intact_joint(cell, neighbor):
-						has_support = true
-						break
+					if _supported_cells.has(neighbor):
+						if joint_system.has_intact_joint(cell, neighbor):
+							has_support = true
+							break
+						elif not joint_system.has_joint(cell, neighbor):
+							joint_system._create_default_joint(cell, neighbor)
+							has_support = true
+							break
 		else:
 			for offset in NEIGHBORS_6:
 				if _supported_cells.has(cell + offset):
@@ -194,6 +201,9 @@ func evaluate_stability() -> Array[Vector3i]:
 					var is_resting_vertical: bool = (offset == Vector3i.UP)
 					# Or structural joint connects current and neighbor
 					var has_joint: bool = joint_system.has_intact_joint(current, neighbor)
+					if not has_joint and not joint_system.has_joint(current, neighbor):
+						joint_system._create_default_joint(current, neighbor)
+						has_joint = true
 					if is_resting_vertical or has_joint:
 						visited[neighbor] = true
 						queue.append(neighbor)

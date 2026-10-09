@@ -383,39 +383,37 @@ explicitamente definidos ou alterados.
 - **Validação e Testes Executados:**
   - Suíte M2.2 (`tests/test_m2_2.gd`): 13/13 testes aprovados com sucesso.
 
-### 13.6 Milestone 2.3 — Juntas Estruturais e Ligação por Cimento / Argamassa (Implementado e Validado)
+### 13.6 Milestone 2.3 — Conexões Padrão, Juntas Estruturais e Pincel de Argamassa Baseado em Superfície (Implementado e Validado)
+- **Conexões Padrão entre Blocos Adjacentes (`JointSystem.gd` / `StabilitySystem.gd`):**
+  - Blocos adjacentes posicionados no grid formam automaticamente conexões estruturais padrão fracas (`default_joint_strength = 25.0`), sem exigir argamassa em cada face.
+  - As conexões padrão suportam cargas estáticas leves e gravidade, eliminando o colapso tipo dominó ao posicionar blocos não revestidos em pontes ou cantilevers.
+  - Sob impactos moderados/severos ($E = 0.5 m v^2$) ou cargas repetidas, conexões padrão rompem-se facilmente, acionando reavaliação de estabilidade.
+- **Pincel de Argamassa Baseado em Superfície (`apply_mortar_brush`):**
+  - Substitui o antigo fluxo de cimento por face isolada e o atalho `Shift+G` por um pincel contínuo intuitivo: o jogador mira nas faces expostas e segura a tecla `G` (ou ação `apply_cement`) enquanto varre a superfície.
+  - **Reforço no Padrão `+` 2D:** A argamassa reforça todas as juntas com vizinhos coplanares na superfície em um padrão em cruz `+` 2D (4 direções ortogonais ao vetor normal da face).
+  - **Isolamento de Profundidade:** A argamassa NÃO conecta nem reforça blocos através da espessura da parede (-normal) nem cria conexões ocultas atrás da superfície pintada.
+  - **Consumo Racional de Recursos:** Apenas faces recém-revestidas consomem argamassa (1 unidade por face). Manter o pincel pressionado sobre faces já revestidas não consome recursos repetidamente.
 - **Modelo de Dados de Juntas (`data/StructuralJoint.gd`):**
-  - Classe `StructuralJoint` encapsula o par canônico de células conectadas (`cell_a`, `cell_b`), resistência máxima (`max_strength`), integridade atual (`current_health`) e estado de ruptura.
-  - Suporte completo a cálculo de dano, quebra e serialização em dicionário (`to_dict` / `from_dict`).
-- **Gerenciador de Juntas Singleton (`autoloads/JointSystem.gd`):**
-  - Autoload `JointSystem` registrado em `project.godot`.
-  - Mapeamento determinístico de chaves canônicas com ordenação lexicográfica de coordenadas (`make_joint_key`).
-  - Cálculo de resistência de junta baseado na compatibilidade e dureza de materiais (`BlockTypeCatalog`), garantindo resistências configuradas (ex.: pedra/ouro vs madeira).
-  - Preparação prévia de faces (`mortar_faces`): o jogador pode cimentar a face de um bloco exposto (`prime_mortar_face`), fazendo com que o próximo bloco posicionado naquela face forme a junta estrutural automaticamente.
-  - Aplicação de cimento em lote (`bond_all_adjacent_neighbors` via `Shift+G`).
-  - Distribuição de impacto físico: calcula energia cinética de impacto ($E = 0.5 m v^2$), distribuindo o dano uniformemente entre as juntas estruturais conectadas ao ponto de colisão.
-  - Limpeza imediata e sanitização: remoção de bloco no `GridSystem` limpa automaticamente todas as juntas associadas, eliminando juntas órfãs, duplicadas ou inválidas.
-- **Integração com Sistema de Estabilidade (`autoloads/StabilitySystem.gd`):**
-  - Adicionada propriedade `require_joints_for_lateral_support`: blocos sobrepostos verticalmente apoiam-se por gravidade, mas apoios laterais (cantilevers, pontes suspensas, balanços) exigem juntas cimentadas ativas para transmitir sustentação.
-  - Ruptura de junta reavalia instantaneamente a estabilidade estrutural da região afetada, desencadeando desmoronamento automático de elementos que perderam ancoragem.
-- **Física de Blocos Desvinculados e Destroços Compostos (`DebrisIsland.gd` / `CollapseOrchestrator.gd`):**
-  - Blocos recém-posicionados iniciam desvinculados por padrão; o jogador e forças físicas podem deslocá-los (`push_unbonded_block`).
-  - Durante o colapso, juntas intactas entre blocos sem suporte são preservadas como `internal_joints` dentro da `DebrisIsland`.
-  - Corpos de destroços compostos sofrem danos de impacto nas juntas internas (`apply_impact_damage`) ao colidirem com alta energia.
-  - Quando uma junta interna se rompe, a `DebrisIsland` avalia a conectividade remanescente e divide-se deterministicamente em sub-ilhas compostas através de `check_and_split_on_broken_joints`, preservando os subgrupos que ainda mantêm juntas íntegras.
-- **Inventário de Cimento e Feedback no HUD (`PlayerController.gd` / `BuildHUD.tscn`):**
-  - Inventário finito de cimento (`cement_count = 25`, `max_cement = 100`) com flag de depuração (`unlimited_cement = false`).
-  - Consumo de 1 unidade por junta criada. Sinal sonoro/visual e aviso de "Cimento insuficiente!" ao tentar aplicar sem recursos.
-  - Mira precisa de face (`get_targeted_face`): exibe no HUD o status da face (`Cimentada`, `Sem cimento`, `Junta ativa: saúde/máx`) e contador em tempo real (`Cimento: X/100`).
-  - Mapeamento de ações limpo sem conflitos: tecla `G` para aplicar cimento na face mirada, `Shift+G` para ligar todos os vizinhos adjacentes.
+  - Classe `StructuralJoint` encapsula o par canônico de células conectadas (`cell_a`, `cell_b`), resistência máxima (`max_strength`), integridade atual (`current_health`), flags `is_mortared` e `is_default`, e método `reinforce_with_mortar(strength)`.
+  - Serialização completa em dicionário (`to_dict` / `from_dict`) com preservação do estado de argamassa.
+- **Resolução de Regressões e Estabilidade Pós-Colapso:**
+  - Corrigido o colapso tipo dominó: novos blocos adjacentes ganham conexões padrão imediatamente, mantendo a integridade da ponte sem invalidar conexões vizinhas.
+  - Aplicação de argamassa pós-colapso: faces remanescentes de estruturas que sofreram desmoronamento podem ser pintadas normalmente pelo pincel de argamassa, sem erros de referência obsoleta ou desativação permanente da ferramenta.
+  - Preservação de destroços compostos: corpos rígidos de destroços mantêm juntas internas íntegras durante o desmoronamento e dividem-se em subgrupos apenas se as juntas internas romperem por impacto.
+  - Todas as mecânicas existentes (arremesso `F`, segurar/soltar `E`, recuperação `R`, projeção espiritual `V`/`P`) continuam operacionais sem conflito.
+- **Inventário e Interface (`PlayerController.gd` / `BuildHUD.tscn` / `BuildHUD.gd`):**
+  - Contador de argamassa no HUD: `Mortar: X/100` com flag `unlimited_cement` para testes.
+  - Feedback dinâmico de superfície: `[Surface Mortared (Reinforced)]`, `[Uncoated Surface (Hold G to Paint Mortar)]`, `[Mortar Depleted! (0 left)]`.
+  - Painel de controles atualizado: `G: Mortar Brush (Hold & Paint Surfaces)  |  Reinforces + Pattern`.
 - **Validação e Testes Executados:**
+  - Suíte Pincel de Argamassa (`tests/test_mortar_brush.gd`): 8/8 testes aprovados (`test_surface_orientation`, `test_plus_adjacency_rule`, `test_no_through_wall_connections`, `test_resource_consumption_and_no_duplicates`, `test_placement_near_existing_joints_no_domino_collapse`, `test_post_collapse_mortar_application`, `test_joint_damage_and_breakage`, `test_debris_splitting_on_broken_joints`).
   - Suíte M1 (`tests/test_m1.gd`): 11/11 testes aprovados.
   - Suíte M1.1 (`tests/test_m1_1.gd`): 11/11 testes aprovados.
   - Suíte M2 (`tests/test_m2.gd`): 7/7 testes aprovados.
   - Suíte M2.1 (`tests/test_m2_1.gd`): 13/13 testes aprovados.
   - Suíte M2.2 (`tests/test_m2_2.gd`): 13/13 testes aprovados.
   - Suíte M2.3 (`tests/test_m2_3.gd`): 14/14 testes aprovados.
-  - **Total de testes automatizados: 69/69 aprovados (0 falhas)**.
+  - **Total de testes automatizados: 77/77 aprovados com 0 falhas**.
   - Teste de Integração em Tempo Real (`tests/test_scene_runtime.gd`): executado com sucesso e saída 0.
 
 ### 13.7 Limitações Restantes e Próximos Passos

@@ -16,13 +16,16 @@ var current_health: float = 100.0
 var material_a: StringName = &"stone"
 var material_b: StringName = &"stone"
 var is_broken: bool = false
+var is_mortared: bool = false
+var is_default: bool = true
 
 func _init(
 	p_cell_a: Vector3i = Vector3i.ZERO,
 	p_cell_b: Vector3i = Vector3i.ZERO,
 	p_strength: float = 100.0,
 	p_mat_a: StringName = &"stone",
-	p_mat_b: StringName = &"stone"
+	p_mat_b: StringName = &"stone",
+	p_is_mortared: bool = false
 ) -> void:
 	cell_a = p_cell_a
 	cell_b = p_cell_b
@@ -31,6 +34,16 @@ func _init(
 	current_health = max_strength
 	material_a = p_mat_a
 	material_b = p_mat_b
+	is_broken = false
+	is_mortared = p_is_mortared
+	is_default = not p_is_mortared
+
+## Reinforces this joint with mortar, upgrading its strength to full mortared capacity.
+func reinforce_with_mortar(strength: float) -> void:
+	is_mortared = true
+	is_default = false
+	max_strength = maxf(max_strength, strength)
+	current_health = max_strength
 	is_broken = false
 
 ## Canonical deterministic key for dictionary indexing, avoiding order ambiguity between (A, B) and (B, A).
@@ -92,7 +105,8 @@ func to_dict() -> Dictionary:
 		"current_health": current_health,
 		"material_a": String(material_a),
 		"material_b": String(material_b),
-		"is_broken": is_broken
+		"is_broken": is_broken,
+		"is_mortared": is_mortared
 	}
 
 static func from_dict(dict: Dictionary) -> RefCounted:
@@ -104,9 +118,10 @@ static func from_dict(dict: Dictionary) -> RefCounted:
 	var cur_h: float = float(dict.get("current_health", max_s))
 	var ma := StringName(dict.get("material_a", "stone"))
 	var mb := StringName(dict.get("material_b", "stone"))
+	var is_mort: bool = bool(dict.get("is_mortared", false))
 
 	var script_res: GDScript = load("res://data/StructuralJoint.gd") as GDScript
-	var joint = script_res.new(ca, cb, max_s, ma, mb)
+	var joint = script_res.new(ca, cb, max_s, ma, mb, is_mort)
 	joint.current_health = cur_h
 	joint.is_broken = bool(dict.get("is_broken", false))
 	return joint

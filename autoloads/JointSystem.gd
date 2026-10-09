@@ -1,17 +1,21 @@
 extends Node
 
-## Central authoritative manager for structural joints, face cement states, and bonding in the grid.
-## Maintains active joints between grid blocks, manages face mortar priming,
+## Central authoritative manager for structural joints, default block connections, and surface-based mortar brush.
+## Maintains active joints between grid blocks, manages surface mortar painting,
 ## calculates impact damage and force distribution, and emits signals on joint changes.
 
 signal joint_created(joint: RefCounted)
+signal joint_reinforced(joint: RefCounted)
 signal joint_damaged(joint: RefCounted, damage: float, remaining_health: float)
 signal joint_broken(joint: RefCounted)
 signal joint_removed(joint: RefCounted)
-signal face_cemented(cell: Vector3i, face_dir: Vector3i)
+signal face_coated(cell: Vector3i, face_dir: Vector3i)
 signal joints_cleared()
 
 const StructuralJointScript = preload("res://data/StructuralJoint.gd")
+
+## Base strength for weak default connections between adjacent unmortared blocks
+@export var default_joint_strength: float = 25.0
 
 ## Minimum impact energy (Joules) required before a joint sustains damage (filters out minor noise/brushing)
 @export var impact_energy_min_threshold: float = 8.0
@@ -25,14 +29,25 @@ var _joints: Dictionary = {}
 ## Fast lookup index: Dictionary[Vector3i, Array]
 var _cell_to_joints: Dictionary = {}
 
-## Faces primed with cement/mortar before neighbor placement: Dictionary[String, bool]
+## Faces coated with mortar: Dictionary[String, bool]
 ## Key format: "%d,%d,%d:%d,%d,%d" (cell:face_dir)
-var _primed_faces: Dictionary = {}
+var _coated_faces: Dictionary = {}
 
 ## Optional reference to GridSystem
-@export var grid_system: Node
+@export var grid_system: Node:
+	set(val):
+		grid_system = val
+		if grid_system != null:
+			_connect_grid_signals()
+
 ## Optional reference to StabilitySystem
 @export var stability_system: Node
+
+const NEIGHBORS_6: Array[Vector3i] = [
+	Vector3i(0, 1, 0), Vector3i(0, -1, 0),
+	Vector3i(1, 0, 0), Vector3i(-1, 0, 0),
+	Vector3i(0, 0, 1), Vector3i(0, 0, -1)
+]
 
 func _ready() -> void:
 	if grid_system == null and has_node("/root/GridSystem"):
@@ -58,12 +73,12 @@ func _face_key(cell: Vector3i, face_dir: Vector3i) -> String:
 # COMPATIBILITY & STRENGTH CONFIGURATION
 # ==============================================================================
 
-## Returns whether two block materials can be bonded together with cement/mortar.
+## Returns whether two block materials can form structural joints.
 func are_materials_compatible(type_a: StringName, type_b: StringName) -> bool:
 	var valid_types: Array[StringName] = [&"stone", &"wood", &"brick", &"gold"]
 	return type_a in valid_types and type_b in valid_types
 
-## Calculates base maximum joint strength based on material properties of the two connected blocks.
+## Calculates base maximum joint strength when reinforced with mortar.
 func calculate_base_strength(type_a: StringName, type_b: StringName) -> float:
 	var pair: Array[StringName] = [type_a, type_b]
 	pair.sort()
@@ -96,47 +111,109 @@ func calculate_base_strength(type_a: StringName, type_b: StringName) -> float:
 
 	return 70.0
 
+## Calculates weak default strength for unmortared connections.
+func calculate_default_strength(type_a: StringName, type_b: StringName) -> float:
+	var base := calculate_base_strength(type_a, type_b)
+	return maxf(5.0, default_joint_strength * (base / 100.0))
+
 # ==============================================================================
-# CEMENT APPLICATION & BONDING
+# SURFACE-BASED MORTAR BRUSH
 # ==============================================================================
 
-## Applies cement/mortar to a specific face of a block.
-## If the adjacent cell already has a compatible block, immediately creates and bonds the joint.
-## If the adjacent cell is empty, primes that face so a block placed there will bond immediately.
+## Returns the 4 coplanar directions in a 2D '+' pattern orthogonal to the surface normal.
+## Explicitly excludes the depth direction (-normal) and front (+normal).
+func get_surface_orthogonal_directions(normal: Vector3i) -> Array[Vector3i]:
+	if normal.x != 0:
+		return [Vector3i(0, 1, 0), Vector3i(0, -1, 0), Vector3i(0, 0, 1), Vector3i(0, 0, -1)]
+	elif normal.y != 0:
+		return [Vector3i(1, 0, 0), Vector3i(-1, 0, 0), Vector3i(0, 0, 1), Vector3i(0, 0, -1)]
+	elif normal.z != 0:
+		return [Vector3i(1, 0, 0), Vector3i(-1, 0, 0), Vector3i(0, 1, 0), Vector3i(0, -1, 0)]
+	return []
+
+## Checks whether a specific face of a cell has already been coated with mortar.
+func is_face_coated(cell: Vector3i, face_dir: Vector3i) -> bool:
+	var fk := _face_key(cell, face_dir)
+	return _coated_faces.get(fk, false)
+
+## Legacy alias for is_face_coated.
+func is_face_cemented(cell: Vector3i, face_dir: Vector3i) -> bool:
+	return is_face_coated(cell, face_dir)
+
+## Applies the mortar brush to an exposed face of a block.
+## Reinforces connections with coplanar neighbors in a 2D '+' pattern on that surface.
+## Does NOT connect blocks through the wall's depth or behind the surface.
+## Only coats valid, newly targeted faces to prevent duplicate resource consumption.
+## Returns a Dictionary with:
+##   - success: bool
+##   - already_coated: bool
+##   - consumed: bool
+##   - reinforced_joints: Array
+func apply_mortar_brush(cell: Vector3i, face_dir: Vector3i) -> Dictionary:
+	var grid := _get_grid()
+	if grid == null or not grid.has_block(cell) or face_dir == Vector3i.ZERO:
+		return {"success": false, "already_coated": false, "consumed": false, "reinforced_joints": []}
+
+	var fk := _face_key(cell, face_dir)
+	if _coated_faces.get(fk, false):
+		return {"success": false, "already_coated": true, "consumed": false, "reinforced_joints": []}
+
+	# Mark face as coated
+	_coated_faces[fk] = true
+	face_coated.emit(cell, face_dir)
+
+	var block_a: BlockData = grid.get_block(cell)
+	var mat_a: StringName = block_a.block_type if block_a != null else &"stone"
+
+	var reinforced: Array = []
+	var orth_dirs := get_surface_orthogonal_directions(face_dir)
+
+	for dir in orth_dirs:
+		var neighbor: Vector3i = cell + dir
+		if grid.has_block(neighbor):
+			var block_b: BlockData = grid.get_block(neighbor)
+			var mat_b: StringName = block_b.block_type if block_b != null else &"stone"
+			if are_materials_compatible(mat_a, mat_b):
+				var strength := calculate_base_strength(mat_a, mat_b)
+				var key := StructuralJointScript.make_key(cell, neighbor)
+				var joint: RefCounted = null
+				if _joints.has(key):
+					joint = _joints[key]
+					joint.reinforce_with_mortar(strength)
+					joint_reinforced.emit(joint)
+				else:
+					joint = StructuralJointScript.new(cell, neighbor, strength, mat_a, mat_b, true)
+					_register_joint(joint)
+					joint_created.emit(joint)
+				reinforced.append(joint)
+
+	return {"success": true, "already_coated": false, "consumed": true, "reinforced_joints": reinforced}
+
+## Backward-compatible wrapper for apply_cement_to_face.
+## If an adjacent block exists across face_dir, reinforces that contact joint directly.
+## Otherwise coats the face and reinforces the 2D '+' coplanar surface.
 func apply_cement_to_face(cell: Vector3i, face_dir: Vector3i, custom_strength: float = -1.0) -> RefCounted:
 	var grid := _get_grid()
-	if grid == null or not grid.has_block(cell):
+	if grid == null or not grid.has_block(cell) or face_dir == Vector3i.ZERO:
 		return null
 
-	var adj_cell: Vector3i = cell + face_dir
+	var adj_cell := cell + face_dir
 	if grid.has_block(adj_cell):
-		# Immediately bond existing adjacent block across this face
 		return bond_adjacent(cell, adj_cell, custom_strength)
 	else:
-		# Prime face for future adjacent placement
-		var fk := _face_key(cell, face_dir)
-		_primed_faces[fk] = true
-		face_cemented.emit(cell, face_dir)
+		var res := apply_mortar_brush(cell, face_dir)
+		var joints: Array = res.get("reinforced_joints", [])
+		if not joints.is_empty():
+			return joints[0]
 		return null
 
-## Bonds two already adjacent blocks with a structural joint.
-## Replaces or ignores duplicate joint safely.
+## Bonds two already adjacent blocks with a reinforced structural joint.
 func bond_adjacent(cell_a: Vector3i, cell_b: Vector3i, custom_strength: float = -1.0) -> RefCounted:
 	var grid := _get_grid()
 	if grid == null:
 		return null
 	if not grid.has_block(cell_a) or not grid.has_block(cell_b):
 		return null
-
-	var key: String = StructuralJointScript.make_key(cell_a, cell_b)
-	if _joints.has(key):
-		var existing: RefCounted = _joints[key]
-		if existing.is_broken:
-			# Re-cement broken joint
-			existing.is_broken = false
-			existing.current_health = existing.max_strength
-			joint_created.emit(existing)
-		return existing
 
 	var block_a: BlockData = grid.get_block(cell_a)
 	var block_b: BlockData = grid.get_block(cell_b)
@@ -147,14 +224,15 @@ func bond_adjacent(cell_a: Vector3i, cell_b: Vector3i, custom_strength: float = 
 		return null
 
 	var strength: float = custom_strength if custom_strength > 0.0 else calculate_base_strength(mat_a, mat_b)
-	var joint: RefCounted = StructuralJointScript.new(cell_a, cell_b, strength, mat_a, mat_b)
+	var key: String = StructuralJointScript.make_key(cell_a, cell_b)
+	if _joints.has(key):
+		var existing: RefCounted = _joints[key]
+		existing.reinforce_with_mortar(strength)
+		joint_reinforced.emit(existing)
+		return existing
 
+	var joint: RefCounted = StructuralJointScript.new(cell_a, cell_b, strength, mat_a, mat_b, true)
 	_register_joint(joint)
-
-	# Clean up any primed face between them
-	_primed_faces.erase(_face_key(cell_a, cell_b - cell_a))
-	_primed_faces.erase(_face_key(cell_b, cell_a - cell_b))
-
 	joint_created.emit(joint)
 	return joint
 
@@ -165,13 +243,7 @@ func bond_all_adjacent_neighbors(cell: Vector3i) -> Array:
 	if grid == null or not grid.has_block(cell):
 		return bonded
 
-	const NEIGHBORS: Array[Vector3i] = [
-		Vector3i(0, 1, 0), Vector3i(0, -1, 0),
-		Vector3i(1, 0, 0), Vector3i(-1, 0, 0),
-		Vector3i(0, 0, 1), Vector3i(0, 0, -1)
-	]
-
-	for offset in NEIGHBORS:
+	for offset in NEIGHBORS_6:
 		var neighbor: Vector3i = cell + offset
 		if grid.has_block(neighbor):
 			var joint = bond_adjacent(cell, neighbor)
@@ -179,6 +251,27 @@ func bond_all_adjacent_neighbors(cell: Vector3i) -> Array:
 				bonded.append(joint)
 
 	return bonded
+
+## Creates a default (weak, unmortared) joint between two adjacent blocks.
+func _create_default_joint(cell_a: Vector3i, cell_b: Vector3i) -> RefCounted:
+	var grid := _get_grid()
+	if grid == null or not grid.has_block(cell_a) or not grid.has_block(cell_b):
+		return null
+
+	var key: String = StructuralJointScript.make_key(cell_a, cell_b)
+	if _joints.has(key):
+		return _joints[key]
+
+	var block_a: BlockData = grid.get_block(cell_a)
+	var block_b: BlockData = grid.get_block(cell_b)
+	var mat_a: StringName = block_a.block_type if block_a != null else &"stone"
+	var mat_b: StringName = block_b.block_type if block_b != null else &"stone"
+
+	var strength := calculate_default_strength(mat_a, mat_b)
+	var joint: RefCounted = StructuralJointScript.new(cell_a, cell_b, strength, mat_a, mat_b, false)
+	_register_joint(joint)
+	joint_created.emit(joint)
+	return joint
 
 func _register_joint(joint: RefCounted) -> void:
 	var key: String = joint.get_key()
@@ -223,11 +316,28 @@ func has_intact_joint(cell_a: Vector3i, cell_b: Vector3i) -> bool:
 		return not j.is_broken
 	return false
 
+func is_joint_mortared(cell_a: Vector3i, cell_b: Vector3i) -> bool:
+	var key: String = StructuralJointScript.make_key(cell_a, cell_b)
+	if _joints.has(key):
+		var j: RefCounted = _joints[key]
+		return not j.is_broken and j.is_mortared
+	return false
+
 func get_joint(cell_a: Vector3i, cell_b: Vector3i) -> RefCounted:
 	var key: String = StructuralJointScript.make_key(cell_a, cell_b)
 	return _joints.get(key, null)
 
+## Returns true if the block has at least one intact mortared joint.
 func is_block_bonded(cell: Vector3i) -> bool:
+	if not _cell_to_joints.has(cell):
+		return false
+	for j in _cell_to_joints[cell]:
+		if not j.is_broken and j.is_mortared:
+			return true
+	return false
+
+## Returns true if the block has any intact joint (default or mortared).
+func has_any_intact_joint(cell: Vector3i) -> bool:
 	if not _cell_to_joints.has(cell):
 		return false
 	for j in _cell_to_joints[cell]:
@@ -241,13 +351,6 @@ func get_joints_for_cell(cell: Vector3i) -> Array:
 		for j in _cell_to_joints[cell]:
 			result.append(j)
 	return result
-
-func is_face_cemented(cell: Vector3i, face_dir: Vector3i) -> bool:
-	var fk := _face_key(cell, face_dir)
-	if _primed_faces.get(fk, false):
-		return true
-	var adj_cell := cell + face_dir
-	return has_intact_joint(cell, adj_cell)
 
 func get_all_joints() -> Array:
 	var result: Array = []
@@ -291,7 +394,6 @@ func _on_joint_broken_internal(_joint: RefCounted) -> void:
 
 ## Applies an impact of energy (in Joules) to a block in the grid.
 ## Considers impact energy, force distribution among attached joints, material resistance, and joint strength.
-## Does NOT rely solely on object size.
 ## Returns any joints that were broken by the impact.
 func apply_impact_to_block_joints(cell: Vector3i, impact_energy: float, _hit_normal: Vector3 = Vector3.ZERO) -> Array:
 	var broken_joints: Array = []
@@ -346,14 +448,9 @@ func remove_joints_for_cell(cell: Vector3i) -> Array:
 	for j in to_remove:
 		_unregister_joint(j)
 
-	# Clean up any primed faces on this cell
-	const NEIGHBORS: Array[Vector3i] = [
-		Vector3i(0, 1, 0), Vector3i(0, -1, 0),
-		Vector3i(1, 0, 0), Vector3i(-1, 0, 0),
-		Vector3i(0, 0, 1), Vector3i(0, 0, -1)
-	]
-	for offset in NEIGHBORS:
-		_primed_faces.erase(_face_key(cell, offset))
+	# Clean up any coated faces on this cell
+	for offset in NEIGHBORS_6:
+		_coated_faces.erase(_face_key(cell, offset))
 
 	return to_remove
 
@@ -389,7 +486,7 @@ func extract_joints_for_cells(cells: Array[Vector3i]) -> Array:
 	for ij in internal_joints:
 		_unregister_joint(ij)
 
-	# Clean up primed faces on collapsing cells
+	# Clean up coated faces on collapsing cells
 	for c in cells:
 		remove_joints_for_cell(c)
 
@@ -398,7 +495,7 @@ func extract_joints_for_cells(cells: Array[Vector3i]) -> Array:
 func clear_all_joints() -> void:
 	_joints.clear()
 	_cell_to_joints.clear()
-	_primed_faces.clear()
+	_coated_faces.clear()
 	joints_cleared.emit()
 
 # ==============================================================================
@@ -406,20 +503,33 @@ func clear_all_joints() -> void:
 # ==============================================================================
 
 func _on_grid_block_placed(cell: Vector3i, _data: BlockData) -> void:
-	const NEIGHBORS: Array[Vector3i] = [
-		Vector3i(0, 1, 0), Vector3i(0, -1, 0),
-		Vector3i(1, 0, 0), Vector3i(-1, 0, 0),
-		Vector3i(0, 0, 1), Vector3i(0, 0, -1)
-	]
+	var grid := _get_grid()
+	if grid == null:
+		return
 
-	# Check if any adjacent neighbor has a primed face pointing towards this cell
-	for offset in NEIGHBORS:
+	# Automatically create default connections with adjacent existing blocks
+	for offset in NEIGHBORS_6:
 		var neighbor: Vector3i = cell + offset
-		var opp_offset := -offset
-		var fk := _face_key(neighbor, opp_offset)
-		if _primed_faces.get(fk, false):
-			_primed_faces.erase(fk)
-			bond_adjacent(neighbor, cell)
+		if grid.has_block(neighbor):
+			var joint = _create_default_joint(cell, neighbor)
+			var opp_offset := -offset
+			# Check if neighbor had an exposed face pointing to this cell that was coated with mortar
+			if is_face_coated(neighbor, opp_offset):
+				var mat_a: StringName = _data.block_type if _data != null else &"stone"
+				var block_b: BlockData = grid.get_block(neighbor)
+				var mat_b: StringName = block_b.block_type if block_b != null else &"stone"
+				if joint != null and are_materials_compatible(mat_a, mat_b):
+					joint.reinforce_with_mortar(calculate_base_strength(mat_a, mat_b))
+			else:
+				# Or if neighbor had a surface orthogonal to offset that was coated
+				var orth_dirs := get_surface_orthogonal_directions(offset)
+				for surf_norm in orth_dirs:
+					if is_face_coated(neighbor, surf_norm):
+						var mat_a: StringName = _data.block_type if _data != null else &"stone"
+						var block_b: BlockData = grid.get_block(neighbor)
+						var mat_b: StringName = block_b.block_type if block_b != null else &"stone"
+						if joint != null and are_materials_compatible(mat_a, mat_b):
+							joint.reinforce_with_mortar(calculate_base_strength(mat_a, mat_b))
 
 func _on_grid_block_removed(cell: Vector3i, _data: BlockData) -> void:
 	remove_joints_for_cell(cell)

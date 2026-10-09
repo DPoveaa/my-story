@@ -55,7 +55,7 @@ func _run_test(test_name: String, test_func: Callable) -> void:
 		failed_count += 1
 		print("[FAIL] %s" % test_name)
 
-## 1. Newly placed blocks occupy grid cells but are NOT automatically cemented
+## 1. Newly placed blocks occupy grid cells and have weak default connection without requiring mortar
 func test_unbonded_blocks_default_state() -> bool:
 	var grid: Node = GridSystemScript.new()
 	var joints: Node = JointSystemScript.new()
@@ -66,13 +66,14 @@ func test_unbonded_blocks_default_state() -> bool:
 
 	# Both cells are occupied in grid
 	var occupied: bool = grid.has_block(Vector3i(0, 0, 0)) and grid.has_block(Vector3i(0, 1, 0))
-	# But no structural joint exists by default
-	var has_j: bool = joints.has_joint(Vector3i(0, 0, 0), Vector3i(0, 1, 0))
+	# They have weak default connection, but are unmortared
+	var has_default: bool = joints.has_joint(Vector3i(0, 0, 0), Vector3i(0, 1, 0))
 	var is_bonded: bool = joints.is_block_bonded(Vector3i(0, 1, 0))
+	var is_mortared: bool = joints.is_joint_mortared(Vector3i(0, 0, 0), Vector3i(0, 1, 0))
 
 	grid.queue_free()
 	joints.queue_free()
-	return occupied and not has_j and not is_bonded
+	return occupied and has_default and not is_bonded and not is_mortared
 
 ## 2. Applying cement to adjacent blocks creates an explicit structural joint with configurable strength
 func test_apply_cement_creates_joint() -> bool:
@@ -99,7 +100,7 @@ func test_apply_cement_creates_joint() -> bool:
 	joints.queue_free()
 	return exists and strength_ok and bonded_a and bonded_b
 
-## 3. Applying cement to open face primes it; subsequent adjacent placement automatically bonds
+## 3. Applying cement to open face coats it; subsequent adjacent placement automatically bonds
 func test_face_priming_bonds_on_placement() -> bool:
 	var grid: Node = GridSystemScript.new()
 	var joints: Node = JointSystemScript.new()
@@ -108,9 +109,9 @@ func test_face_priming_bonds_on_placement() -> bool:
 
 	grid.place_block(Vector3i(0, 0, 0), &"stone")
 
-	# Prime top face (+Y) before placing top block
+	# Coat top face (+Y) before placing top block
 	var primed_joint = joints.apply_cement_to_face(Vector3i(0, 0, 0), Vector3i.UP)
-	var is_primed: bool = (primed_joint == null) and joints.is_face_cemented(Vector3i(0, 0, 0), Vector3i.UP)
+	var is_primed: bool = joints.is_face_coated(Vector3i(0, 0, 0), Vector3i.UP)
 
 	# Now place block on top
 	grid.place_block(Vector3i(0, 1, 0), &"brick")

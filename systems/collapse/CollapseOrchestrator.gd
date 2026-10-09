@@ -98,7 +98,8 @@ func trigger_collapse(unsupported_cells: Array[Vector3i]) -> Array[DebrisIsland]
 
 		var island := DebrisIsland.new()
 		island.orchestrator = self
-		debris_container.add_child(island)
+		var container: Node = debris_container if debris_container != null else self
+		container.add_child(island)
 		island.setup_island(cell_group, removed_block_data, grid.cell_size, group_joints)
 
 		island.island_settled.connect(_on_island_settled)
