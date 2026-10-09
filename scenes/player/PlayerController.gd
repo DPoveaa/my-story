@@ -385,6 +385,12 @@ func _select_type_by_index(idx: int) -> void:
 		block_type_changed.emit(get_selected_type())
 
 func _physics_process(delta: float) -> void:
+	if _is_ui_modal_open():
+		velocity.x = 0.0
+		velocity.z = 0.0
+		_update_raycast()
+		return
+
 	match current_state:
 		State.BODY_CONTROL:
 			_process_body_movement(delta)
@@ -665,12 +671,34 @@ func _update_raycast() -> void:
 		else:
 			target_place_cell = grid.world_to_cell(hit_pos + hit_normal * (grid.cell_size * 0.5))
 			var grid_valid: bool = grid.can_place_block(target_place_cell)
+			var held_island: DebrisIsland = debris_grabber.get_grabbed_island() if (debris_grabber != null and debris_grabber.is_grabbing) else null
 			var blocked: bool = false
 			if orchestrator != null:
-				blocked = orchestrator.is_cell_blocked_by_debris(target_place_cell, grid.cell_size)
+				blocked = orchestrator.is_cell_blocked_by_debris(target_place_cell, grid.cell_size, held_island)
 			var overlaps_player: bool = is_cell_overlapping_player(target_place_cell, grid.cell_size)
 
 			can_place_target = grid_valid and not blocked and not overlaps_player
+
+		# Display material and integrity percentage for the individual targeted debris block
+		if target_debris_cell != null and hit_collider.constituent_blocks.has(target_debris_cell):
+			var block_data: BlockData = hit_collider.constituent_blocks[target_debris_cell]
+			var mat_name := BlockTypeCatalog.get_display_name(block_data.block_type)
+			var max_dur: float = BlockTypeCatalog.get_max_durability(block_data.block_type)
+			var ratio: float = block_data.durability / max_dur if max_dur > 0.0 else 0.0
+			var pct: int = int(clampf(ratio, 0.0, 1.0) * 100.0)
+			var dur_label: String
+			if pct >= 80:
+				dur_label = "%d%% Integrity" % pct
+			elif pct >= 40:
+				dur_label = "%d%% Integrity (Damaged)" % pct
+			else:
+				dur_label = "%d%% Integrity (CRITICAL)" % pct
+
+			target_face_status = "Debris (%s)  |  %s" % [mat_name, dur_label]
+			target_face_changed.emit(true, Vector3i.ZERO, Vector3i.ZERO, target_face_status)
+		else:
+			target_face_status = ""
+			target_face_changed.emit(false, Vector3i.ZERO, Vector3i.ZERO, "")
 
 	else:
 		target_is_debris = false

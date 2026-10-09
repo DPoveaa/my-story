@@ -86,13 +86,6 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		if event.is_action_pressed(&"debug_camera") or event.keycode == KEY_F1:
 			toggle_debug_camera()
-		elif event.is_action_pressed(&"save_blueprint") or event.keycode == KEY_K:
-			if build_hud != null and build_hud.has_method("open_save_blueprint_dialog"):
-				build_hud.open_save_blueprint_dialog()
-		elif event.is_action_pressed(&"load_blueprint") or event.keycode == KEY_L:
-			if build_hud != null and build_hud.has_method("open_load_blueprint_dialog"):
-				var anchor: Vector3i = player.target_place_cell if (player != null and player.has_target) else Vector3i.ZERO
-				build_hud.open_load_blueprint_dialog(anchor)
 		elif event.keycode == KEY_T:
 			spawn_test_tower(Vector3i(0, 0, 0))
 		elif event.keycode == KEY_B:

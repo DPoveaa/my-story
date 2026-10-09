@@ -386,9 +386,8 @@ func apply_impact_damage(hit_cell: Vector3i, impact_energy: float) -> Array:
 			if j.apply_damage(dmg):
 				broken.append(j)
 
-	# Reduce block durability: 8% of energy absorbed by the block material itself.
-	# Scaled by material resistance so durable blocks degrade more slowly.
-	_apply_block_durability_damage(hit_cell, impact_energy * 0.08)
+	# Reduce block durability consistently from impact energy
+	_apply_block_durability_damage(hit_cell, impact_energy)
 
 	if not broken.is_empty():
 		call_deferred("check_and_split_on_broken_joints")
@@ -397,6 +396,7 @@ func apply_impact_damage(hit_cell: Vector3i, impact_energy: float) -> Array:
 
 ## Reduces the durability of a constituent block from impact energy.
 ## Clamped so durability never goes below 0.0.
+## If durability reaches 0.0, removes/destroys the block.
 func _apply_block_durability_damage(cell: Vector3i, energy: float) -> void:
 	if not constituent_blocks.has(cell):
 		return
@@ -405,6 +405,8 @@ func _apply_block_durability_damage(cell: Vector3i, energy: float) -> void:
 	# Normalise: 1 unit of energy removes (1 / dur_resistance) * scale durability.
 	var dmg: float = energy / (dur_resistance * 10.0)
 	block.durability = maxf(0.0, block.durability - dmg)
+	if block.durability <= 0.0:
+		remove_block(cell)
 
 ## Evaluates connectivity among remaining blocks based strictly on intact internal joints.
 ## If broken joints disconnect the blocks, splits into independent compound bodies.

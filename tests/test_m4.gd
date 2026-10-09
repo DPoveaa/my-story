@@ -52,6 +52,9 @@ func run_all() -> bool:
 	_run_test("test_hud_is_modal_open_and_close")
 	_run_test("test_player_controller_k_l_emits_signals")
 	_run_test("test_player_controller_modal_blocks_gameplay_input")
+	_run_test("test_durability_damage_updates_block_and_destroys_at_zero")
+	_run_test("test_blueprint_save_requires_overwrite_confirmation")
+	_run_test("test_mortar_coated_debris_ground_placement")
 
 	print("==================================================")
 	print("M4 TEST RESULTS: %d PASSED, %d FAILED" % [_passed, _failed])
@@ -858,4 +861,86 @@ func test_player_controller_modal_blocks_gameplay_input() -> bool:
 
 	hud.queue_free()
 	player.queue_free()
+	return true
+
+func test_durability_damage_updates_block_and_destroys_at_zero() -> bool:
+	var grid := _make_grid()
+	grid.place_block(Vector3i(0, 0, 0), &"stone")
+	var b: BlockData = grid.get_block(Vector3i(0, 0, 0))
+	if b == null or absf(b.durability - 1.0) > 0.001:
+		return false
+
+	# Apply damage to grid block
+	grid.apply_damage(Vector3i(0, 0, 0), 0.4)
+	if absf(b.durability - 0.6) > 0.001:
+		return false
+
+	# Apply destroying damage
+	var destroyed: bool = grid.apply_damage(Vector3i(0, 0, 0), 0.7)
+	if not destroyed or grid.has_block(Vector3i(0, 0, 0)):
+		return false
+
+	return true
+
+func test_blueprint_save_requires_overwrite_confirmation() -> bool:
+	var grid := _make_grid()
+	grid.place_block(Vector3i(0, 0, 0), &"stone")
+	var hud = _make_hud(grid)
+	var bp_mgr = _make_mgr(grid)
+	hud.blueprint_manager = bp_mgr
+
+	hud.open_save_blueprint_dialog()
+	hud._save_name_input.text = "overwrite_test"
+
+	# First save creates the blueprint
+	hud._on_save_confirm_pressed()
+	if not bp_mgr.has_blueprint("overwrite_test"):
+		hud.queue_free()
+		return false
+
+	# Re-open save dialog and try to save again with same name
+	hud.open_save_blueprint_dialog()
+	hud._save_name_input.text = "overwrite_test"
+	hud._on_save_confirm_pressed()
+
+	# Should prompt for overwrite confirmation first
+	if not hud._save_confirm_overwrite or "already exists" not in hud._save_feedback_label.text:
+		hud.queue_free()
+		return false
+
+	# Confirming overwrite succeeds
+	hud._on_save_confirm_pressed()
+	if hud._save_confirm_overwrite:
+		hud.queue_free()
+		return false
+
+	hud.queue_free()
+	return true
+
+func test_mortar_coated_debris_ground_placement() -> bool:
+	var grid := _make_grid()
+	var orch := CollapseOrchestrator.new()
+	orch.grid_system = grid
+
+	# Debris island with mortar-coated face
+	var data := BlockData.new(&"stone", 1.0, {"coated_faces": [[0, -1, 0]]})
+	var island := DebrisIsland.new()
+	island.orchestrator = orch
+	island.setup_island([Vector3i.ZERO], {Vector3i.ZERO: data}, 1.0)
+	orch.register_debris_island(island)
+
+	# Verify orchestrator is_cell_blocked_by_debris excludes held island
+	var cell := Vector3i(2, 0, 2)
+	island.position = Vector3(2.5, 0.5, 2.5) # Island located right at cell
+
+	var blocked_with_held: bool = orch.is_cell_blocked_by_debris(cell, 1.0, island)
+	var blocked_without_held: bool = orch.is_cell_blocked_by_debris(cell, 1.0, null)
+
+	if blocked_with_held or not blocked_without_held:
+		island.queue_free()
+		orch.queue_free()
+		return false
+
+	island.queue_free()
+	orch.queue_free()
 	return true

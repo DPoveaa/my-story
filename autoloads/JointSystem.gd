@@ -466,6 +466,15 @@ func apply_impact_to_block_joints(cell: Vector3i, impact_energy: float, _hit_nor
 			else:
 				joint_damaged.emit(j, damage, j.current_health)
 
+	# Apply durability damage to the grid block itself
+	var grid := _get_grid()
+	if grid != null and grid.has_block(cell):
+		var b_data: BlockData = grid.get_block(cell)
+		if b_data != null:
+			var dur_res: float = maxf(0.1, BlockTypeCatalog.get_max_durability(b_data.block_type))
+			var block_dmg: float = impact_energy / (dur_res * 10.0)
+			grid.apply_damage(cell, block_dmg)
+
 	return broken_joints
 
 # ==============================================================================

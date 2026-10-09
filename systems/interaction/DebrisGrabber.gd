@@ -179,7 +179,7 @@ func try_place_to_grid() -> bool:
 	var target_cell := _recover_preview_cell
 	if not grid.can_place_block(target_cell):
 		return false
-	if orchestrator != null and orchestrator.is_cell_blocked_by_debris(target_cell, grid.cell_size):
+	if orchestrator != null and orchestrator.is_cell_blocked_by_debris(target_cell, grid.cell_size, _grabbed_island):
 		return false
 	if _player != null and _player.has_method("is_cell_overlapping_player"):
 		if _player.is_cell_overlapping_player(target_cell, grid.cell_size):
@@ -241,7 +241,7 @@ func try_recover() -> bool:
 		if not grid.can_place_block(target_cell):
 			recover_failed.emit("Cell occupied")
 			return false
-		if orchestrator != null and orchestrator.is_cell_blocked_by_debris(target_cell, grid.cell_size):
+		if orchestrator != null and orchestrator.is_cell_blocked_by_debris(target_cell, grid.cell_size, _grabbed_island):
 			recover_failed.emit("Cell blocked by debris")
 			return false
 		if _player != null and _player.has_method("is_cell_overlapping_player"):
@@ -370,7 +370,7 @@ func _update_recovery_preview(cam: Camera3D) -> void:
 	var target: Vector3i = grid.world_to_cell(hit_pos + hit_normal * (grid.cell_size * 0.5))
 	var is_valid: bool = grid.can_place_block(target)
 	if is_valid and orchestrator != null:
-		is_valid = not orchestrator.is_cell_blocked_by_debris(target, grid.cell_size)
+		is_valid = not orchestrator.is_cell_blocked_by_debris(target, grid.cell_size, _grabbed_island)
 	if is_valid and _player != null and _player.has_method("is_cell_overlapping_player"):
 		is_valid = not _player.is_cell_overlapping_player(target, grid.cell_size)
 

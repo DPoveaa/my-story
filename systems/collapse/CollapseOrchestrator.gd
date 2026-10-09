@@ -224,7 +224,8 @@ func push_unbonded_block(cell: Vector3i, impulse_velocity: Vector3 = Vector3.ZER
 	return island
 
 ## Checks if any active debris currently physically occupies the space of a grid cell.
-func is_cell_blocked_by_debris(cell: Vector3i, p_cell_size: float = 1.0) -> bool:
+## Optional exclude_island parameter prevents held debris from blocking its own target placement cell.
+func is_cell_blocked_by_debris(cell: Vector3i, p_cell_size: float = 1.0, exclude_island: DebrisIsland = null) -> bool:
 	var cell_center := Vector3(
 		(float(cell.x) + 0.5) * p_cell_size,
 		(float(cell.y) + 0.5) * p_cell_size,
@@ -234,6 +235,8 @@ func is_cell_blocked_by_debris(cell: Vector3i, p_cell_size: float = 1.0) -> bool
 
 	for island in _active_debris:
 		if not is_instance_valid(island):
+			continue
+		if island == exclude_island:
 			continue
 		var island_tf: Transform3D = island.global_transform if island.is_inside_tree() else island.transform
 		for c in island.constituent_blocks.keys():

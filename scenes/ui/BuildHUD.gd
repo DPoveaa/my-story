@@ -28,6 +28,7 @@ var _save_name_input: LineEdit = null
 var _save_info_label: Label = null
 var _save_feedback_label: Label = null
 var _save_btn: Button = null
+var _save_confirm_overwrite: bool = false
 
 ## Blueprint Load Modal Nodes
 var _load_modal: PanelContainer = null
@@ -165,6 +166,9 @@ func open_save_blueprint_dialog() -> void:
 	if _save_modal == null:
 		return
 	var count: int = grid_system.get_block_count() if grid_system != null else 0
+	_save_confirm_overwrite = false
+	if _save_btn != null:
+		_save_btn.text = "Save"
 	_save_info_label.text = "Structure to Save: %d block(s) in grid" % count
 	_save_feedback_label.text = ""
 	if count == 0:
@@ -258,6 +262,11 @@ func _create_save_modal() -> void:
 	_save_name_input.placeholder_text = "Enter blueprint name"
 	_save_name_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_save_name_input.text_submitted.connect(func(_t: String) -> void: _on_save_confirm_pressed())
+	_save_name_input.text_changed.connect(func(_t: String) -> void:
+		_save_confirm_overwrite = false
+		if _save_btn != null:
+			_save_btn.text = "Save"
+	)
 	name_hbox.add_child(_save_name_input)
 
 	_save_feedback_label = Label.new()
@@ -472,6 +481,13 @@ func _on_save_confirm_pressed() -> void:
 		_save_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
 		return
 
+	if bp_mgr.has_blueprint(raw_name) and not _save_confirm_overwrite:
+		_save_confirm_overwrite = true
+		_save_btn.text = "Confirm Overwrite"
+		_save_feedback_label.text = "Blueprint '%s' already exists! Click 'Confirm Overwrite' to replace it." % raw_name
+		_save_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.7, 0.2))
+		return
+
 	var bp = bp_mgr.capture_blueprint(raw_name)
 	if bp == null:
 		_save_feedback_label.text = "Failed to capture blueprint: grid is empty."
@@ -480,6 +496,8 @@ func _on_save_confirm_pressed() -> void:
 
 	var ok: bool = bp_mgr.save_blueprint(bp, true)
 	if ok:
+		_save_confirm_overwrite = false
+		_save_btn.text = "Save"
 		_save_feedback_label.text = "✓ Blueprint '%s' saved successfully (%d blocks)!" % [bp.name, bp.get_block_count()]
 		_save_feedback_label.add_theme_color_override("font_color", Color(0.3, 1.0, 0.4))
 		if is_inside_tree() and get_tree() != null:
@@ -523,7 +541,14 @@ func _on_load_confirm_pressed() -> void:
 		if not conflicts.is_empty():
 			var sample: Array = conflicts.slice(0, 3)
 			conflict_str = " (at %s%s)" % [str(sample), "..." if conflicts.size() > 3 else ""]
-		_load_feedback_label.text = "Cannot place [%s]: %d conflict(s)%s" % [reason, conflicts.size(), conflict_str]
+		var reason_msg := reason
+		match reason:
+			"OUT_OF_BOUNDS": reason_msg = "Exceeds grid boundaries"
+			"CELL_OCCUPIED": reason_msg = "Conflicts with existing static structure"
+			"DEBRIS_COLLISION": reason_msg = "Obstructed by fallen debris"
+			"PLAYER_OVERLAP": reason_msg = "Overlaps player position"
+			"EMPTY_BLUEPRINT": reason_msg = "Blueprint is empty"
+		_load_feedback_label.text = "Cannot place [%s]: %d conflict(s)%s" % [reason_msg, conflicts.size(), conflict_str]
 		_load_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
 		return
 
