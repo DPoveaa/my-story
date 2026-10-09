@@ -370,8 +370,6 @@ func apply_impact_damage(hit_cell: Vector3i, impact_energy: float) -> Array:
 			relevant_joints.append(j)
 
 	if relevant_joints.is_empty():
-		# No internal joints — still damage block durability from direct impact.
-		_apply_block_durability_damage(hit_cell, impact_energy)
 		return broken
 
 	var energy_per_joint: float = impact_energy / float(relevant_joints.size())
