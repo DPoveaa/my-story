@@ -5,7 +5,7 @@ extends Node3D
 ## Provides static physics colliders so raycasts can detect block faces
 ## and dynamic debris can collide against remaining stable buildings.
 
-@export var grid_system: GridSystem
+@export var grid_system: Node
 
 ## The static body hosting collision shapes for all stable blocks
 var static_body: StaticBody3D
@@ -42,6 +42,8 @@ func _connect_grid_signals() -> void:
 		grid_system.grid_cleared.connect(_on_grid_cleared)
 
 func _create_block_node(cell: Vector3i, data: BlockData) -> void:
+	if static_body == null:
+		_setup_static_body()
 	if _mesh_nodes.has(cell):
 		_remove_block_node(cell)
 
@@ -80,12 +82,16 @@ func _remove_block_node(cell: Vector3i) -> void:
 	if _mesh_nodes.has(cell):
 		var mesh_inst: MeshInstance3D = _mesh_nodes[cell]
 		if is_instance_valid(mesh_inst):
+			if mesh_inst.get_parent() != null:
+				mesh_inst.get_parent().remove_child(mesh_inst)
 			mesh_inst.queue_free()
 		_mesh_nodes.erase(cell)
 
 	if _col_nodes.has(cell):
 		var col_shape: CollisionShape3D = _col_nodes[cell]
 		if is_instance_valid(col_shape):
+			if col_shape.get_parent() != null:
+				col_shape.get_parent().remove_child(col_shape)
 			col_shape.queue_free()
 		_col_nodes.erase(cell)
 

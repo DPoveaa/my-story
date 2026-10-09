@@ -17,6 +17,7 @@ offset_right = 20.0
 offset_bottom = 20.0
 grow_horizontal = 2
 grow_vertical = 2
+mouse_filter = 2
 text = "+"
 horizontal_alignment = 1
 vertical_alignment = 1
@@ -26,44 +27,66 @@ anchors_preset = 10
 anchor_right = 1.0
 offset_bottom = 44.0
 grow_horizontal = 2
+mouse_filter = 2
 
 [node name="HBox" type="HBoxContainer" parent="PanelTop"]
 layout_mode = 2
+mouse_filter = 2
 theme_override_constants/separation = 24
 
 [node name="Spacer1" type="Control" parent="PanelTop/HBox"]
 custom_minimum_size = Vector2(8, 0)
 layout_mode = 2
+mouse_filter = 2
+
+[node name="ModeLabel" type="Label" parent="PanelTop/HBox"]
+layout_mode = 2
+mouse_filter = 2
+theme_override_colors/font_color = Color(0.2, 0.9, 0.8, 1)
+text = "Mode: Body (1st Person)"
 
 [node name="ColorBadge" type="ColorRect" parent="PanelTop/HBox"]
 custom_minimum_size = Vector2(24, 24)
 layout_mode = 2
+mouse_filter = 2
 color = Color(0.62, 0.64, 0.68, 1)
 
 [node name="SelectedTypeLabel" type="Label" parent="PanelTop/HBox"]
 layout_mode = 2
+mouse_filter = 2
 text = "Material: Stone"
 
 [node name="BlockCountLabel" type="Label" parent="PanelTop/HBox"]
 layout_mode = 2
+mouse_filter = 2
 text = "Grid Blocks: 0"
 
 [node name="DebrisCountLabel" type="Label" parent="PanelTop/HBox"]
 layout_mode = 2
+mouse_filter = 2
 text = "Active Debris: 0"
+
+[node name="PromptLabel" type="Label" parent="PanelTop/HBox"]
+visible = false
+layout_mode = 2
+mouse_filter = 2
+theme_override_colors/font_color = Color(1, 0.85, 0.2, 1)
+text = "[HOLDING STONE] E: Drop | R/LMB: Recover"
 
 [node name="PanelControls" type="PanelContainer" parent="."]
 anchors_preset = 2
 anchor_top = 1.0
 anchor_bottom = 1.0
 offset_left = 10.0
-offset_top = -185.0
-offset_right = 410.0
+offset_top = -240.0
+offset_right = 470.0
 offset_bottom = -10.0
 grow_vertical = 0
+mouse_filter = 2
 
 [node name="Margin" type="MarginContainer" parent="PanelControls"]
 layout_mode = 2
+mouse_filter = 2
 theme_override_constants/margin_left = 10
 theme_override_constants/margin_top = 8
 theme_override_constants/margin_right = 10
@@ -71,28 +94,40 @@ theme_override_constants/margin_bottom = 8
 
 [node name="VBox" type="VBoxContainer" parent="PanelControls/Margin"]
 layout_mode = 2
+mouse_filter = 2
 
 [node name="Title" type="Label" parent="PanelControls/Margin/VBox"]
 layout_mode = 2
+mouse_filter = 2
 theme_override_colors/font_color = Color(0.4, 0.8, 1, 1)
 text = "CONTROLS & PRESET STRUCTURES:"
 
 [node name="Help1" type="Label" parent="PanelControls/Margin/VBox"]
 layout_mode = 2
-text = "• LMB: Place Block  |  RMB: Remove Block"
+mouse_filter = 2
+text = "• WASD: Move (Body/Fly)  |  Space: Jump / Up  |  Shift: Sprint"
 
 [node name="Help2" type="Label" parent="PanelControls/Margin/VBox"]
 layout_mode = 2
-text = "• WASD: Move Camera  |  Space/Ctrl: Up/Down"
+mouse_filter = 2
+text = "• V or P: Toggle Soul Projection  |  F1: Debug Free Camera"
 
 [node name="Help3" type="Label" parent="PanelControls/Margin/VBox"]
 layout_mode = 2
-text = "• 1-4 / Wheel: Material (Stone, Wood, Brick, Gold)"
+mouse_filter = 2
+text = "• LMB: Place Block  |  RMB: Remove Block (Grid/Debris)"
 
 [node name="Help4" type="Label" parent="PanelControls/Margin/VBox"]
 layout_mode = 2
-text = "• T: Tower  |  B: Bridge  |  A: Arch  (Press to spawn)"
+mouse_filter = 2
+text = "• E: Grab/Release Debris  |  R / LMB: Recover to Grid"
 
 [node name="Help5" type="Label" parent="PanelControls/Margin/VBox"]
 layout_mode = 2
-text = "• C: Clear All  |  Tab: Capture/Release Mouse"
+mouse_filter = 2
+text = "• 1-4 / Wheel: Material  |  Esc / Tab: Release/Capture Mouse"
+
+[node name="Help6" type="Label" parent="PanelControls/Margin/VBox"]
+layout_mode = 2
+mouse_filter = 2
+text = "• T: Tower  |  B: Bridge  |  H: Arch  |  C: Clear World"

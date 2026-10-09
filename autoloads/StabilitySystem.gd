@@ -1,4 +1,3 @@
-class_name StabilitySystem
 extends Node
 
 ## Calculates structural stability and connectivity from foundation anchors.
@@ -28,7 +27,7 @@ var _supported_cells: Dictionary = {}
 var _is_evaluating: bool = false
 
 ## Reference to GridSystem
-@export var grid_system: GridSystem
+@export var grid_system: Node
 
 func _ready() -> void:
 	if grid_system == null and has_node("/root/GridSystem"):
@@ -38,10 +37,29 @@ func _ready() -> void:
 		_connect_grid_signals()
 
 func _connect_grid_signals() -> void:
+	if not grid_system.block_placed.is_connected(_on_block_placed):
+		grid_system.block_placed.connect(_on_block_placed)
 	if not grid_system.block_removed.is_connected(_on_block_removed):
 		grid_system.block_removed.connect(_on_block_removed)
 	if not grid_system.grid_cleared.is_connected(_on_grid_cleared):
 		grid_system.grid_cleared.connect(_on_grid_cleared)
+
+func _on_block_placed(cell: Vector3i, _data: BlockData) -> void:
+	# If placed cell directly connects to an anchor or an already supported block, mark supported immediately
+	if is_anchor_cell(cell):
+		_supported_cells[cell] = true
+	else:
+		var has_supported_neighbor: bool = false
+		for offset in NEIGHBORS_6:
+			if _supported_cells.has(cell + offset):
+				has_supported_neighbor = true
+				break
+		if has_supported_neighbor:
+			_supported_cells[cell] = true
+		else:
+			# Placed in midair without immediate support - trigger evaluation
+			if not _is_evaluating:
+				call_deferred("recalculate_stability")
 
 func _on_block_removed(_cell: Vector3i, _data: BlockData) -> void:
 	if not _is_evaluating:
@@ -75,6 +93,30 @@ func clear_custom_anchors() -> void:
 func is_cell_supported(cell: Vector3i) -> bool:
 	return _supported_cells.has(cell)
 
+## Evaluates regional stability around a modified cell when safe,
+## falling back to full evaluation if complex connectivity changes are detected.
+func evaluate_affected_region(removed_cell: Vector3i) -> Array[Vector3i]:
+	var grid := grid_system
+	if grid == null and has_node("/root/GridSystem"):
+		grid = get_node("/root/GridSystem")
+	if grid == null:
+		return []
+
+	# Check occupied neighbors of the removed cell
+	var occupied_neighbors: Array[Vector3i] = []
+	for offset in NEIGHBORS_6:
+		var n: Vector3i = removed_cell + offset
+		if grid.has_block(n):
+			occupied_neighbors.append(n)
+
+	# If no neighbors, no other blocks could have relied on this removed cell
+	if occupied_neighbors.is_empty():
+		_supported_cells.erase(removed_cell)
+		return []
+
+	# Use full evaluation as comprehensive correctness fallback
+	return evaluate_stability()
+
 ## Evaluates the structural stability of all blocks in GridSystem.
 ## Returns an Array[Vector3i] of all occupied cells that have lost structural support.
 func evaluate_stability() -> Array[Vector3i]:
@@ -86,7 +128,7 @@ func evaluate_stability() -> Array[Vector3i]:
 		push_error("StabilitySystem: No GridSystem found")
 		return []
 
-	var all_cells := grid.get_all_cells()
+	var all_cells: Array[Vector3i] = grid.get_all_cells()
 	if all_cells.is_empty():
 		_supported_cells.clear()
 		return []
@@ -123,15 +165,16 @@ func evaluate_stability() -> Array[Vector3i]:
 	return unsupported
 
 ## Runs stability evaluation and emits signal if unsupported cells are detected.
+## Strictly guards re-entrancy during collapse signal dispatch.
 func recalculate_stability() -> Array[Vector3i]:
 	if _is_evaluating:
 		return []
 
 	_is_evaluating = true
 	var unsupported := evaluate_stability()
-	_is_evaluating = false
-
 	if not unsupported.is_empty():
 		stability_evaluated.emit(unsupported)
+	_is_evaluating = false
 
 	return unsupported
+

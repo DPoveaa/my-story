@@ -1,18 +1,23 @@
 class_name GameWorld
 extends Node3D
 
-## Main test world scene for Milestone 1.
-## Demonstrates grid-based block building, support calculations, presets, and physics collapse.
+## Main test world scene for Milestone 1 / Milestone 2.
+## Demonstrates grid-based block building, support calculations, presets, physics collapse,
+## physical first-person character, and Soul Projection.
+
+const PlayerControllerScript = preload("res://scenes/player/PlayerController.gd")
 
 @onready var grid_renderer: GridRenderer = $GridRenderer
 @onready var preview_ghost: PreviewGhost = $PreviewGhost
 @onready var collapse_orchestrator: CollapseOrchestrator = $CollapseOrchestrator
 @onready var debris_container: Node3D = $DebrisContainer
-@onready var build_camera: BuildCamera = $BuildCamera
+@onready var player: CharacterBody3D = get_node_or_null("Player")
+@onready var build_camera: BuildCamera = get_node_or_null("BuildCamera")
 @onready var build_hud: BuildHUD = $BuildHUD
 
-var grid_system: GridSystem
-var stability_system: StabilitySystem
+var grid_system: Node
+var stability_system: Node
+var _debug_camera_active: bool = false
 
 func _ready() -> void:
 	if grid_system == null and has_node("/root/GridSystem"):
@@ -24,7 +29,29 @@ func _ready() -> void:
 	if build_hud != null:
 		build_hud.grid_system = grid_system
 		build_hud.orchestrator = collapse_orchestrator
-		if build_camera != null:
+
+	# Wire Player (primary gameplay controller)
+	if player != null:
+		player.grid_system = grid_system
+		player.stability_system = stability_system
+		player.orchestrator = collapse_orchestrator
+		player.preview_ghost = preview_ghost
+		player.block_type_changed.connect(build_hud.set_selected_block_type)
+		player.state_changed.connect(build_hud.set_player_state)
+		if player.has_signal("carried_block_changed"):
+			player.carried_block_changed.connect(build_hud.set_carried_block)
+		build_hud.set_selected_block_type(player.get_selected_type())
+		build_hud.set_player_state(player.current_state)
+
+	# Wire BuildCamera as secondary/debug tool
+	if build_camera != null:
+		build_camera.grid_system = grid_system
+		build_camera.stability_system = stability_system
+		build_camera.orchestrator = collapse_orchestrator
+		build_camera.preview_ghost = preview_ghost
+		if player != null:
+			build_camera.current = false
+		else:
 			build_camera.block_type_changed.connect(build_hud.set_selected_block_type)
 			build_hud.set_selected_block_type(build_camera.get_selected_type())
 
@@ -33,14 +60,34 @@ func _ready() -> void:
 
 func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
-		if event.keycode == KEY_T:
+		if event.is_action_pressed(&"debug_camera") or event.keycode == KEY_F1:
+			toggle_debug_camera()
+		elif event.keycode == KEY_T:
 			spawn_test_tower(Vector3i(0, 0, 0))
 		elif event.keycode == KEY_B:
 			spawn_test_bridge(Vector3i(-5, 0, -5))
-		elif event.keycode == KEY_A:
+		elif event.keycode == KEY_H:
 			spawn_test_arch(Vector3i(6, 0, 0))
 		elif event.keycode == KEY_C:
 			clear_world()
+
+## Toggles the development free-flight camera without corrupting player state.
+func toggle_debug_camera() -> void:
+	if player == null or build_camera == null:
+		return
+
+	_debug_camera_active = not _debug_camera_active
+	if _debug_camera_active:
+		player.set_state(PlayerControllerScript.State.DEBUG_FLIGHT)
+		build_camera.global_transform = player.get_active_camera().global_transform
+		build_camera.current = true
+		if build_hud != null:
+			build_hud.set_player_state(2) # Debug Free Camera
+	else:
+		build_camera.current = false
+		player.set_state(PlayerControllerScript.State.BODY_CONTROL)
+		if build_hud != null:
+			build_hud.set_player_state(player.current_state)
 
 ## Spawns a tall test tower with an overhanging observation platform.
 ## Demonstrates vertical support and dramatic collapse when base blocks are destroyed.

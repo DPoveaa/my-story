@@ -1,524 +1,366 @@
-# TECHNICAL ARCHITECTURE — MyStory
-
-> **Engine**: Godot 4.7.2 Standard · **Language**: GDScript · **Physics**: Jolt Physics · **Renderer**: Forward Plus (D3D12)
->
-> This document records technical decisions, system design, implementation roadmap,
-> and acceptance tests. It does **not** repeat GAME_DESIGN.md. Read that document
-> first for vision and requirements.
->
-> Last updated: 2026-10-09
-
----
-
-## 1. Project State Snapshot
-
-| Item | Status |
-|---|---|
-| Engine | Godot 4.7 (config_version = 5) |
-| Physics backend | Jolt Physics (3d/physics_engine) |
-| Renderer | Forward Plus, D3D12 on Windows |
-| Scenes/Scripts | **None — blank slate** |
-| Assets | Default icon only |
-
-Everything must be built from scratch. This is an advantage: no legacy debt.
-
----
-
-## 2. Architecture Overview
-
-The game is split into **nine loosely-coupled autoload singletons and scene-local
-managers**. Each owns a clearly defined slice of data and exposes a signal-based
-interface. No system calls another system's internals directly.
-
-```
-┌───────────────────────────────────────────────────────────┐
-│                      GameWorld (scene root)               │
-│  ┌──────────────┐  ┌──────────────┐  ┌────────────────┐  │
-│  │  GridMap /   │  │  PhysicsWorld│  │  DebrisTracker │  │
-│  │  ChunkManager│  │  (Jolt RBs)  │  │                │  │
-│  └──────┬───────┘  └──────┬───────┘  └───────┬────────┘  │
-│         │                 │                  │            │
-│  ┌──────▼───────────────────────────────────▼────────┐   │
-│  │               StabilitySystem (autoload)           │   │
-│  └──────────────────────────┬─────────────────────────┘   │
-│                             │ signals collapse events      │
-│  ┌──────────────────────────▼─────────────────────────┐   │
-│  │              CollapseOrchestrator                  │   │
-│  │  (decides which chunks become rigid bodies)        │   │
-│  └─────────────────────────────────────────────────── ┘   │
-│                                                           │
-│  ┌─────────────┐  ┌────────────────┐  ┌──────────────┐   │
-│  │ CoreManager │  │ WorkerAI       │  │BlueprintStore│   │
-│  │ (autoload)  │  │ (NavigationAI) │  │ (autoload)   │   │
-│  └─────────────┘  └────────────────┘  └──────────────┘   │
-│                                                           │
-│  ┌──────────────────┐  ┌───────────────────────────────┐  │
-│  │ InventorySystem  │  │ CraftingSystem                │  │
-│  │ (autoload)       │  │ (autoload)                    │  │
-│  └──────────────────┘  └───────────────────────────────┘  │
-└───────────────────────────────────────────────────────────┘
-```
-
----
-
-## 3. System Definitions
-
-### 3.1 GridSystem (autoload: `GridSystem`)
-
-**Responsibility**: owns the canonical grid state — the definitive record of which
-block type occupies every cell.
-
-| Item | Decision |
-|---|---|
-| Storage | `Dictionary[Vector3i, BlockData]` (sparse; only occupied cells stored) |
-| Cell size | 1 m³ default — configurable via a project constant `CELL_SIZE` |
-| Chunk size | 16 × 16 × 16 cells per chunk |
-| Coordinate | `Vector3i` (integer grid coords); world position = `cell * CELL_SIZE` |
-| Serialization | `Dictionary` → JSON / Godot binary resource for save/load |
-
-**Key signals**:
-- `block_placed(cell: Vector3i, block_type: StringName)`
-- `block_removed(cell: Vector3i, previous_type: StringName)`
-
-**No physics**. GridSystem is purely data. It does not own any Node3D.
-
----
-
-### 3.2 StabilitySystem (autoload: `StabilitySystem`)
-
-**Responsibility**: determines which grid cells are structurally supported and
-which are floating after every placement/removal event.
-
-**Algorithm — flood-fill connectivity**:
-1. Maintain a `supported_set: Dictionary[Vector3i, bool]`.
-2. On every `block_placed` or `block_removed` signal, re-evaluate affected cells
-   using a **breadth-first flood from ground anchors** (y == 0, or any block
-   tagged `GROUND_ANCHOR`).
-3. Any occupied cell not reachable from an anchor is **unsupported**.
-4. Batch evaluation: run the BFS at the end of the frame (via `call_deferred` or
-   a dirty-flag queue) so rapid multi-block changes produce one BFS pass.
-
-**Performance ceiling**: BFS on a 64 × 64 × 64 grid = 262 144 cells max.
-Pure GDScript BFS at ~1M lookups/s → less than 0.3 ms for typical castle-sized builds.
-If profiling shows bottlenecks, move BFS to a C# extension or a thread.
+# GAME DESIGN SCOPE --- Projeto 3D inspirado em Castle Story
+
+> Documento vivo de design. Decisões confirmadas devem ser tratadas como requisitos;
+> detalhes ainda não definidos devem permanecer em aberto, sem serem inventados
+> pelo agente de desenvolvimento.
+
+## 1. Visão do jogo
+
+Criar um jogo 3D de construção, sobrevivência e gerenciamento inspirado
+principalmente em **Castle Story**, com elementos de construção em
+blocos de **Minecraft**. O foco é tornar a construção prazerosa,
+permitir estruturas fisicamente convincentes e evitar que danos ou
+ataques obriguem o jogador a refazer tudo manualmente.
+
+A identidade do jogo deve ser própria. As referências orientam as
+mecânicas, não uma reprodução literal de outros jogos.
+
+A experiência principal será em **primeira pessoa**, combinada com uma
+habilidade chamada provisoriamente **Projeção Espiritual**: o jogador pode
+desprender a câmera do corpo e controlá-la livremente para construir,
+inspecionar estruturas e gerenciar a base em grande escala.
+
+## 2. Pilares de design
+
+-   **Construção satisfatória:** posicionar, remover e organizar blocos
+    deve ser intuitivo e previsível.
+-   **Física híbrida:** construções estáveis não precisam simular todos
+    os blocos como corpos físicos o tempo todo; partes que perdem
+    sustentação podem se soltar e desmoronar com física real.
+-   **Recuperação não punitiva:** estruturas registradas podem ser
+    reconstruídas por ajudantes, desde que haja núcleo funcional e
+    materiais.
+-   **Recursos recuperáveis:** destroços não devem ser automaticamente
+    lixo; sua condição determina como podem ser reutilizados.
+-   **Automação compreensível:** o jogador deve conseguir entender por
+    que os ajudantes estão ou não construindo, reparando ou coletando.
+-   **Desempenho escalável:** suportar construções grandes sem manter
+    física completa ativa em cada bloco permanentemente.
+-   **Presença e visão ampla:** explorar o mundo em primeira pessoa e usar
+    a Projeção Espiritual para facilitar construção e gerenciamento em escala.
+
+## 3. Câmera, personagem e Projeção Espiritual
+
+### 3.1 Modo corporal — primeira pessoa
+
+- A primeira pessoa é a experiência padrão para explorar e interagir com o mundo.
+- O personagem físico terá movimento, gravidade e colisões com o ambiente.
+- A mira central/raycast será usada para interagir com blocos e objetos.
+- O personagem e os sistemas de construção devem ser separados para permitir
+  mudanças de modo sem duplicar a lógica de construção.
+
+### 3.2 Projeção Espiritual — câmera livre de construção
+
+O jogador pode projetar sua consciência para fora do corpo. A câmera se
+separa do personagem e ganha movimento livre em 3D, permitindo observar
+construções de qualquer ângulo e trabalhar em locais distantes sem precisar
+subir fisicamente em cada parede.
+
+- O corpo permanece parado no local onde a projeção foi iniciada.
+- Na projeção, o jogador pode colocar e remover blocos, inspecionar danos
+  e gerenciar construções, usando os mesmos sistemas de grade, sustentação,
+  física e materiais do modo corporal.
+- Ao encerrar a projeção, a câmera retorna à perspectiva do personagem.
+- A Projeção Espiritual complementa os ajudantes; não substitui transporte,
+  coleta, fabricação ou reconstrução automatizada.
+- A câmera livre atual do protótipo pode continuar disponível como ferramenta
+  de depuração/desenvolvimento, separada da habilidade usada no jogo final.
+- Não definir ainda custo de energia, alcance máximo, invulnerabilidade do
+  corpo ou penalidades durante a projeção. Essas regras precisam ser avaliadas
+  após testar a experiência básica.
+
+Os dois modos devem usar uma única fonte de verdade para o estado do mundo.
+Não criar sistemas paralelos de construção ou física para cada câmera.
+
+## 4. Construção em blocos e física híbrida
+
+### 4.1 Construções estáveis
+
+-   Construções utilizam blocos alinhados a uma grade, com encaixe
+    previsível.
+-   O jogo calcula sustentação, conexões e estabilidade estrutural.
+-   Blocos que fazem parte de uma construção estável não precisam ser
+    corpos físicos independentes em simulação contínua.
+-   O jogador deve conseguir salvar/registrar estruturas como projetos
+    para reconstrução posterior.
+
+### 4.2 Desmoronamento
+
+Quando blocos de sustentação são removidos ou destruídos: 1. O sistema
+identifica as partes que perderam apoio. 2. Os blocos afetados são
+liberados da estrutura estável. 3. Eles passam a usar física dinâmica,
+incluindo gravidade, colisões, rotação e impactos. 4. Colisões podem
+afetar outras partes e provocar desmoronamentos em cadeia, respeitando
+limites de desempenho. 5. Quando os destroços ficam estáveis, o jogo
+pode reduzir o custo da simulação, sem eliminar automaticamente seu
+valor como material.
+
+A física deve ser convincente, mas não precisa ser uma simulação
+perfeita de engenharia. Priorizar jogabilidade, previsibilidade e
+desempenho.
+
+## 5. Núcleo e reconstrução automática
+
+A base possui um **núcleo de construção**, responsável por habilitar o
+sistema de manutenção e reconstrução da área.
+
+-   **Núcleo intacto e operacional:** ajudantes podem reparar estruturas
+    registradas dentro da área atendida.
+-   **Estruturas danificadas:** o sistema compara a construção existente
+    com o projeto salvo e identifica os blocos ausentes ou danificados.
+-   **Núcleo danificado:** suspender a reconstrução automática até que o
+    núcleo seja reparado.
+-   **Núcleo destruído:** desativar temporariamente a reconstrução
+    automática, mas preservar os projetos salvos e evitar apagar
+    construções registradas.
+-   **Materiais insuficientes:** os ajudantes devem informar ou indicar
+    a falta de recursos, em vez de falhar silenciosamente.
+-   **Prioridades:** permitir priorizar núcleo, estruturas essenciais e,
+    depois, estruturas secundárias/decorativas.
+-   **Acesso e logística:** ajudantes precisam de acesso viável ao local
+    e aos materiais para trabalhar.
+
+O objetivo é permitir que o jogador repare o que for essencial e deixe
+os ajudantes reconstruírem o restante, sem exigir que a casa inteira
+seja refeita manualmente.
+
+### 5.1 Projetos de construção salvos
+
+Um projeto salvo deve registrar a disposição dos blocos e seus tipos. O
+sistema de reconstrução usa esse projeto como referência, mas deve
+preservar alterações manuais posteriores quando o jogador atualizar ou
+substituir o registro.
+
+Ainda precisam ser definidos: limites da área de manutenção, custo de
+materiais, quantidade de ajudantes, alcance do núcleo e comportamento
+quando o terreno ou o acesso mudar.
+
+## 6. Durabilidade e recuperação de destroços
+
+Os blocos possuem durabilidade/condição, que determina como seus
+destroços podem ser reaproveitados.
+
+Regra inicial proposta: - **Mais de 50% de durabilidade:** o bloco
+recuperado pode voltar a ser um bloco de construção utilizável, caso
+seja possível recolhê-lo e transportá-lo. - **50% ou menos:** o destroço
+é convertido em matéria-prima recuperável para fabricar novos blocos. -
+O limite exato, a perda de material e a possibilidade de reparar blocos
+parcialmente danificados poderão ser balanceados durante os testes.
+
+Os destroços devem continuar existindo como objetos ou materiais do
+mundo tempo suficiente para que o jogador e os ajudantes possam
+recolhê-los. Não devem desaparecer apenas porque uma estrutura
+desmoronou.
+
+## 7. Mineração e fabricação de blocos
+
+A mineração produz materiais brutos, como areia, cascalho e outros
+recursos a definir.
+
+Em vez de transformar automaticamente uma quantidade de fragmentos em um
+bloco pronto, o processo pode exigir uma etapa de
+**prensagem/compactação**:
+
+1.  O jogador ou os ajudantes extraem o material.
+2.  O material é coletado e transportado.
+3.  Uma prensa ou estação de fabricação compacta uma quantidade definida
+    de matéria-prima.
+4.  O resultado é um bloco de construção utilizável.
+
+A receita de cada bloco deve definir o tipo e a quantidade de material
+exigidos. Por exemplo, uma quantidade `X` de areia ou cascalho pode
+produzir um bloco compactado, desde que a receita correspondente esteja
+desbloqueada e a estação esteja funcionando.
+
+Não fixar valores de receitas antes do balanceamento. A prensa, as
+receitas, o transporte e a automação devem ser sistemas modulares.
+
+## 8. Direção visual: blocos e voxels
+
+### Recomendação inicial: abordagem híbrida
+
+Usar **blocos alinhados à grade como formato principal de construção**,
+com estética de voxel/block game, e reservar a fragmentação voxel ou
+efeitos de pequenos fragmentos para mineração, quebra e desmoronamentos.
+
+Isso oferece: - Construção clara e fácil de controlar, no estilo de
+blocos de Minecraft/Castle Story. - Silhuetas e encaixes previsíveis
+para estruturas. - Destruição visualmente satisfatória, com fragmentos e
+destroços. - Possibilidade de recuperar materiais de acordo com a
+durabilidade. - Menos complexidade do que fazer todo o terreno e todas
+as construções se comportarem como uma massa voxel totalmente
+deformável.
+
+**Distinção importante:** "voxel" pode descrever a aparência cúbica ou
+uma representação volumétrica interna. O jogo não precisa usar voxels
+destrutíveis em tudo só para ter estética de blocos. Uma grade de blocos
+para construção pode coexistir com efeitos de fragmentação na
+destruição.
+
+### Decisão técnica a validar
+
+-   Se o terreno for principalmente estático e a construção acontecer
+    com peças encaixadas, começar com grade de blocos e chunks para
+    renderização/colisão é uma opção mais simples.
+-   Se escavar livremente qualquer parte do terreno e modificar seu
+    volume for uma mecânica central, avaliar uma representação voxel
+    para o terreno separada do sistema de construção.
+-   Evitar criar um corpo rígido completo para cada bloco enquanto a
+    estrutura estiver estável. Ativar física dinâmica apenas para partes
+    liberadas e otimizar ou agrupar destroços parados.
+
+## 9. Tecnologia e desenvolvimento
+
+-   Engine: Godot Engine Standard.
+-   Linguagem preferida: GDScript.
+-   Dimensão: 3D.
+-   Agente de desenvolvimento: Google Antigravity, com acesso à pasta do
+    projeto.
+-   O agente deve editar os arquivos do projeto, executar o jogo pelo
+    Godot quando possível, verificar logs/erros e corrigir problemas
+    encontrados.
+-   Separar os sistemas de construção, estabilidade, física de
+    destroços, durabilidade, recursos, fabricação, ajudantes, núcleo e
+    interface.
+-   Testar o desempenho com muitas peças antes de aumentar a escala.
+
+## 10. Critérios de qualidade
+
+-   Construir e remover blocos é intuitivo.
+-   O modo corporal funciona em primeira pessoa com movimento e colisões.
+-   A Projeção Espiritual permite construção e inspeção em câmera livre e retorna
+    corretamente ao corpo, sem duplicar ou perder estado do mundo.
+-   Alternar entre os modos não corrompe alvos, blocos, destroços ou estado físico.
+-   Uma construção estável não desmorona sem motivo.
+-   Remover uma sustentação produz um desmoronamento coerente.
+-   Os destroços podem ser recuperados e convertidos em materiais
+    conforme sua condição.
+-   O núcleo controla corretamente a disponibilidade da reconstrução
+    automática.
+-   Os ajudantes conseguem reconstruir projetos salvos com materiais
+    disponíveis.
+-   Falta de recursos, acesso bloqueado e núcleo danificado são
+    comunicados claramente.
+-   O jogo não apaga projetos de construção quando o núcleo é destruído.
+-   O sistema continua utilizável em construções grandes, com
+    estratégias de otimização para física e renderização.
+
+## 11. Decisões confirmadas e questões em aberto
+
+### Decisões confirmadas
+
+- Jogo 3D para PC, desenvolvido no Godot Standard com GDScript.
+- Inspiração principal em Castle Story, com construção em blocos alinhados à
+  grade, visual cúbico e identidade própria.
+- Primeira pessoa como modo corporal padrão.
+- Projeção Espiritual como modo de câmera livre para construção, inspeção e
+  gerenciamento; o corpo fica parado e a câmera retorna a ele ao encerrar.
+- Os dois modos compartilham os mesmos sistemas de construção, estabilidade,
+  física e recursos.
+- Abordagem híbrida: blocos inteiros para construção e fragmentação física/voxel
+  para destruição quando apropriado; não é necessário simular cada bloco estável
+  como um corpo rígido independente.
+- A reconstrução automática depende de um núcleo funcional, projetos salvos,
+  ajudantes e materiais. Danos ao núcleo suspendem o sistema, mas não apagam
+  projetos salvos.
+- Destroços com mais de 50% de durabilidade podem voltar a ser blocos utilizáveis;
+  destroços com 50% ou menos tornam-se matéria-prima, com rendimento a balancear.
+- Areia, cascalho e outros materiais extraídos podem precisar ser prensados ou
+  compactados antes de se tornarem blocos de construção.
+- Single-player nesta fase; não implementar multiplayer sem uma decisão posterior.
+- A câmera livre existente no protótipo pode ser mantida como ferramenta de debug.
+
+### Questões ainda em aberto
+
+Não inventar respostas definitivas sem discutir com o usuário:
+
+- Combate, inimigos e fontes de dano além das ações básicas do jogador.
+- Quantidade, funções, personalidade e comportamento detalhado dos ajudantes.
+- Geração do mundo e quanto do terreno poderá ser escavado/modificado.
+- Progressão, desbloqueios, receitas e balanceamento de materiais.
+- Tipos finais de blocos, resistências, durabilidade e rendimento de reciclagem.
+- Alcance, custo ou outras limitações da Projeção Espiritual, se necessárias.
+- Se o corpo pode ser atacado ou sofrer consequências enquanto a projeção está ativa.
+- Direção artística final, interface, áudio e controles definitivos.
+- Escala típica das construções e metas finais de desempenho.
+
+## 12. Orientação para o agente de IA
+
+Antes de implementar: 1. Ler este documento e inspecionar a estrutura do
+projeto. 2. Identificar decisões ainda não especificadas, sem inventar
+mecânicas definitivas. 3. Propor uma arquitetura técnica modular para
+aprovação. 4. Implementar em etapas pequenas e jogáveis, validando cada
+sistema no Godot. 5. Executar testes, verificar erros e corrigir
+regressões. 6. Atualizar este documento quando requisitos forem
+explicitamente definidos ou alterados.
+
+## 13. Histórico de Marcos e Confiabilidade Técnica
+
+### 13.1 Milestone 1 — Fundação de Construção e Desmoronamento
+- **GridSystem:** Armazenamento esparso autoritativo para blocos estáveis (`Dictionary[Vector3i, BlockData]`).
+- **StabilitySystem:** Propagação de suporte baseada em BFS a partir de âncoras de fundação (`y <= ground_anchor_y` e âncoras customizadas).
+- **CollapseOrchestrator:** Agrupamento de células sem suporte em componentes conectados via `IslandBuilder` e instanciação de `DebrisIsland` (`RigidBody3D`) com geometria de colisão composta exata.
+- **GridRenderer:** Renderização visual e colisão estática (`StaticBody3D`) com tags de metadados em cada forma de colisão.
+- **BuildCamera:** Câmera livre de desenvolvimento com posicionamento e remoção por raycast.
+
+### 13.2 Milestone 1.1 — Confiabilidade de Física e Interação (Implementado e Validado)
+- **Interação com Destroços:**
+  - Remoção alvejada de blocos individuais em corpos dinâmicos (`DebrisIsland.remove_block(cell)`).
+  - Resolução robusta de forma e célula através de `shape_find_owner` e `shape_owner_get_owner` com metadados `cell_coord`, eliminando problemas de indexação incorreta no PhysicsServer3D.
+  - Atualização imediata de geometria de colisão (`CollisionShape3D`), malha visual (`MeshInstance3D`), massa (`BlockTypeCatalog.get_mass`) e preservação integral de metadados e tipo de bloco (`BlockData`).
+  - Desconexão e divisão dinâmica (`DebrisIsland.split_into_islands` / `CollapseOrchestrator.split_debris_island`): quando a remoção de um bloco intermediário quebra a conectividade 6-vizinhança da ilha, a mesma é particionada deterministicamente em corpos rígidos independentes, preservando transformações e cinemática rígida (velocidade linear e momento angular).
+  - Remoção completa do corpo rígido quando o último bloco constituinte é retirado.
+- **Regras de Posicionamento Seguro e Exclusão Mútua:**
+  - Rejeição de construção sobre destroços em movimento (`is_moving() = true` quando não acomodado ou com velocidade > limiar).
+  - Verificação de ocupação espacial mútua (`CollapseOrchestrator.is_cell_blocked_by_debris`): rejeição de novos blocos que colidiriam com destroços existentes (ativos ou acomodados).
+  - Posse estritamente mutuamente exclusiva: blocos pertencem exclusivamente ao `GridSystem` ou a um `DebrisIsland`, nunca a ambos simultaneamente.
+  - Transições atômicas e determinísticas: deduplicação de células antes da remoção em lote, garantindo zero blocos duplicados, zero referências obsoletas e zero blocos fantasmas.
+- **Confiabilidade Estrutural e Reavaliação Regional:**
+  - Suporte à conexão do sinal `block_placed` no `StabilitySystem` para atualização imediata de células apoiadas.
+  - Avaliação de impacto regional (`evaluate_affected_region`) com fallback garantido para BFS completo (`evaluate_stability`).
+  - Bloqueio estrito de reentrância (`_is_evaluating`) para evitar cascatas recursivas durante o despacho do sinal de desmoronamento.
+  - Isolamento de estruturas: alteração em uma estrutura não interfere na estabilidade de construções não relacionadas nem corrompe destroços preexistentes.
+- **Resolução de Conflitos de Entrada:**
+  - Resolução do conflito entre a movimentação lateral da câmera (`A`) e o preset de arco: preset reatribuído para `H` (`KEY_H`).
+  - Interface do usuário (`BuildHUD.tscn`) e dicas visuais atualizadas para refletir exatamente os atalhos vigentes e a capacidade de remoção de blocos em destroços.
+- **Validação e Testes Executados:**
+  - Suíte M1 (`tests/test_m1.gd`): 11/11 testes aprovados com sucesso.
+  - Suíte M1.1 (`tests/test_m1_1.gd`): 11/11 testes de regressão aprovados com sucesso.
+  - Teste de Integração em Tempo Real (`tests/test_scene_runtime.gd`): aprovado com sucesso (criação de torre, corte de base, geração de destroços, remoção de bloco de destroço em tempo real, presets de ponte e arco, limpeza do mundo).
+  - Execução no Godot 4.7.2 Forward+ D3D12 Standard (GPU AMD Radeon RX 6700 XT): inicialização e renderização validadas com código de saída 0.
+
+### 13.3 Milestone 2 — Controlador em Primeira Pessoa & Projeção Espiritual (Implementado e Validado)
+- **Controlador Físico em Primeira Pessoa (`Player.tscn` / `PlayerController.gd`):**
+  - Implementado como `CharacterBody3D` reutilizável com `CollisionShape3D` (cápsula: raio 0.4m, altura 1.8m) na camada de colisão 2 e máscara 1 (ambiente estático).
+  - Suporte completo a locomoção física: WASD, gravidade (`gravity = 14.0`), pulo (`jump_velocity = 4.8`), corrida com multiplicador configurável (`walk_speed = 6.0`, `sprint_speed_multiplier = 1.75`), detecção de chão via `is_on_floor()` e rotação de câmera com sensibilidade configurável (`mouse_sensitivity = 0.003`).
+  - Prevenção de bloqueio e penetração no terreno e estruturas estáticas através de `move_and_slide()`.
+- **Máquina de Estados de Projeção Espiritual (`State` Enum):**
+  - **`BODY_CONTROL`:** O jogador controla o corpo físico em primeira pessoa com a câmera acoplada à cabeça (`Head/BodyCamera`).
+  - **`SOUL_PROJECTION`:** Ao pressionar `soul_projection` (teclas `V` ou `P`), a consciência se desprende para uma câmera livre `ProjectionCamera` (`top_level = true`). O corpo físico é mantido estritamente estacionário no mundo (`velocity = Vector3.ZERO`), sem sofrer deslocamentos por movimentação.
+  - O voo na projeção suporta movimentação 3D livre (WASD + Espaço para subir + Ctrl/C para descer + Shift para acelerar) com velocidade configurável (`projection_speed = 12.0`, `projection_fast_multiplier = 2.5`).
+  - Ao alternar novamente a ação `soul_projection`, a visualização retorna imediatamente ao corpo físico, restaurando a perspectiva de primeira pessoa, física e gravidade, comprovando que o corpo não se deslocou durante o uso da habilidade.
+  - Zero mecânicas restritivas inventadas: sem custos de energia arbitrários, sem limites artificiais de alcance e sem tempos de recarga inexistentes no `GAME_DESIGN.md`.
+- **Interação Unificada de Construção e Remoção:**
+  - Raycast centralizado gerado a partir da câmera ativa em cada modo (`get_active_camera()`).
+  - Posicionamento (LMB) e remoção (RMB) consistentes tanto no corpo quanto na projeção.
+  - Proteção contra sobreposição na cápsula do jogador (`is_cell_overlapping_player`): impede o jogador de posicionar blocos que colidiriam com o próprio corpo em qualquer dos modos.
+  - Preservação integral das regras de posicionamento seguro e remoção em destroços do marco M1.1.
+  - Seleção de materiais (1: Pedra, 2: Madeira, 3: Tijolo, 4: Ouro, ou roda do mouse) e atalhos de presets (T: Torre, B: Ponte, H: Arco, C: Limpar mundo).
+- **Câmera de Desenvolvimento / Depuração Separada (`DEBUG_FLIGHT`):**
+  - Câmera livre de desenvolvimento (`BuildCamera.gd`) preservada e acionável via `F1` (`debug_camera`), desvinculada da mecânica canônica de Projeção Espiritual.
+  - O modo padrão de jogo ao iniciar é o personagem físico em primeira pessoa.
+- **Gerenciador de Entradas Autoload (`InputManager.gd`):**
+  - Registro dinâmico e idempotente de ações no `InputMap` do Godot: `move_forward`, `move_backward`, `move_left`, `move_right`, `jump`, `sprint`, `fly_up`, `fly_down`, `soul_projection`, `debug_camera`, `place_block`, `remove_block`, `toggle_mouse_capture`.
+  - Interface do usuário (`BuildHUD.tscn` / `BuildHUD.gd`) atualizada com indicador de modo ativo (Corpo / Projeção / Câmera Livre) e painel completo de instruções.
+- **Validação e Testes Executados:**
+  - Suíte M1 (`tests/test_m1.gd`): 11/11 testes aprovados.
+  - Suíte M1.1 (`tests/test_m1_1.gd`): 11/11 testes aprovados.
+  - Suíte M2 (`tests/test_m2.gd`): 7/7 testes aprovados (`test_player_scene_instantiation_and_nodes`, `test_first_person_movement_and_gravity`, `test_soul_projection_state_machine`, `test_capsule_overlap_placement_prevention`, `test_shared_building_in_both_modes`, `test_debug_camera_separate_from_soul_projection`, `test_input_actions_exist_and_no_conflicts`).
+  - Total de testes automatizados: **29/29 aprovados (0 falhas)**.
+  - Teste de Integração em Tempo Real (`tests/test_scene_runtime.gd`): aprovado com sucesso.
+  - Renderização no Godot 4.7.2 Forward+ D3D12 Standard (GPU AMD Radeon RX 6700 XT): inicialização do mundo com o jogador em primeira pessoa validada sem erros.
+
+### 13.4 Limitações Restantes e Próximos Passos
+- Ajudantes (workers), projetos salvos (blueprints), sistema de durabilidade detalhada, reciclagem com prensa, mineração e inventário permanecem em aberto para os marcos futuros (M3+).
 
-**Key signals**:
-- `stability_changed(unsupported_cells: Array[Vector3i])`
 
-**Does not move blocks**. It only identifies them.
-
----
-
-### 3.3 CollapseOrchestrator (`CollapseOrchestrator.gd`, scene-local node)
-
-**Responsibility**: translates `stability_changed` events into physics events.
-This is the **critical bridge between the static grid and dynamic Jolt physics**.
-
-**Transition strategy — Island grouping**:
-
-1. Receive the `unsupported_cells` array from `StabilitySystem`.
-2. **Group adjacent unsupported cells into islands** using a second BFS pass.
-   Each island becomes one `RigidBody3D`, not one body per block.
-3. Build island mesh: create a single `MeshInstance3D` + `CollisionShape3D`
-   (compound trimesh or per-block box shapes) for the island body.
-4. Remove the falling cells from `GridSystem`.
-5. Add the island `RigidBody3D` to the scene tree → Jolt simulates it.
-6. On `body_sleeping_state_changed(true)`: the island has settled → hand off to
-   `DebrisTracker`.
-
-**Why island grouping?**
-- A 50-block wall that detaches becomes 1 rigid body, not 50.
-- Compound box colliders are very fast in Jolt.
-- Each settling body can be immediately optimised by Jolt's sleeping mechanism.
-
-**Chain reactions**: when a falling island collides with a supported structure,
-emit an impulse check. If impact force > block durability threshold, flag those
-cells dirty → re-run StabilitySystem → repeat. Cap chain-reaction depth per frame
-to avoid spiral cost.
-
----
-
-### 3.4 DebrisTracker (scene-local node or autoload)
-
-**Responsibility**: manages settled rigid-body debris — keeps them alive for
-collection, prevents them from accumulating forever, tracks their durability.
-
-| Concern | Decision |
-|---|---|
-| Durability encoding | Each island body stores a `Dictionary[local_cell, float]` of durability values inherited from the grid |
-| Settled detection | Jolt sleep signal → mark body as "settled debris" |
-| Despawn policy | Never despawn automatically; only worker pickup or explicit player action removes debris |
-| Performance | Sleeping bodies cost near-zero CPU in Jolt; leave them until collected |
-| Debris limit | Configurable cap (e.g. 200 active debris bodies). Oldest settled bodies freeze-merge into a StaticBody3D if cap exceeded |
-
-**Recovery rule** (from GAME_DESIGN §5):
-- Durability > 50% → debris becomes a reusable block item on pickup.
-- Durability ≤ 50% → converts to raw materials proportional to durability.
-
----
-
-### 3.5 ChunkRenderer (scene-local, one per chunk)
-
-**Responsibility**: visual representation of the stable grid. Generates meshes on
-demand; does not drive gameplay logic.
-
-| Item | Decision |
-|---|---|
-| Method | `SurfaceTool` or `ArrayMesh` built per chunk; faces against empty cells only (greedy meshing v1, can upgrade) |
-| Collision | Static trimesh or per-chunk `StaticBody3D` with box shapes |
-| Rebuild trigger | `GridSystem.block_placed/removed` → dirty-flag → rebuild at end of frame |
-| LOD | Simple distance-based: rebuild at normal detail inside 80 m, skip rebuilds beyond view distance |
-| Threading | Mesh generation can be offloaded to a `Thread` since `ArrayMesh` creation is thread-safe in Godot 4 |
-
-**First milestone**: no greedy meshing — one box mesh per block. Optimize later.
-
----
-
-### 3.6 BlueprintStore (autoload: `BlueprintStore`)
-
-**Responsibility**: save, load, and manage named construction blueprints.
-
-```
-Blueprint {
-  name: String,
-  origin_cell: Vector3i,         # pivot for relative offsets
-  blocks: Dictionary[Vector3i, StringName],  # relative cell → block type
-  saved_at: int,                 # Unix timestamp
-}
-```
-
-- Blueprints are stored as Godot `Resource` files (`.tres` / `.res`) in
-  `user://blueprints/`.
-- A blueprint is **never deleted** when the CoreManager is destroyed (satisfying
-  GAME_DESIGN §4 non-punitive constraint).
-- `BlueprintStore` compares a saved blueprint against the live grid to produce a
-  `BuildTask` list: `{cell: Vector3i, block_type: StringName, action: PLACE|REMOVE}`.
-
----
-
-### 3.7 CoreManager (autoload: `CoreManager`)
-
-**Responsibility**: tracks the construction core object's state and gates automatic
-reconstruction.
-
-```
-enum CoreState { OPERATIONAL, DAMAGED, DESTROYED }
-```
-
-| State | Reconstruction | Worker task dispatch |
-|---|---|---|
-| OPERATIONAL | Enabled | Enabled |
-| DAMAGED | Suspended | Suspended (core repair priority) |
-| DESTROYED | Suspended | Suspended |
-
-**Signals**:
-- `core_state_changed(new_state: CoreState)`
-- `reconstruction_enabled()`
-- `reconstruction_disabled(reason: String)`
-
-`CoreManager` does not perform reconstruction itself. It gates `WorkerDispatcher`.
-
----
-
-### 3.8 WorkerSystem (nodes: `WorkerDispatcher`, `WorkerAgent`)
-
-**Responsibility**: execute `BuildTask` lists generated by `BlueprintStore`.
-
-`WorkerDispatcher` (scene-level singleton-pattern node):
-- Listens to `CoreManager.reconstruction_enabled/disabled`.
-- Polls pending `BuildTask` queues from `BlueprintStore`.
-- Assigns tasks to idle `WorkerAgent` nodes.
-- Broadcasts status to UI: no materials, path blocked, core offline.
-
-`WorkerAgent` (one node per worker character):
-- Uses `NavigationAgent3D` for pathfinding to task cell.
-- On arrival: calls `GridSystem.place_block()` / `remove_block()` → consumes
-  materials from `InventorySystem`.
-- Reports failure reasons back to `WorkerDispatcher`.
-
-**Open items** (per GAME_DESIGN §10): worker count, speed, and animation
-depend on art direction decisions not yet made.
-
----
-
-### 3.9 InventorySystem (autoload: `InventorySystem`)
-
-**Responsibility**: owns all material and item counts. Single source of truth.
-
-- Signals: `item_added(type, qty)`, `item_removed(type, qty)`,
-  `stock_insufficient(type, needed, available)`.
-- No gameplay logic. Pure data + signals.
-
-### 3.10 CraftingSystem (autoload: `CraftingSystem`)
-
-**Responsibility**: manages crafting station states and block fabrication recipes.
-
-- Recipes are `Resource` files (`CraftingRecipe.gd`) — data-driven, no hardcoded
-  values (balancing deferred per GAME_DESIGN §6).
-- Listens for "press/compact" commands; deducts materials from `InventorySystem`,
-  produces block items.
-
----
-
-## 4. Data Ownership Map
-
-| Data | Owner | Consumers |
-|---|---|---|
-| Grid cell state | `GridSystem` | StabilitySystem, CollapseOrchestrator, ChunkRenderer, BlueprintStore |
-| Structural support set | `StabilitySystem` | CollapseOrchestrator |
-| Active debris bodies | `DebrisTracker` | WorkerAgent (pickup), Player (pickup) |
-| Blueprints | `BlueprintStore` | WorkerDispatcher, UI |
-| Core state | `CoreManager` | WorkerDispatcher, UI |
-| Materials/items | `InventorySystem` | WorkerAgent, CraftingSystem, UI |
-| Worker task queue | `WorkerDispatcher` | WorkerAgent nodes |
-
----
-
-## 5. Signal Flow (happy path: support removed → collapse → recovery)
-
-```
-Player removes block
-  → GridSystem.remove_block(cell)
-    → signal: block_removed(cell)
-      → StabilitySystem (BFS, deferred)
-        → signal: stability_changed([cell_A, cell_B, ...])
-          → CollapseOrchestrator
-            → groups islands, builds RigidBody3D
-            → removes cells from GridSystem
-            → ChunkRenderer rebuilds affected chunks
-            → Jolt simulates fall
-              → body_sleeping_state_changed(true)
-                → DebrisTracker.register_debris(body)
-                  → WorkerDispatcher notified (debris available)
-                    → WorkerAgent navigates → picks up debris
-                      → InventorySystem.add_item(block | raw_material)
-```
-
----
-
-## 6. Technical Risks & Mitigations
-
-| Risk | Severity | Mitigation |
-|---|---|---|
-| BFS too slow on very large builds | Medium | Dirty-cell incremental BFS; defer to thread if > 5 ms |
-| Too many RigidBody3D during collapse | High | Island grouping (§3.3); debris cap with freeze-merge |
-| Chain reactions causing frame spikes | High | Cap chain depth per frame; process overflow next frame |
-| ChunkRenderer stalls main thread | Medium | Thread-based mesh generation; frame budget limiting |
-| NavigationAgent3D failing in 3D terrain | Medium | NavMesh rebake only on structural change; bake asynchronously |
-| Blueprint diff diverging from live grid | Low | Diff computed lazily on demand, not stored as state |
-| Jolt sleeping not triggering correctly | Low | Set `max_contacts_reported` and tune sleep thresholds; fallback timer |
-| Save corruption losing blueprints | Low | Blueprints saved as separate files; never overwrite, only append |
-
----
-
-## 7. Implementation Roadmap
-
-Each milestone is **small, testable, and builds on the previous one**. Do not
-start a milestone until its predecessor passes acceptance tests.
-
----
-
-### M1 — Construction Grid & Physics Collapse (First Playable)
-
-**Goal**: place and remove blocks on a 3D grid; removing a support causes a
-convincing collapse.
-
-**Scope**:
-- `GridSystem` autoload: `place_block`, `remove_block`, `get_block`.
-- `StabilitySystem` autoload: BFS from y=0 ground anchors.
-- `CollapseOrchestrator` node: island grouping → one `RigidBody3D` per island.
-- `ChunkRenderer` (single chunk, no LOD): one box mesh per block.
-- Minimal test scene: flat ground, player can left-click to place/right-click
-  to remove blocks; camera flies freely.
-- **No workers, no inventory, no core yet.**
-
-**Acceptance tests**:
-1. Placing a block adjacent to the ground marks it supported.
-2. A floating block (no ground connection) is immediately flagged unsupported.
-3. Removing the base of a 5-block tower collapses the tower into one
-   RigidBody3D that falls and settles.
-4. A 10x10x10 cube (1000 blocks): remove one base corner block → only
-   the visually unsupported section collapses, not the whole structure.
-5. Adding and removing 500 blocks with no pauses: no frame drop below 30 fps.
-6. Stability BFS with a 32x32x32 filled grid takes < 5 ms (profiled).
-7. After collapse, a `StaticBody3D` still represents the remaining stable
-   structure correctly.
-
-**Failure cases to verify**:
-- Removing a non-structural block (mid-wall) causes no collapse.
-- Removing the last ground block under a floating island doesn't leave ghost
-  collision shapes.
-- Rapid placement/removal (spam clicks) does not produce duplicate bodies or
-  orphaned cells.
-
----
-
-### M2 — Durability, Debris & Pickup
-
-**Goal**: collapsed blocks carry durability; player can pick them up and receive
-items or raw materials.
-
-**Scope**:
-- `BlockData` resource: `block_type`, `durability` (0.0–1.0).
-- `DebrisTracker`: register bodies on sleep, expose pickup interface.
-- `InventorySystem`: counts of block items and raw materials.
-- Player pickup: ray-cast to debris body → call `DebrisTracker.pickup(body)`.
-- Simple HUD: item counts.
-
-**Acceptance tests**:
-1. A block with > 50% durability on pickup adds a block item to inventory.
-2. A block with ≤ 50% durability on pickup adds raw materials.
-3. Debris bodies persist after collapse until picked up or cap exceeded.
-4. 200 sleeping debris bodies maintain > 30 fps (Jolt sleep is near-free).
-5. Inventory totals match the blocks placed minus blocks removed minus durability
-   losses (mass conservation check).
-
----
-
-### M3 — Blueprint Save & Diff
-
-**Goal**: player can save a structure as a blueprint; system can identify missing
-blocks.
-
-**Scope**:
-- `BlueprintStore`: save/load to `user://blueprints/`.
-- Blueprint diff function: compare live grid to blueprint → list `BuildTask`.
-- Blueprint viewer UI (simple list of missing blocks).
-
-**Acceptance tests**:
-1. Save a structure → destroy half → diff lists exactly the destroyed blocks.
-2. Blueprint file persists after simulated core-destroyed scenario.
-3. After manual additions post-save, diff does not flag additions as "missing".
-4. Load blueprint from disk after game restart → diff still correct.
-
----
-
-### M4 — Construction Core & Worker Reconstruction
-
-**Goal**: a core object gates reconstruction; workers rebuild from blueprints.
-
-**Scope**:
-- `CoreManager`: placed core block with state machine.
-- `WorkerAgent` (1 worker): `NavigationAgent3D`, picks up task, places block.
-- `WorkerDispatcher`: queue-based task assignment.
-- NavMesh: `NavigationRegion3D` covering the play area; rebake on structure change.
-
-**Acceptance tests**:
-1. Core operational → workers start rebuilding missing blocks.
-2. Core destroyed mid-rebuild → workers pause; blueprint not deleted.
-3. Core repaired → workers resume from where they stopped.
-4. Worker cannot place block if `InventorySystem` has insufficient materials →
-   broadcasts `stock_insufficient` signal; UI shows reason.
-5. Worker path blocked by debris → worker waits or picks alternate route;
-   does not soft-lock.
-
----
-
-### M5 — Crafting & Material Processing
-
-**Goal**: raw materials can be converted to blocks at a crafting station.
-
-**Scope**:
-- `CraftingSystem` + `CraftingRecipe` resources.
-- Crafting station scene: player or worker deposits materials → produces blocks.
-- Data-driven recipes (no hardcoded values).
-
-**Acceptance tests**:
-1. Depositing X raw materials into station with valid recipe produces Y blocks.
-2. Missing recipe → station rejects input with clear feedback.
-3. Recipes can be modified via resource files without code changes.
-
----
-
-### M6 — Performance & Scale Validation
-
-**Goal**: confirm the architecture holds at Castle Story-ish scale before any
-content expansion.
-
-**Target**: 4000 blocks placed, 25% collapse, 200 debris, 4 workers active,
-30+ fps on a mid-range PC.
-
-**Scope**:
-- Greedy face-merging for ChunkRenderer.
-- Thread-based mesh generation.
-- Incremental (dirty-cell) BFS in StabilitySystem.
-- Debris freeze-merge on cap.
-- NavMesh async rebake.
-
-**Acceptance tests**:
-1. 4000-block structure: < 2 ms/frame for stability BFS (incremental).
-2. Chunk mesh rebuild < 4 ms per chunk (threaded).
-3. 200 sleeping debris bodies: 0 fps impact from physics.
-4. NavMesh rebake asynchronous: no frame hitch > 16 ms during rebake.
-5. Total frame time < 33 ms under the above load at 1080p.
-
----
-
-## 8. File / Directory Structure (target)
-
-```
-res://
-├── autoloads/
-│   ├── GridSystem.gd
-│   ├── StabilitySystem.gd
-│   ├── BlueprintStore.gd
-│   ├── CoreManager.gd
-│   ├── InventorySystem.gd
-│   └── CraftingSystem.gd
-├── systems/
-│   ├── collapse/
-│   │   ├── CollapseOrchestrator.gd
-│   │   └── IslandBuilder.gd        # helper: groups cells into islands
-│   ├── debris/
-│   │   └── DebrisTracker.gd
-│   ├── workers/
-│   │   ├── WorkerDispatcher.gd
-│   │   └── WorkerAgent.gd
-│   └── rendering/
-│       └── ChunkRenderer.gd
-├── data/
-│   ├── block_types/                 # BlockTypeResource.gd instances (.tres)
-│   └── recipes/                    # CraftingRecipe.gd instances (.tres)
-├── scenes/
-│   ├── world/
-│   │   └── GameWorld.tscn
-│   ├── entities/
-│   │   ├── Core.tscn
-│   │   └── Worker.tscn
-│   └── ui/
-│       └── HUD.tscn
-├── tests/
-│   └── m1_grid_collapse_test.tscn  # one test scene per milestone
-└── TECHNICAL_ARCHITECTURE.md
-```
-
----
-
-## 9. Decisions Requiring Your Input
-
-These are **genuinely under-specified** in GAME_DESIGN.md. I will not invent
-answers for them.
-
-| # | Question | Why it matters architecturally |
-|---|---|---|
-| 1 | **Terrain**: is it a static mesh, a voxel grid, or a heightmap? | Determines whether the NavMesh must handle destructible terrain and whether ChunkRenderer needs a separate terrain pass |
-| 2 | **Grid cell size**: 1 m³ seems correct for Castle Story scale — confirm or adjust | Affects physics body sizes, greedy meshing strategy, and readable construction scale |
-| 3 | **Structural support model**: pure vertical (gravity only) or also lateral (arches, bridges)? | Determines BFS anchor rules. Lateral support requires diagonal/horizontal connectivity checks |
-| 4 | **Worker count and character representation**: placeholder capsule vs. full character? | Determines when to invest in NavMesh complexity and animation systems |
-| 5 | **Combat / damage source**: does damage come from enemies, the environment, or the player? | CollapseOrchestrator needs an `apply_damage(cell, amount)` entry point now; the caller is unknown |
-| 6 | **Save format preference**: JSON (human-readable, debuggable) or Godot binary resource (faster, smaller)? | One format should be chosen for `GridSystem` and `BlueprintStore` from the start |
-| 7 | **Multiplayer**: single-player only, or is co-op a future consideration? | Would fundamentally change `GridSystem` ownership and network authority from day one |
-
----
-
-## 10. Non-Decisions (Resolved by Engineering Judgment)
-
-The following were resolved without requiring input, consistent with constraints:
-
-- **Island grouping over per-block RigidBody3D** — required for performance; not a design choice.
-- **Sparse Dictionary grid** — correct for a block game with mostly empty space.
-- **Deferred BFS** — avoids redundant recalculations during rapid edits; standard technique.
-- **Jolt sleep for debris** — Jolt's explicit sleep API makes this trivial and reliable.
-- **Blueprints as separate files** — directly satisfies the non-punitive constraint in GAME_DESIGN §4.
-- **Autoloads for data-owning systems** — prevents scene instancing issues with cross-system data.
-- **No physics on stable blocks** — explicitly required by GAME_DESIGN §3.1; island RB only on collapse.

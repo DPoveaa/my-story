@@ -1,4 +1,3 @@
-class_name GridSystem
 extends Node
 
 ## GridSystem is the authoritative single source of truth for stable construction blocks.

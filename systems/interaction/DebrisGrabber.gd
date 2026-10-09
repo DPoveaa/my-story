@@ -1,0 +1,266 @@
+class_name DebrisGrabber
+extends Node3D
+
+## M2.1 — Modular debris grab/carry/release/recover system.
+## Attach as a child of the Player node.
+## Grabbing is only supported in BODY_CONTROL mode for safety.
+## In SOUL_PROJECTION mode grabbing is disabled.
+##
+## Design Rationale:
+##   The physical body is frozen during Soul Projection. Dragging a RigidBody
+##   via the projection camera while the body stays put causes inconsistent
+##   physics, potential tunneling, and high desync risk.
+##   If Soul Projection is triggered while holding a block, the block is dropped.
+
+signal grabbed_block(island: DebrisIsland, cell: Vector3i, block_data: BlockData)
+signal released_block()
+signal recovered_block_to_grid(cell: Vector3i, block_type: StringName)
+signal recover_failed(reason: String)
+
+@export_group("Carry Settings")
+@export var carry_distance: float = 2.2
+@export var carry_spring_stiffness: float = 40.0
+@export var carry_max_force: float = 80.0
+@export var max_grabbable_mass: float = 8.0
+@export var recovery_max_distance: float = 12.0
+
+@export_group("Recovery Settings")
+@export var preview_ghost: PreviewGhost
+@export var grid_system: Node
+@export var orchestrator: CollapseOrchestrator
+
+var _grabbed_island: DebrisIsland = null
+var _grabbed_cell: Vector3i = Vector3i.ZERO
+var _grabbed_data: BlockData = null
+var is_grabbing: bool = false
+var _recover_preview_cell: Vector3i = Vector3i.ZERO
+var _recover_preview_valid: bool = false
+var _player: Node = null
+
+func _ready() -> void:
+	_player = get_parent()
+	if grid_system == null and has_node("/root/GridSystem"):
+		grid_system = get_node("/root/GridSystem")
+	if orchestrator == null and _player != null:
+		var world := _player.get_parent()
+		if world != null and world.has_node("CollapseOrchestrator"):
+			orchestrator = world.get_node("CollapseOrchestrator") as CollapseOrchestrator
+	if preview_ghost == null and _player != null:
+		var world := _player.get_parent()
+		if world != null and world.has_node("PreviewGhost"):
+			preview_ghost = world.get_node("PreviewGhost") as PreviewGhost
+
+func _physics_process(delta: float) -> void:
+	if not is_grabbing or not is_instance_valid(_grabbed_island):
+		if is_grabbing:
+			on_island_freed()
+		return
+
+	var cam: Camera3D = _get_active_camera()
+	if cam == null:
+		return
+
+	var carry_target: Vector3 = cam.global_position + (-cam.global_transform.basis.z) * carry_distance
+	var current_pos: Vector3 = _grabbed_island.global_position
+	var diff: Vector3 = carry_target - current_pos
+	var impulse: Vector3 = diff * carry_spring_stiffness * delta
+	if impulse.length() > carry_max_force * delta:
+		impulse = impulse.normalized() * carry_max_force * delta
+
+	_grabbed_island.linear_velocity = impulse / delta
+	_grabbed_island.angular_velocity = Vector3.ZERO
+
+	_update_recovery_preview(cam)
+
+## Attempts to grab an individual block from a debris island.
+## If the island has multiple blocks, detaches that individual block into its own single-block island.
+func try_grab(island: DebrisIsland, cell: Vector3i, block_data: BlockData = null) -> bool:
+	if _player != null and "current_state" in _player and _player.current_state != 0:
+		return false
+	if not is_instance_valid(island):
+		return false
+	if is_grabbing:
+		release()
+
+	var target_island := island
+	var target_cell := cell
+	var target_data := block_data
+
+	if target_data == null and island.constituent_blocks.has(cell):
+		target_data = island.constituent_blocks[cell]
+
+	# If multi-block island, separate the targeted block into its own 1-block debris island
+	if island.constituent_blocks.size() > 1:
+		var local_pos: Vector3 = island.local_offsets.get(cell, Vector3.ZERO)
+		var block_world_pos: Vector3 = island.to_global(local_pos) if (island.is_inside_tree() and island.local_offsets.has(cell)) else island.global_position
+		var removed := island.remove_block(cell)
+		if removed == null:
+			return false
+		target_data = removed
+
+		var single_island: DebrisIsland = DebrisIsland.new()
+		single_island.cell_size = island.cell_size
+		single_island.orchestrator = orchestrator
+		var block_map: Dictionary = {Vector3i.ZERO: target_data}
+		single_island.setup_island([Vector3i.ZERO], block_map, island.cell_size)
+		if island.get_parent() != null:
+			island.get_parent().add_child(single_island)
+		if single_island.is_inside_tree():
+			single_island.global_position = block_world_pos
+		else:
+			single_island.position = block_world_pos
+		if orchestrator != null and orchestrator.has_method("register_debris_island"):
+			orchestrator.register_debris_island(single_island)
+
+		target_island = single_island
+		target_cell = Vector3i.ZERO
+
+	if target_island.mass > max_grabbable_mass:
+		return false
+
+	_grabbed_island = target_island
+	_grabbed_cell = target_cell
+	_grabbed_data = target_data
+	is_grabbing = true
+	_grabbed_island.sleeping = false
+	_grabbed_island.can_sleep = false
+	grabbed_block.emit(target_island, target_cell, target_data)
+	return true
+
+## Drops or throws the carried block into physical simulation.
+func release(throw_impulse: Vector3 = Vector3.ZERO) -> void:
+	if not is_grabbing:
+		return
+	if is_instance_valid(_grabbed_island):
+		_grabbed_island.can_sleep = true
+		if throw_impulse.length_squared() > 0.01:
+			_grabbed_island.linear_velocity = throw_impulse
+		elif _grabbed_island.linear_velocity.length() < 0.5:
+			_grabbed_island.linear_velocity = Vector3.DOWN * 1.0
+	_grabbed_island = null
+	_grabbed_cell = Vector3i.ZERO
+	_grabbed_data = null
+	is_grabbing = false
+	if preview_ghost != null:
+		preview_ghost.hide_preview()
+	released_block.emit()
+
+## Snaps the carried block back onto the static grid at the previewed cell.
+func try_recover() -> bool:
+	if not is_grabbing or not is_instance_valid(_grabbed_island):
+		recover_failed.emit("No block is held")
+		return false
+	if _grabbed_data == null:
+		recover_failed.emit("Block data missing")
+		return false
+	var grid := _get_grid()
+	if grid == null:
+		recover_failed.emit("GridSystem unavailable")
+		return false
+	if not _recover_preview_valid:
+		recover_failed.emit("No valid grid cell targeted")
+		return false
+
+	var target_cell := _recover_preview_cell
+	if not grid.can_place_block(target_cell):
+		recover_failed.emit("Cell occupied")
+		return false
+	if orchestrator != null and orchestrator.is_cell_blocked_by_debris(target_cell, grid.cell_size):
+		recover_failed.emit("Cell blocked by debris")
+		return false
+	if _player != null and _player.has_method("is_cell_overlapping_player"):
+		if _player.is_cell_overlapping_player(target_cell, grid.cell_size):
+			recover_failed.emit("Cell overlaps player")
+			return false
+
+	var removed_data: BlockData = _grabbed_island.remove_block(_grabbed_cell)
+	if removed_data == null:
+		recover_failed.emit("Block no longer in debris island")
+		is_grabbing = false
+		_grabbed_island = null
+		return false
+
+	grid.place_block(target_cell, removed_data.block_type)
+	var recovered_type := removed_data.block_type
+	_grabbed_island = null
+	_grabbed_cell = Vector3i.ZERO
+	_grabbed_data = null
+	is_grabbing = false
+	if preview_ghost != null:
+		preview_ghost.hide_preview()
+	recovered_block_to_grid.emit(target_cell, recovered_type)
+	return true
+
+func _update_recovery_preview(cam: Camera3D) -> void:
+	var grid := _get_grid()
+	if grid == null or preview_ghost == null:
+		return
+
+	var ray_origin := cam.global_position
+	var ray_dir := -cam.global_transform.basis.z
+	var ray_end := ray_origin + ray_dir * recovery_max_distance
+
+	if not is_inside_tree():
+		preview_ghost.hide_preview()
+		return
+
+	var space := get_world_3d().direct_space_state
+	if space == null:
+		preview_ghost.hide_preview()
+		return
+
+	var exclude_rids: Array[RID] = []
+	if is_instance_valid(_grabbed_island):
+		exclude_rids.append(_grabbed_island.get_rid())
+	if _player != null and _player.has_method("get_rid"):
+		exclude_rids.append(_player.get_rid())
+
+	var query := PhysicsRayQueryParameters3D.create(ray_origin, ray_end)
+	query.exclude = exclude_rids
+	var result := space.intersect_ray(query)
+	if result.is_empty():
+		_recover_preview_valid = false
+		preview_ghost.hide_preview()
+		return
+
+	var hit_pos: Vector3 = result.position
+	var hit_normal: Vector3 = result.normal
+	var target: Vector3i = grid.world_to_cell(hit_pos + hit_normal * (grid.cell_size * 0.5))
+	var is_valid: bool = grid.can_place_block(target)
+	if is_valid and orchestrator != null:
+		is_valid = not orchestrator.is_cell_blocked_by_debris(target, grid.cell_size)
+	if is_valid and _player != null and _player.has_method("is_cell_overlapping_player"):
+		is_valid = not _player.is_cell_overlapping_player(target, grid.cell_size)
+
+	_recover_preview_cell = target
+	_recover_preview_valid = is_valid
+	preview_ghost.update_preview(target, is_valid, grid.cell_size)
+
+func _get_active_camera() -> Camera3D:
+	if _player != null and _player.has_method("get_active_camera"):
+		return _player.get_active_camera()
+	return null
+
+func _get_grid() -> Node:
+	if grid_system != null:
+		return grid_system
+	if has_node("/root/GridSystem"):
+		return get_node("/root/GridSystem")
+	return null
+
+func on_island_freed() -> void:
+	if is_grabbing:
+		is_grabbing = false
+		_grabbed_island = null
+		_grabbed_cell = Vector3i.ZERO
+		_grabbed_data = null
+		released_block.emit()
+
+func get_grabbed_island() -> DebrisIsland:
+	return _grabbed_island
+
+func get_grabbed_block_data() -> BlockData:
+	return _grabbed_data
+
+func get_grabbed_cell() -> Vector3i:
+	return _grabbed_cell
