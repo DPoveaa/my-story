@@ -48,6 +48,7 @@ signal load_blueprint_requested(anchor: Vector3i)
 @export_group("Building Interaction")
 @export var max_ray_distance: float = 80.0
 @export var available_types: Array[StringName] = [&"stone", &"wood", &"brick", &"gold"]
+@export var mine_duration_seconds: float = 1.2
 
 # System References
 @export var grid_system: Node
@@ -176,7 +177,7 @@ func add_cement(amount: int) -> void:
 	cement_changed.emit(cement_count, max_cement)
 
 func use_cement(amount: int = 1) -> bool:
-	if unlimited_cement:
+	if unlimited_cement or game_mode == GameMode.CREATIVE:
 		return true
 	if cement_count >= amount:
 		cement_count -= amount
@@ -332,8 +333,9 @@ func _unhandled_input(event: InputEvent) -> void:
 				get_viewport().set_input_as_handled()
 				return
 			elif event.button_index == MOUSE_BUTTON_RIGHT:
-				_handle_remove_action()
-				get_viewport().set_input_as_handled()
+				if not target_is_terrain:
+					_handle_remove_action()
+					get_viewport().set_input_as_handled()
 				return
 			elif event.button_index == MOUSE_BUTTON_WHEEL_UP:
 				_cycle_block_type(-1)
@@ -520,9 +522,29 @@ func _physics_process(delta: float) -> void:
 
 	_update_raycast()
 
+	# Process hold-to-mine interaction when targeting natural terrain and holding RMB
+	if target_is_terrain and Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) and _mouse_captured and current_state != State.DEBUG_FLIGHT:
+		mining_progress += delta / mine_duration_seconds
+		if mining_progress >= 1.0:
+			_complete_mining_action()
+	else:
+		mining_progress = 0.0
+
 	if (Input.is_action_pressed(&"apply_cement") or Input.is_key_pressed(KEY_G)) and current_state != State.DEBUG_FLIGHT:
 		if debris_grabber == null or not debris_grabber.is_grabbing:
 			_handle_cement_action()
+
+func _complete_mining_action() -> void:
+	var vox_world := _get_voxel_world()
+	if vox_world != null and vox_world.has_method("mine_voxel"):
+		var mined_type: StringName = vox_world.mine_voxel(target_terrain_cell)
+		if not mined_type.is_empty():
+			var inv_mgr := _get_inventory_manager()
+			if inv_mgr != null:
+				inv_mgr.add_material(mined_type, 1)
+			target_face_status = "✓ Mined 1 %s!" % BlockTypeCatalog.get_display_name(mined_type)
+			target_face_changed.emit(has_target, target_remove_cell, target_face_dir, target_face_status)
+	mining_progress = 0.0
 
 func _process_body_movement(delta: float) -> void:
 	# Gravity simulation
@@ -763,7 +785,7 @@ func _update_raycast() -> void:
 			if mining_progress > 0.0:
 				target_face_status = "Mining %s [%d%%]" % [mat_disp, int(mining_progress * 100.0)]
 			else:
-				target_face_status = "Natural %s (RMB: Remove / Mine)" % mat_disp
+				target_face_status = "Natural %s (Hold RMB: Mine)" % mat_disp
 		else:
 			var joint_sys: Node = null
 			if has_node("/root/JointSystem"):
@@ -923,13 +945,15 @@ func _handle_place_action() -> void:
 		var b_type := get_selected_type()
 		var cost := BlockTypeCatalog.get_cost(b_type)
 		var inv_mgr := _get_inventory_manager()
-		if inv_mgr != null and not inv_mgr.has_materials(cost):
+
+		# Enforce material inventory cost checks strictly in Survival mode
+		if game_mode == GameMode.SURVIVAL and inv_mgr != null and not inv_mgr.has_materials(cost):
 			target_face_status = "Insufficient %s! (Need 1)" % BlockTypeCatalog.get_display_name(b_type)
 			target_face_changed.emit(has_target, target_remove_cell, target_face_dir, target_face_status)
 			return
 
 		if grid.place_block(target_place_cell, b_type):
-			if inv_mgr != null:
+			if game_mode == GameMode.SURVIVAL and inv_mgr != null:
 				inv_mgr.consume_materials(cost)
 			var bp_mgr := _get_blueprint_manager()
 			if bp_mgr != null and bp_mgr.has_method("notify_intentional_block_placed"):
@@ -953,15 +977,7 @@ func _handle_remove_action() -> void:
 		if is_instance_valid(target_debris_island) and target_debris_cell != null:
 			target_debris_island.remove_block(target_debris_cell)
 	elif target_is_terrain:
-		var vox_world := _get_voxel_world()
-		if vox_world != null and vox_world.has_method("mine_voxel"):
-			var mined_type: StringName = vox_world.mine_voxel(target_terrain_cell)
-			if not mined_type.is_empty():
-				var inv_mgr := _get_inventory_manager()
-				if inv_mgr != null:
-					inv_mgr.add_material(mined_type, 1)
-				target_face_status = "✓ Mined 1 %s!" % BlockTypeCatalog.get_display_name(mined_type)
-				target_face_changed.emit(has_target, target_remove_cell, target_face_dir, target_face_status)
+		pass # Mining is handled via hold-to-mine progress in _physics_process
 	else:
 		var grid := grid_system
 		if grid == null and has_node("/root/GridSystem"):
@@ -1003,7 +1019,7 @@ func _handle_cement_action() -> void:
 		target_face_changed.emit(has_target, target_remove_cell, target_face_dir, target_face_status)
 		return
 
-	if not unlimited_cement and cement_count <= 0:
+	if game_mode == GameMode.SURVIVAL and not unlimited_cement and cement_count <= 0:
 		target_face_status = "Mortar Depleted! (0 left)"
 		target_face_changed.emit(has_target, target_remove_cell, target_face_dir, target_face_status)
 		return

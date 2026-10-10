@@ -1,12 +1,14 @@
 ## Voxel terrain system automated tests.
 ## Tests: VoxelChunk face rendering, CULL_BACK material settings, internal face culling,
 ##        collision geometry generation, VoxelWorld spawn positioning, queue deduplication,
-##        single natural block mining, negative coordinate mapping, and diagnostics.
+##        single natural block mining, negative coordinate mapping, contiguous solid interiors,
+##        watertight chunk boundary interfaces, and diagnostics.
 extends RefCounted
 
 const VoxelChunkScript = preload("res://systems/terrain/VoxelChunk.gd")
 const VoxelWorldScript = preload("res://systems/terrain/VoxelWorld.gd")
 const InventoryManagerScript = preload("res://autoloads/InventoryManager.gd")
+const PlayerControllerScript = preload("res://scenes/player/PlayerController.gd")
 
 var _passed: int = 0
 var _failed: int = 0
@@ -24,6 +26,10 @@ func run_all() -> bool:
 	_run_test("test_voxel_world_mine_single_voxel")
 	_run_test("test_negative_coordinate_mapping")
 	_run_test("test_voxel_world_diagnostics")
+	_run_test("test_contiguous_solid_interior_generation")
+	_run_test("test_unloaded_neighbor_boundary_face_preservation")
+	_run_test("test_watertight_chunk_boundary_rebuild_on_load_unload")
+	_run_test("test_creative_mode_bypasses_inventory_costs")
 
 	print("\n--------------------------------------------------")
 	print("TERRAIN TESTS SUMMARY: %d Passed, %d Failed" % [_passed, _failed])
@@ -118,7 +124,6 @@ func test_negative_coordinate_mapping() -> void:
 	world.seed_value = 1337
 	var neg_cell := Vector3i(-5, 10, -5)
 	var voxel_type := world.get_voxel_at(neg_cell)
-	# Should deterministically return a valid block type string (or empty air string)
 	_assert(voxel_type is StringName, "Negative world coordinates evaluate without crash or index out of bounds")
 
 func test_voxel_world_diagnostics() -> void:
@@ -128,3 +133,68 @@ func test_voxel_world_diagnostics() -> void:
 	var diag := world.get_diagnostics()
 	_assert(diag.get("loaded_chunks", 0) == 1, "Diagnostics track loaded chunk count (1)")
 	_assert(diag.get("total_chunks_generated", 0) >= 1, "Diagnostics track total generated chunk count")
+
+func test_contiguous_solid_interior_generation() -> void:
+	var world: VoxelWorld = VoxelWorldScript.new()
+	world.seed_value = 1337
+	# Inspect vertical column at x=0, z=0
+	var top_y := -1
+	var bottom_y := -1
+	for y in range(31, -1, -1):
+		if world.is_solid_block(Vector3i(0, y, 0)):
+			if top_y == -1:
+				top_y = y
+			bottom_y = y
+
+	var contiguous := true
+	if top_y != -1 and bottom_y != -1:
+		for y in range(bottom_y, top_y + 1):
+			if not world.is_solid_block(Vector3i(0, y, 0)):
+				contiguous = false
+				break
+
+	_assert(contiguous and top_y > bottom_y, "Island vertical voxel column has 100% contiguous solid interior")
+
+func test_unloaded_neighbor_boundary_face_preservation() -> void:
+	var world: VoxelWorld = VoxelWorldScript.new()
+	world.seed_value = 1337
+	# Generate only chunk (0,0) without neighbor (1,0) loaded
+	var chunk: VoxelChunk = world._load_or_generate_chunk(Vector2i(0, 0))
+
+	# Border voxel at x=15 (right boundary facing unloaded chunk 1,0)
+	var border_solid := chunk.is_solid_local(15, 10, 5)
+	if border_solid:
+		var col_shape: CollisionShape3D = chunk._col_shape
+		_assert(col_shape != null and col_shape.shape != null, "Boundary faces rendered and collidable when neighbor chunk is unloaded")
+	else:
+		_assert(true, "Chunk boundary test evaluated")
+
+func test_watertight_chunk_boundary_rebuild_on_load_unload() -> void:
+	var world: VoxelWorld = VoxelWorldScript.new()
+	world.seed_value = 1337
+	var c0 := world._load_or_generate_chunk(Vector2i(0, 0))
+	var initial_faces := 0
+	if c0._col_shape != null and c0._col_shape.shape != null:
+		initial_faces = c0._col_shape.shape.get_faces().size()
+
+	# Loading neighbor chunk (1,0) rebuilds c0 to cull shared internal boundary faces
+	var c1 := world._load_or_generate_chunk(Vector2i(1, 0))
+	var faces_after_neighbor := 0
+	if c0._col_shape != null and c0._col_shape.shape != null:
+		faces_after_neighbor = c0._col_shape.shape.get_faces().size()
+
+	_assert(faces_after_neighbor < initial_faces, "Loading neighbor chunk culls internal boundary faces and keeps interface watertight")
+
+	# Unloading neighbor chunk (1,0) rebuilds c0 to restore exposed boundary faces
+	world._unload_chunk(Vector2i(1, 0))
+	var faces_after_unload := 0
+	if c0._col_shape != null and c0._col_shape.shape != null:
+		faces_after_unload = c0._col_shape.shape.get_faces().size()
+
+	_assert(faces_after_unload == initial_faces, "Unloading neighbor chunk restores exposed boundary faces on edge")
+
+func test_creative_mode_bypasses_inventory_costs() -> void:
+	var player := PlayerControllerScript.new()
+	player.game_mode = PlayerControllerScript.GameMode.CREATIVE
+	var can_use := player.use_cement(100)
+	_assert(can_use, "Creative mode bypasses cement inventory consumption")

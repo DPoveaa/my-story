@@ -105,7 +105,7 @@ func is_solid_local(lx: int, ly: int, lz: int) -> bool:
 	return not get_voxel_local(lx, ly, lz).is_empty()
 
 ## Rebuilds chunk mesh and ConcavePolygonShape3D collision geometry.
-## Only generates exposed faces bordering air to eliminate internal faces.
+## Only generates exposed faces bordering air or unloaded neighbor chunks to ensure watertight boundaries.
 func rebuild_mesh_and_collision() -> void:
 	setup_nodes()
 
@@ -154,11 +154,19 @@ func rebuild_mesh_and_collision() -> void:
 					if nx >= 0 and nx < SIZE_X and ny >= 0 and ny < SIZE_Y and nz >= 0 and nz < SIZE_Z:
 						neighbor_is_solid = not StringName(voxels[nx][ny][nz]).is_empty()
 					else:
-						# Query world for neighbor voxel across chunk boundary
-						if voxel_world != null and voxel_world.has_method("is_solid_block"):
-							neighbor_is_solid = voxel_world.is_solid_block(Vector3i(gx + d.x, gy + d.y, gz + d.z))
+						# Query world for neighbor voxel across chunk boundary ONLY if neighbor chunk is loaded
+						var target_cell := Vector3i(gx + d.x, gy + d.y, gz + d.z)
+						var n_cx := floori(float(target_cell.x) / float(SIZE_X))
+						var n_cz := floori(float(target_cell.z) / float(SIZE_Z))
+						var n_cp := Vector2i(n_cx, n_cz)
 
-					# Render face ONLY if adjacent neighbor is empty space (air)
+						if voxel_world != null and voxel_world.has_method("is_chunk_loaded") and voxel_world.is_chunk_loaded(n_cp):
+							neighbor_is_solid = voxel_world.is_solid_block(target_cell)
+						else:
+							# Neighbor chunk is NOT loaded — keep boundary face rendered & collidable so world is watertight
+							neighbor_is_solid = false
+
+					# Render face ONLY if adjacent neighbor is empty space (air) or unloaded
 					if not neighbor_is_solid:
 						_add_face_quad(block_min, d, st, collision_faces)
 

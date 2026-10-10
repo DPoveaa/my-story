@@ -91,9 +91,6 @@ func _ready() -> void:
 			build_camera.block_type_changed.connect(build_hud.set_selected_block_type)
 			build_hud.set_selected_block_type(build_camera.get_selected_type())
 
-	# Build an initial demonstration structure on top of natural terrain
-	spawn_test_tower(Vector3i(0, 0, 0))
-
 func _unhandled_input(event: InputEvent) -> void:
 	if build_hud != null and build_hud.has_method("is_modal_open") and build_hud.is_modal_open():
 		return

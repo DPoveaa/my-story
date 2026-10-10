@@ -4,7 +4,7 @@ extends Node3D
 ## Infinite 3D Chunked Voxel Terrain Engine inspired by Castle Story's floating islands.
 ## Manages 3D voxel chunk loading/unloading, FastNoiseLite density noise generation,
 ## mining interaction, persistence, and ground support for construction.
-## Uses incremental chunk loading queue with frame time budget to eliminate frame stalls.
+## Uses multi-stage incremental chunk generation with frame time budget to eliminate frame stalls.
 
 signal chunk_loaded(chunk_pos: Vector2i)
 signal chunk_unloaded(chunk_pos: Vector2i)
@@ -33,7 +33,7 @@ var _chunks: Dictionary = {}
 ## Dictionary[Vector2i, Array[Vector3i]] — mined local cell coordinates per chunk
 var _mined_deltas: Dictionary = {}
 
-## Incremental Generation Queue
+## Incremental Multi-Stage Generation Queue
 var _generation_queue: Array[Vector2i] = []
 var _queued_chunks: Dictionary = {} # Vector2i -> bool
 
@@ -70,6 +70,10 @@ func set_seed(p_seed: int) -> void:
 	seed_value = p_seed
 	_setup_noise()
 	clear_world()
+
+## Helper method to check if chunk is currently loaded in memory
+func is_chunk_loaded(chunk_pos: Vector2i) -> bool:
+	return _chunks.has(chunk_pos) and is_instance_valid(_chunks[chunk_pos])
 
 ## Returns true if a solid natural terrain block exists at world_cell.
 func is_solid_block(world_cell: Vector3i) -> bool:
@@ -112,35 +116,38 @@ func _evaluate_procedural_voxel(gx: int, gy: int, gz: int, chunk_pos: Vector2i, 
 	if _noise_2d == null or _noise_3d == null:
 		_setup_noise()
 
-	# 2D Height Noise
-	var n2d: float = (_noise_2d.get_noise_2d(float(gx), float(gz)) + 1.0) * 0.5
-	var surf_height: float = lerpf(6.0, 20.0, n2d)
+	# Floating Island Presence & Shape Noise
+	var island_noise: float = _noise_2d.get_noise_2d(float(gx), float(gz))
+	if island_noise < -0.20:
+		# Air space between floating islands
+		return &""
 
-	# 3D Density Noise for Castle Story-style floating islands
-	var n3d: float = _noise_3d.get_noise_3d(float(gx), float(gy), float(gz))
-	var dist_from_center: float = absf(float(gy) - surf_height)
-	var density: float = n3d - (dist_from_center / 7.0) + 0.10
+	# 2D Height Surface Noise
+	var n2d_surf: float = (_noise_2d.get_noise_2d(float(gx) + 500.0, float(gz) + 500.0) + 1.0) * 0.5
+	var surf_height: int = int(floor(lerpf(12.0, 22.0, n2d_surf)))
 
-	var is_solid: bool = (density > -0.12) and (gy >= 2) and (gy <= 26)
+	# 2D Bottom Base Noise for Castle Story-style floating island underside
+	var n2d_base: float = (_noise_3d.get_noise_2d(float(gx) - 500.0, float(gz) - 500.0) + 1.0) * 0.5
+	var bottom_height: int = int(floor(lerpf(3.0, 9.0, n2d_base)))
+
+	# Ensure solid, contiguous interior between bottom_height and surf_height
+	var is_solid: bool = (gy >= bottom_height) and (gy <= surf_height)
 	if not is_solid:
 		return &""
 
 	# Block Layering
-	var above_density: float = _noise_3d.get_noise_3d(float(gx), float(gy + 1), float(gz)) - (absf(float(gy + 1) - surf_height) / 7.0) + 0.10
-	var is_top_layer: bool = (above_density <= -0.12) or (gy + 1 > 26)
-
-	if is_top_layer:
+	if gy == surf_height:
 		return &"grass"
-	elif gy >= int(surf_height) - 2:
+	elif gy >= surf_height - 2:
 		return &"dirt"
 
 	# Subsurface Stone & Ore Deposits
 	var ore_n: float = _noise_ore.get_noise_3d(float(gx), float(gy), float(gz))
-	if gy <= 10 and ore_n > 0.45:
+	if gy <= 8 and ore_n > 0.45:
 		return &"gold"
-	elif gy <= 14 and ore_n > 0.35:
+	elif gy <= 12 and ore_n > 0.35:
 		return &"iron"
-	elif gy <= 18 and ore_n > 0.25:
+	elif gy <= 15 and ore_n > 0.25:
 		return &"coal"
 
 	return &"stone"
@@ -205,7 +212,7 @@ func _process_generation_queue() -> void:
 			_load_or_generate_chunk(cp)
 			processed += 1
 
-		# Time budget guard
+		# Strict time budget guard per frame
 		var elapsed_ms := float(Time.get_ticks_usec() - start_time) / 1000.0
 		if elapsed_ms >= max_frame_time_ms:
 			break
@@ -216,7 +223,7 @@ func _load_or_generate_chunk(chunk_pos: Vector2i) -> VoxelChunk:
 
 	var t_start := Time.get_ticks_usec()
 
-	# If this chunk was queued, remove it from queue since we're generating it synchronously
+	# If this chunk was queued, remove it from queue since we're generating it
 	if _queued_chunks.has(chunk_pos):
 		_queued_chunks.erase(chunk_pos)
 		_generation_queue.erase(chunk_pos)
@@ -229,6 +236,7 @@ func _load_or_generate_chunk(chunk_pos: Vector2i) -> VoxelChunk:
 	var start_x := chunk_pos.x * VoxelChunk.SIZE_X
 	var start_z := chunk_pos.y * VoxelChunk.SIZE_Z
 
+	# Stage 1: Voxel Data Evaluation
 	for lx in range(VoxelChunk.SIZE_X):
 		for lz in range(VoxelChunk.SIZE_Z):
 			var gx := start_x + lx
@@ -238,9 +246,13 @@ func _load_or_generate_chunk(chunk_pos: Vector2i) -> VoxelChunk:
 				var b_type := _evaluate_procedural_voxel(gx, ly, gz, chunk_pos, local_cell)
 				chunk.set_voxel_local(lx, ly, lz, b_type)
 
+	# Stage 2: Scene & Physics Geometry Construction
 	add_child(chunk)
 	chunk.rebuild_mesh_and_collision()
 	_chunks[chunk_pos] = chunk
+
+	# Stage 3: Rebuild adjacent loaded chunks to update boundary faces
+	_rebuild_neighbor_chunks(chunk_pos)
 
 	total_chunks_generated += 1
 	last_chunk_build_time_ms = float(Time.get_ticks_usec() - t_start) / 1000.0
@@ -254,7 +266,19 @@ func _unload_chunk(chunk_pos: Vector2i) -> void:
 		if is_instance_valid(chunk):
 			chunk.queue_free()
 		_chunks.erase(chunk_pos)
+		_rebuild_neighbor_chunks(chunk_pos)
 		chunk_unloaded.emit(chunk_pos)
+
+func _rebuild_neighbor_chunks(cp: Vector2i) -> void:
+	var neighbors: Array[Vector2i] = [
+		cp + Vector2i(1, 0), cp + Vector2i(-1, 0),
+		cp + Vector2i(0, 1), cp + Vector2i(0, -1)
+	]
+	for n_pos in neighbors:
+		if _chunks.has(n_pos):
+			var n_chunk: VoxelChunk = _chunks[n_pos]
+			if is_instance_valid(n_chunk):
+				n_chunk.rebuild_mesh_and_collision()
 
 ## Diagnostics accessor dictionary
 func get_diagnostics() -> Dictionary:
