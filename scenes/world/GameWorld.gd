@@ -8,7 +8,10 @@ extends Node3D
 
 const PlayerControllerScript = preload("res://scenes/player/PlayerController.gd")
 const MortarOverlayRendererScript = preload("res://systems/rendering/MortarOverlayRenderer.gd")
-const TerrainGeneratorScript = preload("res://systems/terrain/TerrainGenerator.gd")
+const VoxelWorldScript = preload("res://systems/terrain/VoxelWorld.gd")
+
+enum GameMode { SURVIVAL, CREATIVE }
+@export var current_game_mode: GameMode = GameMode.SURVIVAL
 
 @onready var grid_renderer: GridRenderer = $GridRenderer
 @onready var preview_ghost: PreviewGhost = $PreviewGhost
@@ -20,7 +23,7 @@ const TerrainGeneratorScript = preload("res://systems/terrain/TerrainGenerator.g
 
 var grid_system: Node
 var stability_system: Node
-var terrain_generator: TerrainGenerator = null
+var voxel_world: VoxelWorld = null
 var _debug_camera_active: bool = false
 var _mortar_overlay_renderer: Node3D = null
 
@@ -30,12 +33,12 @@ func _ready() -> void:
 	if stability_system == null and has_node("/root/StabilitySystem"):
 		stability_system = get_node("/root/StabilitySystem")
 
-	# Instantiate procedural terrain generator
-	terrain_generator = TerrainGeneratorScript.new()
-	terrain_generator.name = "TerrainGenerator"
-	terrain_generator.seed_value = 1337
-	add_child(terrain_generator)
-	terrain_generator.generate_terrain()
+	# Instantiate 3D Chunked Voxel World
+	voxel_world = VoxelWorldScript.new()
+	voxel_world.name = "VoxelWorld"
+	voxel_world.seed_value = 1337
+	add_child(voxel_world)
+	voxel_world.update_loaded_chunks(Vector3.ZERO)
 
 	# Spawn mortar overlay renderer as a child so face visuals work in-game.
 	_mortar_overlay_renderer = MortarOverlayRendererScript.new()
@@ -44,7 +47,7 @@ func _ready() -> void:
 	add_child(_mortar_overlay_renderer)
 
 	if stability_system != null:
-		stability_system.terrain_generator = terrain_generator
+		stability_system.terrain_generator = voxel_world
 		stability_system.require_joints_for_lateral_support = true
 
 	# Wire HUD
@@ -55,12 +58,13 @@ func _ready() -> void:
 
 	# Wire Player (primary gameplay controller) and spawn on safe surface
 	if player != null:
+		player.game_mode = current_game_mode
 		player.grid_system = grid_system
 		player.stability_system = stability_system
 		player.orchestrator = collapse_orchestrator
 		player.preview_ghost = preview_ghost
 		player.build_hud = build_hud
-		player.global_position = terrain_generator.get_spawn_position(0, 0)
+		player.global_position = voxel_world.get_spawn_position(0, 0)
 		player.block_type_changed.connect(build_hud.set_selected_block_type)
 		player.state_changed.connect(build_hud.set_player_state)
 		if player.has_signal("carried_block_changed"):
@@ -72,7 +76,7 @@ func _ready() -> void:
 		if player.has_signal("raw_materials_changed"):
 			player.raw_materials_changed.connect(build_hud.set_raw_materials)
 		build_hud.set_selected_block_type(player.get_selected_type())
-		build_hud.set_player_state(player.current_state)
+		build_hud.set_player_mode("Survival" if current_game_mode == GameMode.SURVIVAL else "Creative")
 		build_hud.set_cement(player.get_cement_count(), player.max_cement)
 
 	# Wire BuildCamera as secondary/debug tool

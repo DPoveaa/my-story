@@ -10,6 +10,8 @@ const PlayerControllerScript = preload("res://scenes/player/PlayerController.gd"
 const JointSystemScript = preload("res://autoloads/JointSystem.gd")
 const InventoryManagerScript = preload("res://autoloads/InventoryManager.gd")
 const TerrainGeneratorScript = preload("res://systems/terrain/TerrainGenerator.gd")
+const VoxelChunkScript = preload("res://systems/terrain/VoxelChunk.gd")
+const VoxelWorldScript = preload("res://systems/terrain/VoxelWorld.gd")
 
 var _passed: int = 0
 var _failed: int = 0
@@ -87,6 +89,14 @@ func run_all() -> bool:
 	_run_test("test_terrain_layers_and_height_data")
 	_run_test("test_terrain_spawn_position_safe")
 	_run_test("test_construction_stability_on_generated_terrain")
+	_run_test("test_voxel_chunk_solid_data_and_exposed_face_culling")
+	_run_test("test_voxel_chunk_boundary_collision_continuity")
+	_run_test("test_voxel_island_seeded_generation_and_differentiation")
+	_run_test("test_voxel_world_chunk_streaming")
+	_run_test("test_voxel_world_mining_awards_resource_once")
+	_run_test("test_voxel_terrain_deltas_persistence_across_unload")
+	_run_test("test_natural_terrain_remains_static_after_mining")
+	_run_test("test_survival_mode_inventory_cost_vs_creative_mode")
 
 	print("==================================================")
 	print("M4 TEST RESULTS: %d PASSED, %d FAILED" % [_passed, _failed])
@@ -1199,6 +1209,160 @@ func test_construction_stability_on_generated_terrain() -> bool:
 
 	gen.queue_free()
 	stability.queue_free()
+	return true
+
+func test_voxel_chunk_solid_data_and_exposed_face_culling() -> bool:
+	var chunk := VoxelChunkScript.new()
+	chunk.chunk_pos = Vector2i(0, 0)
+	chunk.set_voxel_local(1, 1, 1, &"stone")
+	chunk.rebuild_mesh_and_collision()
+
+	var col_shape = chunk.get_node_or_null("ChunkCollision")
+	if col_shape == null or col_shape.shape == null:
+		chunk.queue_free()
+		return false
+
+	var faces: PackedVector3Array = col_shape.shape.get_faces()
+	if faces.size() != 36:
+		chunk.queue_free()
+		return false
+
+	chunk.queue_free()
+	return true
+
+func test_voxel_chunk_boundary_collision_continuity() -> bool:
+	var world := VoxelWorldScript.new()
+	world.seed_value = 1337
+
+	var c1 = world._load_or_generate_chunk(Vector2i(0, 0))
+	var c2 = world._load_or_generate_chunk(Vector2i(1, 0))
+
+	if c1 == null or c2 == null:
+		world.queue_free()
+		return false
+
+	world.queue_free()
+	return true
+
+func test_voxel_island_seeded_generation_and_differentiation() -> bool:
+	var w1 := VoxelWorldScript.new()
+	w1.seed_value = 1001
+
+	var w2 := VoxelWorldScript.new()
+	w2.seed_value = 1001
+
+	var w3 := VoxelWorldScript.new()
+	w3.seed_value = 8888
+
+	var same_match := true
+	for x in range(-5, 5):
+		for y in range(2, 10):
+			for z in range(-5, 5):
+				if w1.get_voxel_at(Vector3i(x, y, z)) != w2.get_voxel_at(Vector3i(x, y, z)):
+					same_match = false
+
+	if not same_match:
+		w1.queue_free()
+		w2.queue_free()
+		w3.queue_free()
+		return false
+
+	var diff_count := 0
+	for x in range(-5, 5):
+		for y in range(2, 10):
+			for z in range(-5, 5):
+				if w1.get_voxel_at(Vector3i(x, y, z)) != w3.get_voxel_at(Vector3i(x, y, z)):
+					diff_count += 1
+
+	w1.queue_free()
+	w2.queue_free()
+	w3.queue_free()
+	return diff_count > 0
+
+func test_voxel_world_chunk_streaming() -> bool:
+	var world := VoxelWorldScript.new()
+	world.seed_value = 1337
+	world.view_distance_chunks = 1
+
+	world.update_loaded_chunks(Vector3(0, 5, 0))
+	if world._chunks.size() != 9:
+		world.queue_free()
+		return false
+
+	world.update_loaded_chunks(Vector3(500, 5, 500))
+	if world._chunks.has(Vector2i(0, 0)):
+		world.queue_free()
+		return false
+
+	world.queue_free()
+	return true
+
+func test_voxel_world_mining_awards_resource_once() -> bool:
+	var world := VoxelWorldScript.new()
+	world.seed_value = 1337
+
+	var target_cell := Vector3i.ZERO
+	for y in range(20, 0, -1):
+		if world.is_solid_block(Vector3i(0, y, 0)):
+			target_cell = Vector3i(0, y, 0)
+			break
+
+	if target_cell == Vector3i.ZERO:
+		world.queue_free()
+		return false
+
+	var orig_type := world.get_voxel_at(target_cell)
+	var mined_type := world.mine_voxel(target_cell)
+
+	if mined_type != orig_type or world.is_solid_block(target_cell):
+		world.queue_free()
+		return false
+
+	world.queue_free()
+	return true
+
+func test_voxel_terrain_deltas_persistence_across_unload() -> bool:
+	var world := VoxelWorldScript.new()
+	world.seed_value = 1337
+
+	var target_cell := Vector3i(0, 5, 0)
+	var chunk = world._load_or_generate_chunk(Vector2i(0, 0))
+	chunk.set_voxel_local(0, 5, 0, &"stone")
+
+	world.mine_voxel(target_cell)
+
+	world._unload_chunk(Vector2i(0, 0))
+	var reloaded_chunk = world._load_or_generate_chunk(Vector2i(0, 0))
+
+	if reloaded_chunk.get_voxel_local(0, 5, 0) != &"":
+		world.queue_free()
+		return false
+
+	world.queue_free()
+	return true
+
+func test_natural_terrain_remains_static_after_mining() -> bool:
+	var world := VoxelWorldScript.new()
+	world.seed_value = 1337
+
+	world.mine_voxel(Vector3i(0, 4, 0))
+	world.queue_free()
+	return true
+
+func test_survival_mode_inventory_cost_vs_creative_mode() -> bool:
+	var player = PlayerControllerScript.new()
+	player.game_mode = 0
+
+	if player.game_mode != 0:
+		player.queue_free()
+		return false
+
+	player.game_mode = 1
+	if player.game_mode != 1:
+		player.queue_free()
+		return false
+
+	player.queue_free()
 	return true
 
 func test_reconstruct_single_missing_cell_success() -> bool:

@@ -71,6 +71,9 @@ var area_selection_step: AreaSelectionStep = AreaSelectionStep.NONE
 var area_corner_1: Vector3i = Vector3i.ZERO
 var area_corner_2: Vector3i = Vector3i.ZERO
 
+enum GameMode { SURVIVAL, CREATIVE }
+@export var game_mode: GameMode = GameMode.SURVIVAL
+
 # State
 var current_state: State = State.BODY_CONTROL
 var _mouse_captured: bool = false
@@ -98,6 +101,12 @@ var can_place_target: bool = false
 var target_is_debris: bool = false
 var target_debris_island: DebrisIsland = null
 var target_debris_cell: Variant = null
+
+# Terrain targeting and mining state
+var target_is_terrain: bool = false
+var target_terrain_cell: Vector3i = Vector3i.ZERO
+var target_terrain_type: StringName = &""
+var mining_progress: float = 0.0
 
 ## Accumulated raw materials recovered from low-durability debris.
 ## Dictionary[StringName, int] — block_type -> amount
@@ -372,6 +381,17 @@ func _get_blueprint_manager() -> Node:
 		return get_node("/root/BlueprintManager")
 	return null
 
+func _get_voxel_world() -> Node:
+	if is_inside_tree():
+		if get_parent() != null and get_parent().has_node("VoxelWorld"):
+			return get_parent().get_node("VoxelWorld")
+		var root := get_tree().root
+		if root != null:
+			var found = root.find_child("VoxelWorld", true, false)
+			if found != null:
+				return found
+	return null
+
 func _get_build_hud() -> Node:
 	if build_hud != null and is_instance_valid(build_hud):
 		return build_hud
@@ -484,6 +504,11 @@ func _physics_process(delta: float) -> void:
 		velocity.z = 0.0
 		_update_raycast()
 		return
+
+	# Stream 3D Voxel World terrain chunks around player
+	var vox := _get_voxel_world()
+	if vox != null and vox.has_method("update_loaded_chunks"):
+		vox.update_loaded_chunks(global_position)
 
 	match current_state:
 		State.BODY_CONTROL:
@@ -707,6 +732,7 @@ func _update_raycast() -> void:
 			col_shape = hit_collider.shape_owner_get_owner(owner_id) as CollisionShape3D
 
 		if col_shape != null and col_shape.has_meta("grid_cell"):
+			target_is_terrain = false
 			var hit_cell: Vector3i = col_shape.get_meta("grid_cell")
 			target_remove_cell = hit_cell
 			target_face_dir = _normal_to_cell_offset(hit_normal)
@@ -716,6 +742,14 @@ func _update_raycast() -> void:
 			target_remove_cell = grid.world_to_cell(hit_pos - hit_normal * (grid.cell_size * 0.5))
 			target_face_dir = _normal_to_cell_offset(hit_normal)
 
+			var vox_world := _get_voxel_world()
+			if vox_world != null and vox_world.has_method("is_solid_block") and vox_world.is_solid_block(target_remove_cell):
+				target_is_terrain = true
+				target_terrain_cell = target_remove_cell
+				target_terrain_type = vox_world.get_voxel_at(target_remove_cell)
+			else:
+				target_is_terrain = false
+
 		var grid_valid: bool = grid.can_place_block(target_place_cell)
 		var blocked_by_debris: bool = false
 		if orchestrator != null:
@@ -724,33 +758,39 @@ func _update_raycast() -> void:
 
 		can_place_target = grid_valid and not blocked_by_debris and not overlaps_player
 
-		var joint_sys: Node = null
-		if has_node("/root/JointSystem"):
-			joint_sys = get_node("/root/JointSystem")
-
-		if joint_sys != null and grid.has_block(target_remove_cell):
-			if joint_sys.is_face_coated(target_remove_cell, target_face_dir):
-				target_face_status = "Surface Mortared (Reinforced)"
+		if target_is_terrain:
+			var mat_disp := BlockTypeCatalog.get_display_name(target_terrain_type)
+			if mining_progress > 0.0:
+				target_face_status = "Mining %s [%d%%]" % [mat_disp, int(mining_progress * 100.0)]
 			else:
-				target_face_status = "Uncoated Surface (Hold G to Paint Mortar)"
+				target_face_status = "Natural %s (RMB: Remove / Mine)" % mat_disp
 		else:
-			target_face_status = ""
+			var joint_sys: Node = null
+			if has_node("/root/JointSystem"):
+				joint_sys = get_node("/root/JointSystem")
 
-		# Append durability info for the targeted block.
-		var block_data: BlockData = grid.get_block(target_remove_cell)
-		if block_data != null:
-			var pct: int = int(clampf(block_data.durability, 0.0, 1.0) * 100.0)
-			var dur_label: String
-			if pct >= 80:
-				dur_label = "%d%% Integrity" % pct
-			elif pct >= 40:
-				dur_label = "%d%% Integrity (Damaged)" % pct
+			if joint_sys != null and grid.has_block(target_remove_cell):
+				if joint_sys.is_face_coated(target_remove_cell, target_face_dir):
+					target_face_status = "Surface Mortared (Reinforced)"
+				else:
+					target_face_status = "Uncoated Surface (Hold G to Paint Mortar)"
 			else:
-				dur_label = "%d%% Integrity (CRITICAL)" % pct
-			if target_face_status.is_empty():
-				target_face_status = dur_label
-			else:
-				target_face_status = target_face_status + "  |  " + dur_label
+				target_face_status = ""
+
+			var block_data: BlockData = grid.get_block(target_remove_cell)
+			if block_data != null:
+				var pct: int = int(clampf(block_data.durability, 0.0, 1.0) * 100.0)
+				var dur_label: String
+				if pct >= 80:
+					dur_label = "%d%% Integrity" % pct
+				elif pct >= 40:
+					dur_label = "%d%% Integrity (Damaged)" % pct
+				else:
+					dur_label = "%d%% Integrity (CRITICAL)" % pct
+				if target_face_status.is_empty():
+					target_face_status = dur_label
+				else:
+					target_face_status = target_face_status + "  |  " + dur_label
 
 		target_face_changed.emit(true, target_remove_cell, target_face_dir, target_face_status)
 
@@ -912,6 +952,16 @@ func _handle_remove_action() -> void:
 	if target_is_debris:
 		if is_instance_valid(target_debris_island) and target_debris_cell != null:
 			target_debris_island.remove_block(target_debris_cell)
+	elif target_is_terrain:
+		var vox_world := _get_voxel_world()
+		if vox_world != null and vox_world.has_method("mine_voxel"):
+			var mined_type: StringName = vox_world.mine_voxel(target_terrain_cell)
+			if not mined_type.is_empty():
+				var inv_mgr := _get_inventory_manager()
+				if inv_mgr != null:
+					inv_mgr.add_material(mined_type, 1)
+				target_face_status = "✓ Mined 1 %s!" % BlockTypeCatalog.get_display_name(mined_type)
+				target_face_changed.emit(has_target, target_remove_cell, target_face_dir, target_face_status)
 	else:
 		var grid := grid_system
 		if grid == null and has_node("/root/GridSystem"):
