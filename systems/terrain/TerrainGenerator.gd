@@ -139,17 +139,17 @@ func _add_exposed_block_faces(gx: int, gy: int, gz: int, block_min: Vector3, st:
 	var min_p := block_min
 	var max_p := block_min + Vector3.ONE * cs
 
-	var dirs := [
+	var dirs: Array[Vector3i] = [
 		Vector3i(1, 0, 0), Vector3i(-1, 0, 0),
 		Vector3i(0, 1, 0), Vector3i(0, -1, 0),
 		Vector3i(0, 0, 1), Vector3i(0, 0, -1)
 	]
 
-	for d in dirs:
-		var nx := gx + d.x
-		var ny := gy + d.y
-		var nz := gz + d.z
-		var is_air := ny > get_surface_y(nx, nz) or ny < 0
+	for d: Vector3i in dirs:
+		var nx: int = gx + d.x
+		var ny: int = gy + d.y
+		var nz: int = gz + d.z
+		var is_air: bool = ny > get_surface_y(nx, nz) or ny < 0
 		if is_air:
 			_add_quad_face(min_p, max_p, d, st, faces)
 
