@@ -187,6 +187,7 @@ func rebuild_mesh_and_collision() -> void:
 	if not collision_faces.is_empty():
 		var concave := ConcavePolygonShape3D.new()
 		concave.set_faces(collision_faces)
+		concave.backface_collision = true
 		_col_shape.shape = concave
 	else:
 		_col_shape.shape = null
@@ -236,36 +237,38 @@ func _add_face_quad(min_p: Vector3, normal: Vector3i, st: SurfaceTool, collision
 	var uv2 := Vector2(1.0, 1.0)
 	var uv3 := Vector2(0.0, 1.0)
 
-	# Triangle 1
+	# Visual Mesh Triangle 1 (Outward-facing CCW order for CULL_BACK)
 	st.set_normal(norm_v)
 	st.set_uv(uv0)
 	st.add_vertex(v0)
+
+	st.set_normal(norm_v)
+	st.set_uv(uv2)
+	st.add_vertex(v2)
 
 	st.set_normal(norm_v)
 	st.set_uv(uv1)
 	st.add_vertex(v1)
 
-	st.set_normal(norm_v)
-	st.set_uv(uv2)
-	st.add_vertex(v2)
-
+	# Collision Triangle 1 (Outward-facing normal in PhysicsServer3D)
 	collision_faces.append(v0)
-	collision_faces.append(v1)
 	collision_faces.append(v2)
+	collision_faces.append(v1)
 
-	# Triangle 2
+	# Visual Mesh Triangle 2 (Outward-facing CCW order for CULL_BACK)
 	st.set_normal(norm_v)
 	st.set_uv(uv0)
 	st.add_vertex(v0)
 
 	st.set_normal(norm_v)
-	st.set_uv(uv2)
-	st.add_vertex(v2)
-
-	st.set_normal(norm_v)
 	st.set_uv(uv3)
 	st.add_vertex(v3)
 
+	st.set_normal(norm_v)
+	st.set_uv(uv2)
+	st.add_vertex(v2)
+
+	# Collision Triangle 2 (Outward-facing normal in PhysicsServer3D)
 	collision_faces.append(v0)
-	collision_faces.append(v2)
 	collision_faces.append(v3)
+	collision_faces.append(v2)

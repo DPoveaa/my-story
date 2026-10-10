@@ -5,6 +5,14 @@ extends Node3D
 ## Manages 3D voxel chunk loading/unloading, FastNoiseLite density noise generation,
 ## mining interaction, persistence, and ground support for construction.
 ## Uses multi-stage incremental chunk generation with frame time budget to eliminate frame stalls.
+##
+## SPAWN SAFETY GUARANTEE:
+## force_sync_spawn_chunks() must be called (and awaited) after add_child(voxel_world) so that
+## spawn-area chunk collision shapes are fully committed to PhysicsServer3D before the player
+## is placed. The player must NOT be positioned in the same _ready() call as add_child().
+
+## Number of chunk-radius to pre-load synchronously around spawn (ensures solid ground exists).
+const SPAWN_SYNC_RADIUS: int = 1
 
 signal chunk_loaded(chunk_pos: Vector2i)
 signal chunk_unloaded(chunk_pos: Vector2i)
@@ -157,7 +165,8 @@ func _evaluate_procedural_voxel(gx: int, gy: int, gz: int, chunk_pos: Vector2i, 
 	return &"stone"
 
 ## Streams and enqueues chunk load/unload requests around player position without frame stalls.
-func update_loaded_chunks(player_world_pos: Vector3) -> void:
+## Generates synchronously when not inside SceneTree (unit tests) or when force_sync is true.
+func update_loaded_chunks(player_world_pos: Vector3, force_sync: bool = false) -> void:
 	var pcx := floori(player_world_pos.x / float(VoxelChunk.SIZE_X))
 	var pcz := floori(player_world_pos.z / float(VoxelChunk.SIZE_Z))
 	var current_player_chunk := Vector2i(pcx, pcz)
@@ -173,9 +182,12 @@ func update_loaded_chunks(player_world_pos: Vector3) -> void:
 			var cp := current_player_chunk + Vector2i(dx, dz)
 			required_chunks[cp] = true
 
-			if not _chunks.has(cp) and not _queued_chunks.has(cp):
-				_generation_queue.append(cp)
-				_queued_chunks[cp] = true
+			if not _chunks.has(cp):
+				if not is_inside_tree() or force_sync:
+					_load_or_generate_chunk(cp)
+				elif not _queued_chunks.has(cp):
+					_generation_queue.append(cp)
+					_queued_chunks[cp] = true
 
 	# Sort queue by distance to player chunk so nearest chunks build first
 	_generation_queue.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
@@ -337,8 +349,76 @@ func mine_voxel(world_cell: Vector3i) -> StringName:
 	voxel_mined.emit(world_cell, b_type)
 	return b_type
 
-## Finds a safe, un-obstructed spawn position on natural top terrain at (x, z).
-## Accounts for player capsule height (~1.8m) to prevent spawning inside solid voxels.
+## Synchronously generates all chunks in SPAWN_SYNC_RADIUS around the spawn chunk and flushes
+## physics so their CollisionShape3D bodies are registered before the player is placed.
+## MUST be called as: await voxel_world.force_sync_spawn_chunks(cx, cz)
+## where cx/cz are the spawn chunk coordinates (world voxel x/z divided by chunk size).
+func force_sync_spawn_chunks(center_chunk_x: int = 0, center_chunk_z: int = 0) -> void:
+	for dx in range(-SPAWN_SYNC_RADIUS, SPAWN_SYNC_RADIUS + 1):
+		for dz in range(-SPAWN_SYNC_RADIUS, SPAWN_SYNC_RADIUS + 1):
+			var cp := Vector2i(center_chunk_x + dx, center_chunk_z + dz)
+			if not _chunks.has(cp):
+				_load_or_generate_chunk(cp)
+	# Yield one physics frame so Godot's PhysicsServer3D integrates the new StaticBody3D shapes
+	if is_inside_tree():
+		await get_tree().physics_frame
+
+## Validates candidate spawn position using physics queries when inside SceneTree with physics space.
+## 1. Raycasts downward to verify solid ground support directly beneath capsule feet (normal ~ UP).
+## 2. Queries 1.8m x 0.4m player capsule clearance (zero overlaps with solid terrain / debris).
+func verify_spawn_physics(candidate_pos: Vector3, exclude_rids: Array[RID] = []) -> bool:
+	if not is_inside_tree():
+		return true
+	var space := get_world_3d().direct_space_state if get_world_3d() != null else null
+	if space == null:
+		return true
+
+	# 1. Ground support check: raycast from feet + 0.2m down to feet - 0.4m
+	var ray_params := PhysicsRayQueryParameters3D.create(
+		candidate_pos + Vector3(0.0, 0.2, 0.0),
+		candidate_pos + Vector3(0.0, -0.4, 0.0),
+		1, # Collision mask 1 = terrain
+		exclude_rids
+	)
+	var ground_hit := space.intersect_ray(ray_params)
+	if ground_hit.is_empty():
+		return false
+	var hit_norm: Vector3 = ground_hit.get("normal", Vector3.ZERO)
+	if hit_norm.y < 0.7:
+		return false
+
+	# 2. Capsule clearance check: player capsule height 1.8m, radius 0.4m
+	# Bottom of capsule at candidate_pos.y, center at candidate_pos.y + 0.9m
+	var capsule := CapsuleShape3D.new()
+	capsule.radius = 0.4
+	capsule.height = 1.8
+	var query := PhysicsShapeQueryParameters3D.new()
+	query.shape = capsule
+	query.transform = Transform3D(Basis(), candidate_pos + Vector3(0.0, 0.9, 0.0))
+	query.collision_mask = 1 | 4 # Terrain and debris
+	query.exclude = exclude_rids
+	query.margin = 0.01
+
+	var overlaps := space.intersect_shape(query, 1)
+	if not overlaps.is_empty():
+		return false
+
+	return true
+
+## Finds a safe, un-obstructed spawn position on natural top terrain at world voxel (x, z).
+## Returns the world position to assign to CharacterBody3D.global_position.
+##
+## CAPSULE GEOMETRY (from Player.tscn):
+##   - CollisionShape3D local offset: Y=+0.9
+##   - CapsuleShape3D height=1.8, radius=0.4
+##   => Capsule occupies Y=[0.0, 1.8] in the body's local space.
+##   => global_position.y == bottom of capsule == FEET position.
+##
+## We return feet_y = float(top_solid_y) + 1.1 so feet land just 0.1m above the
+## top face of the highest solid voxel (top face at float(y)+1.0). This gives a
+## tiny clearance that prevents exact-boundary edge cases while gravity does the rest.
+## The 2-cell air check above y ensures the 1.8m capsule body+head has headroom.
+## Physics verification confirms real solid ground beneath feet and zero capsule collision.
 func get_spawn_position(x: int = 0, z: int = 0) -> Vector3:
 	var cx := floori(float(x) / float(VoxelChunk.SIZE_X))
 	var cz := floori(float(z) / float(VoxelChunk.SIZE_Z))
@@ -351,20 +431,42 @@ func get_spawn_position(x: int = 0, z: int = 0) -> Vector3:
 			var cell_above_1 := Vector3i(x, y + 1, z)
 			var cell_above_2 := Vector3i(x, y + 2, z)
 			if not is_solid_block(cell_above_1) and not is_solid_block(cell_above_2):
-				return Vector3(float(x) + 0.5, float(y + 1) + 1.0, float(z) + 0.5)
+				var candidate := Vector3(float(x) + 0.5, float(y) + 1.1, float(z) + 0.5)
+				if verify_spawn_physics(candidate):
+					return candidate
 
 	# Search in expanding spiral around (x,z) if target column is blocked or void
-	for radius in range(1, 10):
+	for radius in range(1, 16):
 		for dx in range(-radius, radius + 1):
 			for dz in range(-radius, radius + 1):
 				if abs(dx) != radius and abs(dz) != radius:
 					continue
 				var nx := x + dx
 				var nz := z + dz
+				# Ensure this column's chunk is generated
+				var ncx := floori(float(nx) / float(VoxelChunk.SIZE_X))
+				var ncz := floori(float(nz) / float(VoxelChunk.SIZE_Z))
+				_load_or_generate_chunk(Vector2i(ncx, ncz))
 				for ny in range(VoxelChunk.SIZE_Y - 1, -1, -1):
 					if is_solid_block(Vector3i(nx, ny, nz)):
 						if not is_solid_block(Vector3i(nx, ny + 1, nz)) and not is_solid_block(Vector3i(nx, ny + 2, nz)):
-							return Vector3(float(nx) + 0.5, float(ny + 1) + 1.0, float(nz) + 0.5)
+							var candidate := Vector3(float(nx) + 0.5, float(ny) + 1.1, float(nz) + 0.5)
+							if verify_spawn_physics(candidate):
+								return candidate
+
+	# Fallback: scan starting island center to guarantee solid ground
+	for fallback_r in range(0, 24):
+		for fdx in range(-fallback_r, fallback_r + 1):
+			for fdz in range(-fallback_r, fallback_r + 1):
+				var fx := fdx
+				var fz := fdz
+				var fcx := floori(float(fx) / float(VoxelChunk.SIZE_X))
+				var fcz := floori(float(fz) / float(VoxelChunk.SIZE_Z))
+				_load_or_generate_chunk(Vector2i(fcx, fcz))
+				for fy in range(VoxelChunk.SIZE_Y - 1, -1, -1):
+					if is_solid_block(Vector3i(fx, fy, fz)):
+						if not is_solid_block(Vector3i(fx, fy + 1, fz)) and not is_solid_block(Vector3i(fx, fy + 2, fz)):
+							return Vector3(float(fx) + 0.5, float(fy) + 1.1, float(fz) + 0.5)
 
 	return Vector3(0.5, 16.0, 0.5)
 
