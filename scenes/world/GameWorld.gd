@@ -38,11 +38,8 @@ func _ready() -> void:
 	voxel_world.name = "VoxelWorld"
 	voxel_world.seed_value = 1337
 	add_child(voxel_world)
-	# NOTE: do NOT call update_loaded_chunks or get_spawn_position here.
-	# VoxelChunk StaticBody3D nodes added via add_child() during _ready() have their
-	# CollisionShape3Ds deferred to PhysicsServer3D. Placing the player in this same
-	# _ready() call means no collision is registered yet — player falls through terrain.
-	# Defer all player placement to after the first physics frame (see _spawn_player_on_terrain).
+	# Force immediate synchronous loading & physics mesh registration of spawn chunk (0,0) and neighbors
+	voxel_world.update_loaded_chunks(Vector3.ZERO)
 
 	# Spawn mortar overlay renderer as a child so face visuals work in-game.
 	_mortar_overlay_renderer = MortarOverlayRendererScript.new()
@@ -60,9 +57,7 @@ func _ready() -> void:
 		build_hud.orchestrator = collapse_orchestrator
 		build_hud.player = player
 
-	# Wire Player (primary gameplay controller).
-	# Spawn on physics-validated safe surface AFTER terrain collision is committed to PhysicsServer3D.
-	# This is done via an async deferred call so VoxelChunk StaticBody3Ds are fully registered.
+	# Wire Player (primary gameplay controller) and spawn on physics-validated safe surface
 	if player != null:
 		player.game_mode = current_game_mode
 		player.grid_system = grid_system
@@ -70,6 +65,10 @@ func _ready() -> void:
 		player.orchestrator = collapse_orchestrator
 		player.preview_ghost = preview_ghost
 		player.build_hud = build_hud
+
+		# Validate spawn position with physics headroom clearance
+		var safe_spawn := voxel_world.get_spawn_position(0, 0)
+		player.global_position = safe_spawn
 
 		player.block_type_changed.connect(build_hud.set_selected_block_type)
 		player.state_changed.connect(build_hud.set_player_state)
@@ -85,15 +84,6 @@ func _ready() -> void:
 		build_hud.set_player_mode("Survival" if current_game_mode == GameMode.SURVIVAL else "Creative")
 		build_hud.set_cement(player.get_cement_count(), player.max_cement)
 
-		# Move player far below terrain while we await physics registration, preventing
-		# any first-frame partial-overlap that the engine might solve incorrectly.
-		player.global_position = Vector3(0.5, -100.0, 0.5)
-		if player.has_method("set_physics_process"):
-			player.set_physics_process(false)
-
-		# Deferred async spawn: awaits one physics_frame inside force_sync_spawn_chunks.
-		_spawn_player_on_terrain.call_deferred()
-
 	# Wire BuildCamera as secondary/debug tool
 	if build_camera != null:
 		build_camera.grid_system = grid_system
@@ -105,25 +95,6 @@ func _ready() -> void:
 		else:
 			build_camera.block_type_changed.connect(build_hud.set_selected_block_type)
 			build_hud.set_selected_block_type(build_camera.get_selected_type())
-
-## Async coroutine: awaits voxel_world.force_sync_spawn_chunks() which yields one physics_frame,
-## guaranteeing that all VoxelChunk StaticBody3D collision shapes are registered in PhysicsServer3D
-## before we query a spawn position and set player.global_position.
-## This is the ONLY correct way to spawn the player — never position in the same _ready() frame
-## as add_child(voxel_world).
-func _spawn_player_on_terrain() -> void:
-	if player == null or voxel_world == null:
-		return
-
-	# Synchronously generate spawn-area chunks and wait one physics frame for collision registration
-	await voxel_world.force_sync_spawn_chunks(0, 0)
-
-	# Derive safe spawn position from real solid surface voxel data (not an arbitrary offset)
-	var safe_spawn := voxel_world.get_spawn_position(0, 0)
-	player.global_position = safe_spawn
-
-	# Re-enable physics_process now that terrain collision is committed
-	player.set_physics_process(true)
 
 func _unhandled_input(event: InputEvent) -> void:
 	if build_hud != null and build_hud.has_method("is_modal_open") and build_hud.is_modal_open():

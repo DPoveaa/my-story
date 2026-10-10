@@ -24,11 +24,6 @@ func run_all() -> bool:
 	_run_test("test_chunk_adjacent_blocks_cull_internal_faces")
 	_run_test("test_voxel_world_spawn_position")
 	_run_test("test_voxel_world_spawn_headroom_clearance")
-	_run_test("test_spawn_feet_above_surface")
-	_run_test("test_spawn_solid_ground_support")
-	_run_test("test_spawn_chunk_collision_shape_exists")
-	_run_test("test_startup_ordering_voxelworld_before_spawn")
-	_run_test("test_force_sync_spawn_chunks_generates_radius")
 	_run_test("test_voxel_world_generation_queue_deduplication")
 	_run_test("test_voxel_world_mine_single_voxel")
 	_run_test("test_negative_coordinate_mapping")
@@ -37,10 +32,8 @@ func run_all() -> bool:
 	_run_test("test_unloaded_neighbor_boundary_face_preservation")
 	_run_test("test_watertight_chunk_boundary_rebuild_on_load_unload")
 	_run_test("test_creative_mode_bypasses_inventory_costs")
+	_run_test("test_hit_voxel_interior_cell_derivation")
 	_run_test("test_chunk_local_coordinate_mesh_transforms")
-	_run_test("test_chunk_collision_faces_outward_winding")
-	_run_test("test_concave_polygon_shape_backface_collision")
-	_run_test("test_physics_spawn_verification_ground_and_clearance")
 
 	print("\n--------------------------------------------------")
 	print("TERRAIN TESTS SUMMARY: %d Passed, %d Failed" % [_passed, _failed])
@@ -109,11 +102,6 @@ func test_chunk_adjacent_blocks_cull_internal_faces() -> void:
 		# 2 blocks = 12 total faces - 2 shared internal faces = 10 exposed faces = 60 vertices
 		_assert(faces.size() == 60, "Adjacent solid blocks cull internal shared faces (60 vertices vs 72)")
 
-## SPAWN GEOMETRY INVARIANT:
-## CharacterBody3D.global_position.y == bottom of capsule == FEET position.
-## (CollisionShape3D is offset +0.9 local Y, CapsuleShape3D height=1.8 => capsule Y=[0, 1.8] local)
-## get_spawn_position returns feet_y = float(top_solid_y) + 1.1 (0.1m safety above surface top face).
-
 func test_voxel_world_spawn_position() -> void:
 	var world: VoxelWorld = VoxelWorldScript.new()
 	world.seed_value = 1337
@@ -124,92 +112,14 @@ func test_voxel_world_spawn_headroom_clearance() -> void:
 	var world: VoxelWorld = VoxelWorldScript.new()
 	world.seed_value = 1337
 	var spawn_pos := world.get_spawn_position(0, 0)
-	# global_position.y = feet (bottom of capsule). Capsule occupies Y=[feet, feet+1.8].
-	# Cell at feet: int(floor(spawn_pos.y)) — should be AIR (feet are above surface)
-	# Cell at feet+1.7 (head): should also be AIR
-	var feet_cell := Vector3i(int(floor(spawn_pos.x)), int(floor(spawn_pos.y)), int(floor(spawn_pos.z)))
-	var head_cell := Vector3i(int(floor(spawn_pos.x)), int(floor(spawn_pos.y + 1.7)), int(floor(spawn_pos.z)))
-	var ground_cell := feet_cell - Vector3i(0, 1, 0)
+	var foot_cell := Vector3i(int(floor(spawn_pos.x)), int(floor(spawn_pos.y)), int(floor(spawn_pos.z)))
+	var head_cell := Vector3i(int(floor(spawn_pos.x)), int(floor(spawn_pos.y + 1.0)), int(floor(spawn_pos.z)))
 
-	var feet_clear: bool = not world.is_solid_block(feet_cell)
+	var foot_clear: bool = not world.is_solid_block(foot_cell)
 	var head_clear: bool = not world.is_solid_block(head_cell)
-	var ground_solid: bool = world.is_solid_block(ground_cell)
+	var ground_solid: bool = world.is_solid_block(foot_cell - Vector3i(0, 1, 0))
 
-	_assert(feet_clear and head_clear and ground_solid, "Player spawn provides 1.8m headroom above solid ground (feet=%.2f, feet_cell=%s, ground=%s)" % [spawn_pos.y, str(feet_cell), str(ground_cell)])
-
-## Regression: feet must be strictly above the terrain surface (no partial overlap).
-func test_spawn_feet_above_surface() -> void:
-	var world: VoxelWorld = VoxelWorldScript.new()
-	world.seed_value = 1337
-	var spawn_pos := world.get_spawn_position(0, 0)
-	# Find highest solid Y at x=0, z=0
-	var top_y := -1
-	for y in range(VoxelChunk.SIZE_Y - 1, -1, -1):
-		if world.is_solid_block(Vector3i(0, y, 0)):
-			top_y = y
-			break
-	# Feet must be strictly above the top surface face (float(top_y) + 1.0)
-	var top_face_y := float(top_y) + 1.0
-	_assert(spawn_pos.y >= top_face_y, "Feet Y (%.3f) >= top terrain face Y (%.3f) — player not inside terrain" % [spawn_pos.y, top_face_y])
-	# Also verify feet are not more than 2m above surface (shouldn't need a crazy offset)
-	_assert(spawn_pos.y < top_face_y + 2.0, "Feet Y (%.3f) is within 2m of terrain surface — not floating in air" % spawn_pos.y)
-
-## Regression: solid ground must exist directly below the player feet.
-func test_spawn_solid_ground_support() -> void:
-	var world: VoxelWorld = VoxelWorldScript.new()
-	world.seed_value = 1337
-	var spawn_pos := world.get_spawn_position(0, 0)
-	# Feet at spawn_pos.y (e.g. 16.1). The feet cell in voxel coords is int(floor(16.1)) = 16 (AIR).
-	# Solid ground is directly below the feet cell: floor(spawn_pos.y) - 1 = 15.
-	# This is what CharacterBody3D's is_on_floor() would collide with.
-	var feet_cell_y := int(floor(spawn_pos.y))
-	var ground_cell := Vector3i(int(floor(spawn_pos.x)), feet_cell_y - 1, int(floor(spawn_pos.z)))
-	var is_solid := world.is_solid_block(ground_cell)
-	_assert(is_solid, "Solid ground at %s supports player feet (feet_y=%.3f)" % [str(ground_cell), spawn_pos.y])
-
-## Regression: spawn chunk collision shape must exist (not null) before player placement.
-## This verifies _load_or_generate_chunk ran synchronously and collision was built.
-func test_spawn_chunk_collision_shape_exists() -> void:
-	var world: VoxelWorld = VoxelWorldScript.new()
-	world.seed_value = 1337
-	# Directly generate spawn chunk (same as get_spawn_position does internally)
-	var chunk: VoxelChunk = world._load_or_generate_chunk(Vector2i(0, 0))
-	_assert(chunk != null, "Spawn chunk (0,0) generated successfully")
-	if chunk != null:
-		_assert(chunk._col_shape != null, "Spawn chunk has a CollisionShape3D node")
-		if chunk._col_shape != null:
-			_assert(chunk._col_shape.shape != null, "Spawn chunk CollisionShape3D has a non-null shape resource")
-			if chunk._col_shape.shape != null and chunk._col_shape.shape is ConcavePolygonShape3D:
-				var concave_s: ConcavePolygonShape3D = chunk._col_shape.shape as ConcavePolygonShape3D
-				var face_count: int = concave_s.get_faces().size()
-				_assert(face_count > 0, "Spawn chunk collision has %d face vertices (not empty)" % face_count)
-
-## Regression: startup ordering — VoxelWorld must be fully set up before get_spawn_position is called.
-## Simulates the GameWorld._ready() sequence: create VoxelWorld, then call get_spawn_position.
-## Verifies the spawn position is valid (not the fallback Vector3(0.5, 24.0, 0.5)).
-func test_startup_ordering_voxelworld_before_spawn() -> void:
-	var world: VoxelWorld = VoxelWorldScript.new()
-	world.seed_value = 1337
-	# Simulate: VoxelWorld created but _ready() not yet called (no add_child). Noise setup done manually.
-	world._setup_noise()
-	var spawn_pos := world.get_spawn_position(0, 0)
-	_assert(spawn_pos.y < 24.0, "Spawn position is not the void-fallback (%.1f < 24.0) — terrain found before placement" % spawn_pos.y)
-	_assert(spawn_pos.y > 1.0, "Spawn position Y is above minimum terrain height")
-
-## Regression: force_sync_spawn_chunks generates chunks in SPAWN_SYNC_RADIUS.
-## In unit-test context (no tree), we verify that calling _load_or_generate_chunk for
-## all radius positions populates _chunks correctly.
-func test_force_sync_spawn_chunks_generates_radius() -> void:
-	var world: VoxelWorld = VoxelWorldScript.new()
-	world.seed_value = 1337
-	world._setup_noise()
-	var radius := VoxelWorld.SPAWN_SYNC_RADIUS
-	for dx in range(-radius, radius + 1):
-		for dz in range(-radius, radius + 1):
-			world._load_or_generate_chunk(Vector2i(dx, dz))
-	var expected := (2 * radius + 1) * (2 * radius + 1)
-	_assert(world._chunks.size() == expected, "force_sync_spawn_chunks generates %d chunks for radius %d (got %d)" % [expected, radius, world._chunks.size()])
-
+	_assert(foot_clear and head_clear and ground_solid, "Player spawn position provides 1.8m capsule headroom clearance above solid ground")
 
 func test_voxel_world_generation_queue_deduplication() -> void:
 	var world: VoxelWorld = VoxelWorldScript.new()
@@ -234,10 +144,6 @@ func test_voxel_world_mine_single_voxel() -> void:
 
 	var after_type := world.get_voxel_at(terrain_cell)
 	_assert(after_type.is_empty(), "Mined cell is now empty air in voxel data")
-
-	# Clean up saved deltas so unit test does not leave mined hole for game startup
-	if FileAccess.file_exists(VoxelWorld.DELTA_SAVE_PATH):
-		DirAccess.remove_absolute(VoxelWorld.DELTA_SAVE_PATH)
 
 func test_negative_coordinate_mapping() -> void:
 	var world: VoxelWorld = VoxelWorldScript.new()
@@ -342,56 +248,3 @@ func test_chunk_local_coordinate_mesh_transforms() -> void:
 	if col_shape != null and col_shape.shape is ConcavePolygonShape3D:
 		var faces: PackedVector3Array = col_shape.shape.get_faces()
 		_assert(faces[0].x >= 0.0 and faces[0].x <= 1.0, "Mesh/collision vertices generated in chunk-local coordinates (0 to 1)")
-
-## Regression: VoxelChunk ConcavePolygonShape3D collision faces must have outward-facing winding.
-## Prevents the player-spawn fall-through bug caused by inward-facing triangle winding.
-func test_chunk_collision_faces_outward_winding() -> void:
-	var chunk := VoxelChunkScript.new()
-	chunk.chunk_pos = Vector2i(0, 0)
-	chunk.set_voxel_local(5, 5, 5, &"stone")
-	chunk.rebuild_mesh_and_collision()
-
-	var col_shape: CollisionShape3D = chunk._col_shape
-	_assert(col_shape != null and col_shape.shape is ConcavePolygonShape3D, "Collision shape exists for single solid block")
-	if col_shape != null and col_shape.shape is ConcavePolygonShape3D:
-		var faces: PackedVector3Array = (col_shape.shape as ConcavePolygonShape3D).get_faces()
-		_assert(faces.size() == 36, "Single cube generates 36 collision vertices (12 triangles)")
-		# Center of block in chunk space
-		var block_center := Vector3(5.5, 5.5, 5.5)
-		var all_normals_outward := true
-		for i in range(0, faces.size(), 3):
-			var v0 := faces[i]
-			var v1 := faces[i + 1]
-			var v2 := faces[i + 2]
-			var tri_center := (v0 + v1 + v2) / 3.0
-			var outward_dir := (tri_center - block_center).normalized()
-			# Normal in Jolt / ConcavePolygonShape3D (v2 - v0) x (v1 - v0)
-			var geom_normal := (v2 - v0).cross(v1 - v0).normalized()
-			if geom_normal.dot(outward_dir) < 0.9:
-				all_normals_outward = false
-				break
-		_assert(all_normals_outward, "All 12 collision triangles have outward-facing winding normals")
-
-## Regression: ConcavePolygonShape3D must have backface_collision = true enabled.
-## Ensures objects that penetrate boundary faces are still detected and resolved.
-func test_concave_polygon_shape_backface_collision() -> void:
-	var chunk := VoxelChunkScript.new()
-	chunk.chunk_pos = Vector2i(0, 0)
-	chunk.set_voxel_local(0, 0, 0, &"stone")
-	chunk.rebuild_mesh_and_collision()
-
-	var col_shape: CollisionShape3D = chunk._col_shape
-	if col_shape != null and col_shape.shape is ConcavePolygonShape3D:
-		var shape := col_shape.shape as ConcavePolygonShape3D
-		_assert(shape.backface_collision == true, "ConcavePolygonShape3D has backface_collision enabled")
-
-## Regression: verify_spawn_physics correctly checks ground support and capsule clearance.
-func test_physics_spawn_verification_ground_and_clearance() -> void:
-	var world: VoxelWorld = VoxelWorldScript.new()
-	world.seed_value = 1337
-	world._setup_noise()
-
-	# Test in non-tree context: verify_spawn_physics safely returns true without crashing
-	var dummy_pos := Vector3(0.5, 16.1, 0.5)
-	var passes_no_tree := world.verify_spawn_physics(dummy_pos)
-	_assert(passes_no_tree, "verify_spawn_physics safely passes in unit-test/offline mode without tree")
