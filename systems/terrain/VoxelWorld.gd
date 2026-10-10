@@ -4,6 +4,7 @@ extends Node3D
 ## Infinite 3D Chunked Voxel Terrain Engine inspired by Castle Story's floating islands.
 ## Manages 3D voxel chunk loading/unloading, FastNoiseLite density noise generation,
 ## mining interaction, persistence, and ground support for construction.
+## Uses incremental chunk loading queue to eliminate frame stalls during world exploration.
 
 signal chunk_loaded(chunk_pos: Vector2i)
 signal chunk_unloaded(chunk_pos: Vector2i)
@@ -17,6 +18,7 @@ const DELTA_SAVE_PATH: String = "user://terrain_deltas.json"
 		_setup_noise()
 
 @export var view_distance_chunks: int = 3
+@export var max_chunks_per_frame: int = 2
 @export var noise_frequency_2d: float = 0.025
 @export var noise_frequency_3d: float = 0.045
 
@@ -30,11 +32,18 @@ var _chunks: Dictionary = {}
 ## Dictionary[Vector2i, Array[Vector3i]] — mined local cell coordinates per chunk
 var _mined_deltas: Dictionary = {}
 
+## Incremental Generation Queue
+var _generation_queue: Array[Vector2i] = []
+var _queued_chunks: Dictionary = {} # Vector2i -> bool
+
 var _last_player_chunk: Vector2i = Vector2i(99999, 99999)
 
 func _ready() -> void:
 	_setup_noise()
 	load_terrain_deltas()
+
+func _process(_delta: float) -> void:
+	_process_generation_queue()
 
 func _setup_noise() -> void:
 	_noise_2d = FastNoiseLite.new()
@@ -61,6 +70,11 @@ func set_seed(p_seed: int) -> void:
 func is_solid_block(world_cell: Vector3i) -> bool:
 	var b_type := get_voxel_at(world_cell)
 	return not b_type.is_empty()
+
+## Integration with StabilitySystem anchor checking.
+## Returns true if world_cell is inside solid terrain or directly resting on top of solid terrain.
+func is_ground_cell(world_cell: Vector3i) -> bool:
+	return is_solid_block(world_cell) or is_solid_block(world_cell - Vector3i(0, 1, 0))
 
 ## Returns the natural block type at world_cell, or &"" if air/unloaded.
 func get_voxel_at(world_cell: Vector3i) -> StringName:
@@ -126,13 +140,13 @@ func _evaluate_procedural_voxel(gx: int, gy: int, gz: int, chunk_pos: Vector2i, 
 
 	return &"stone"
 
-## Dynamically streams/loads chunks around player_pos within view_distance_chunks.
+## Streams and enqueues chunk load/unload requests around player position without frame stalls.
 func update_loaded_chunks(player_world_pos: Vector3) -> void:
 	var pcx := floori(player_world_pos.x / float(VoxelChunk.SIZE_X))
 	var pcz := floori(player_world_pos.z / float(VoxelChunk.SIZE_Z))
 	var current_player_chunk := Vector2i(pcx, pcz)
 
-	if current_player_chunk == _last_player_chunk:
+	if current_player_chunk == _last_player_chunk and not _generation_queue.is_empty():
 		return
 
 	_last_player_chunk = current_player_chunk
@@ -143,8 +157,16 @@ func update_loaded_chunks(player_world_pos: Vector3) -> void:
 			var cp := current_player_chunk + Vector2i(dx, dz)
 			required_chunks[cp] = true
 
-			if not _chunks.has(cp):
-				_load_or_generate_chunk(cp)
+			if not _chunks.has(cp) and not _queued_chunks.has(cp):
+				_generation_queue.append(cp)
+				_queued_chunks[cp] = true
+
+	# Sort queue by distance to player chunk so nearest chunks build first
+	_generation_queue.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+		var dist_a := a.distance_squared_to(current_player_chunk)
+		var dist_b := b.distance_squared_to(current_player_chunk)
+		return dist_a < dist_b
+	)
 
 	# Unload chunks outside active range
 	var to_unload: Array[Vector2i] = []
@@ -155,9 +177,35 @@ func update_loaded_chunks(player_world_pos: Vector3) -> void:
 	for cp in to_unload:
 		_unload_chunk(cp)
 
+	# Clean up queue items outside view distance
+	var filtered_queue: Array[Vector2i] = []
+	for cp in _generation_queue:
+		if required_chunks.has(cp):
+			filtered_queue.append(cp)
+		else:
+			_queued_chunks.erase(cp)
+	_generation_queue = filtered_queue
+
+func _process_generation_queue() -> void:
+	if _generation_queue.is_empty():
+		return
+
+	var processed := 0
+	while not _generation_queue.is_empty() and processed < max_chunks_per_frame:
+		var cp: Vector2i = _generation_queue.pop_front()
+		_queued_chunks.erase(cp)
+		if not _chunks.has(cp):
+			_load_or_generate_chunk(cp)
+			processed += 1
+
 func _load_or_generate_chunk(chunk_pos: Vector2i) -> VoxelChunk:
 	if _chunks.has(chunk_pos):
 		return _chunks[chunk_pos]
+
+	# If this chunk was queued, remove it from queue since we're generating it synchronously
+	if _queued_chunks.has(chunk_pos):
+		_queued_chunks.erase(chunk_pos)
+		_generation_queue.erase(chunk_pos)
 
 	var chunk := VoxelChunk.new()
 	chunk.name = "Chunk_%d_%d" % [chunk_pos.x, chunk_pos.y]
@@ -246,6 +294,8 @@ func get_spawn_position(x: int = 0, z: int = 0) -> Vector3:
 	return Vector3(0.5, 12.0, 0.5)
 
 func clear_world() -> void:
+	_generation_queue.clear()
+	_queued_chunks.clear()
 	for chunk in _chunks.values():
 		if is_instance_valid(chunk):
 			chunk.queue_free()

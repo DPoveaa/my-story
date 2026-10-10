@@ -1194,20 +1194,21 @@ func test_construction_stability_on_generated_terrain() -> bool:
 	stability.grid_system = grid
 	stability.joint_system = js
 
-	var gen := TerrainGeneratorScript.new()
-	gen.seed_value = 1337
-	stability.terrain_generator = gen
+	var vox_world := VoxelWorldScript.new()
+	vox_world.seed_value = 1337
+	stability.terrain_generator = vox_world
 
-	var surf_y := gen.get_surface_y(5, 5)
+	var spawn_pos := vox_world.get_spawn_position(5, 5)
+	var surf_y := int(floor(spawn_pos.y - 1.2))
 	var block_cell := Vector3i(5, surf_y + 1, 5)
 
 	grid.place_block(block_cell, &"stone")
 	if not stability.is_anchor_cell(block_cell):
-		gen.queue_free()
+		vox_world.queue_free()
 		stability.queue_free()
 		return false
 
-	gen.queue_free()
+	vox_world.queue_free()
 	stability.queue_free()
 	return true
 

@@ -27,33 +27,39 @@ static func _init_materials() -> void:
 	var mat_grass := StandardMaterial3D.new()
 	mat_grass.albedo_color = Color(0.28, 0.62, 0.24)
 	mat_grass.roughness = 0.85
+	mat_grass.cull_mode = BaseMaterial3D.CULL_BACK
 	_materials[&"grass"] = mat_grass
 
 	var mat_dirt := StandardMaterial3D.new()
 	mat_dirt.albedo_color = Color(0.42, 0.30, 0.20)
 	mat_dirt.roughness = 0.90
+	mat_dirt.cull_mode = BaseMaterial3D.CULL_BACK
 	_materials[&"dirt"] = mat_dirt
 
 	var mat_stone := StandardMaterial3D.new()
 	mat_stone.albedo_color = Color(0.52, 0.54, 0.58)
 	mat_stone.roughness = 0.80
+	mat_stone.cull_mode = BaseMaterial3D.CULL_BACK
 	_materials[&"stone"] = mat_stone
 
 	var mat_coal := StandardMaterial3D.new()
 	mat_coal.albedo_color = Color(0.22, 0.22, 0.24)
 	mat_coal.roughness = 0.90
+	mat_coal.cull_mode = BaseMaterial3D.CULL_BACK
 	_materials[&"coal"] = mat_coal
 
 	var mat_iron := StandardMaterial3D.new()
 	mat_iron.albedo_color = Color(0.72, 0.74, 0.78)
 	mat_iron.roughness = 0.50
 	mat_iron.metallic = 0.60
+	mat_iron.cull_mode = BaseMaterial3D.CULL_BACK
 	_materials[&"iron"] = mat_iron
 
 	var mat_gold := StandardMaterial3D.new()
 	mat_gold.albedo_color = Color(0.95, 0.78, 0.22)
 	mat_gold.roughness = 0.30
 	mat_gold.metallic = 0.80
+	mat_gold.cull_mode = BaseMaterial3D.CULL_BACK
 	_materials[&"gold"] = mat_gold
 
 func _init() -> void:
@@ -160,7 +166,6 @@ func rebuild_mesh_and_collision() -> void:
 	var combined_mesh := ArrayMesh.new()
 	for mat_key in st_map.keys():
 		var st: SurfaceTool = st_map[mat_key]
-		st.generate_normals()
 		var sub_mesh := st.commit()
 		if sub_mesh.get_surface_count() > 0:
 			var mat: Material = _materials[mat_key]
@@ -181,41 +186,46 @@ func rebuild_mesh_and_collision() -> void:
 
 func _add_face_quad(min_p: Vector3, normal: Vector3i, st: SurfaceTool, collision_faces: PackedVector3Array) -> void:
 	var max_p := min_p + Vector3.ONE
+	var norm_v := Vector3(normal)
+
 	var v0: Vector3
 	var v1: Vector3
 	var v2: Vector3
 	var v3: Vector3
 
-	if normal.y > 0: # TOP (+Y)
-		v0 = Vector3(min_p.x, max_p.y, min_p.z)
-		v1 = Vector3(max_p.x, max_p.y, min_p.z)
-		v2 = Vector3(max_p.x, max_p.y, max_p.z)
-		v3 = Vector3(min_p.x, max_p.y, max_p.z)
-	elif normal.y < 0: # BOTTOM (-Y)
-		v0 = Vector3(min_p.x, min_p.y, max_p.z)
-		v1 = Vector3(max_p.x, min_p.y, max_p.z)
-		v2 = Vector3(max_p.x, min_p.y, min_p.z)
-		v3 = Vector3(min_p.x, min_p.y, min_p.z)
-	elif normal.x > 0: # RIGHT (+X)
+	if normal.y > 0: # TOP (+Y) -> CCW order facing +Y
+		v0 = Vector3(min_p.x, max_p.y, max_p.z)
+		v1 = Vector3(max_p.x, max_p.y, max_p.z)
+		v2 = Vector3(max_p.x, max_p.y, min_p.z)
+		v3 = Vector3(min_p.x, max_p.y, min_p.z)
+	elif normal.y < 0: # BOTTOM (-Y) -> CCW order facing -Y
+		v0 = Vector3(min_p.x, min_p.y, min_p.z)
+		v1 = Vector3(max_p.x, min_p.y, min_p.z)
+		v2 = Vector3(max_p.x, min_p.y, max_p.z)
+		v3 = Vector3(min_p.x, min_p.y, max_p.z)
+	elif normal.x > 0: # RIGHT (+X) -> CCW order facing +X
 		v0 = Vector3(max_p.x, min_p.y, max_p.z)
 		v1 = Vector3(max_p.x, min_p.y, min_p.z)
 		v2 = Vector3(max_p.x, max_p.y, min_p.z)
 		v3 = Vector3(max_p.x, max_p.y, max_p.z)
-	elif normal.x < 0: # LEFT (-X)
+	elif normal.x < 0: # LEFT (-X) -> CCW order facing -X
 		v0 = Vector3(min_p.x, min_p.y, min_p.z)
 		v1 = Vector3(min_p.x, min_p.y, max_p.z)
 		v2 = Vector3(min_p.x, max_p.y, max_p.z)
 		v3 = Vector3(min_p.x, max_p.y, min_p.z)
-	elif normal.z > 0: # FRONT (+Z)
+	elif normal.z > 0: # FRONT (+Z) -> CCW order facing +Z
 		v0 = Vector3(min_p.x, min_p.y, max_p.z)
 		v1 = Vector3(max_p.x, min_p.y, max_p.z)
 		v2 = Vector3(max_p.x, max_p.y, max_p.z)
 		v3 = Vector3(min_p.x, max_p.y, max_p.z)
-	else: # BACK (-Z)
+	else: # BACK (-Z) -> CCW order facing -Z
 		v0 = Vector3(max_p.x, min_p.y, min_p.z)
 		v1 = Vector3(min_p.x, min_p.y, min_p.z)
 		v2 = Vector3(min_p.x, max_p.y, min_p.z)
 		v3 = Vector3(max_p.x, max_p.y, min_p.z)
+
+	# Set explicit normal for SurfaceTool
+	st.set_normal(norm_v)
 
 	# Triangle 1
 	st.add_vertex(v0)

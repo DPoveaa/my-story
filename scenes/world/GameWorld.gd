@@ -91,7 +91,7 @@ func _ready() -> void:
 			build_camera.block_type_changed.connect(build_hud.set_selected_block_type)
 			build_hud.set_selected_block_type(build_camera.get_selected_type())
 
-	# Build an initial demonstration structure so the player immediately sees content
+	# Build an initial demonstration structure on top of natural terrain
 	spawn_test_tower(Vector3i(0, 0, 0))
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -129,10 +129,14 @@ func toggle_debug_camera() -> void:
 			build_hud.set_player_state(player.current_state)
 
 ## Spawns a tall test tower with an overhanging observation platform.
-## Demonstrates vertical support and dramatic collapse when base blocks are destroyed.
+## Automatically calculates natural surface Y coordinate if origin.y is 0.
 func spawn_test_tower(origin: Vector3i = Vector3i.ZERO) -> void:
 	if grid_system == null:
 		return
+
+	if origin.y == 0 and voxel_world != null:
+		var spawn_pos := voxel_world.get_spawn_position(origin.x, origin.z)
+		origin.y = int(floor(spawn_pos.y - 1.2))
 
 	var placed: Array[Vector3i] = []
 	# 2x2 Pillar, 7 blocks tall
@@ -164,10 +168,13 @@ func spawn_test_tower(origin: Vector3i = Vector3i.ZERO) -> void:
 	_bond_preset_cells(placed)
 
 ## Spawns a bridge between two pillars.
-## Demonstrates lateral support propagation: horizontal walkway supported by pillars.
 func spawn_test_bridge(origin: Vector3i = Vector3i.ZERO) -> void:
 	if grid_system == null:
 		return
+
+	if origin.y == 0 and voxel_world != null:
+		var spawn_pos := voxel_world.get_spawn_position(origin.x, origin.z)
+		origin.y = int(floor(spawn_pos.y - 1.2))
 
 	var placed: Array[Vector3i] = []
 	# Left Pillar (height 5)
@@ -194,6 +201,10 @@ func spawn_test_bridge(origin: Vector3i = Vector3i.ZERO) -> void:
 func spawn_test_arch(origin: Vector3i = Vector3i.ZERO) -> void:
 	if grid_system == null:
 		return
+
+	if origin.y == 0 and voxel_world != null:
+		var spawn_pos := voxel_world.get_spawn_position(origin.x, origin.z)
+		origin.y = int(floor(spawn_pos.y - 1.2))
 
 	var placed: Array[Vector3i] = []
 	# Left column
