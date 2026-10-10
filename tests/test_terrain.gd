@@ -18,6 +18,7 @@ func run_all() -> bool:
 	print("RUNNING VOXEL TERRAIN TESTS")
 	print("==================================================")
 
+	_run_test("test_gameworld_ground_node_removed")
 	_run_test("test_chunk_material_cull_mode")
 	_run_test("test_chunk_single_block_faces_and_collision")
 	_run_test("test_chunk_adjacent_blocks_cull_internal_faces")
@@ -50,6 +51,15 @@ func _assert(condition: bool, message: String) -> void:
 	else:
 		_failed += 1
 		print("  [FAIL] %s" % message)
+
+func test_gameworld_ground_node_removed() -> void:
+	var scene := load("res://scenes/world/GameWorld.tscn")
+	_assert(scene != null, "GameWorld scene loads")
+	if scene != null:
+		var instance = scene.instantiate()
+		var ground_node = instance.get_node_or_null("Ground")
+		_assert(ground_node == null, "GameWorld.tscn contains NO fallback 'Ground' StaticBody3D node")
+		instance.queue_free()
 
 func test_chunk_material_cull_mode() -> void:
 	VoxelChunkScript._init_materials()

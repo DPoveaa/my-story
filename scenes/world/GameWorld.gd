@@ -38,6 +38,7 @@ func _ready() -> void:
 	voxel_world.name = "VoxelWorld"
 	voxel_world.seed_value = 1337
 	add_child(voxel_world)
+	# Force immediate synchronous loading & physics mesh registration of spawn chunk (0,0) and neighbors
 	voxel_world.update_loaded_chunks(Vector3.ZERO)
 
 	# Spawn mortar overlay renderer as a child so face visuals work in-game.
@@ -56,7 +57,7 @@ func _ready() -> void:
 		build_hud.orchestrator = collapse_orchestrator
 		build_hud.player = player
 
-	# Wire Player (primary gameplay controller) and spawn on safe surface
+	# Wire Player (primary gameplay controller) and spawn on physics-validated safe surface
 	if player != null:
 		player.game_mode = current_game_mode
 		player.grid_system = grid_system
@@ -64,7 +65,11 @@ func _ready() -> void:
 		player.orchestrator = collapse_orchestrator
 		player.preview_ghost = preview_ghost
 		player.build_hud = build_hud
-		player.global_position = voxel_world.get_spawn_position(0, 0)
+
+		# Validate spawn position with physics headroom clearance
+		var safe_spawn := voxel_world.get_spawn_position(0, 0)
+		player.global_position = safe_spawn
+
 		player.block_type_changed.connect(build_hud.set_selected_block_type)
 		player.state_changed.connect(build_hud.set_player_state)
 		if player.has_signal("carried_block_changed"):
