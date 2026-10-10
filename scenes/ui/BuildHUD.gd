@@ -16,7 +16,7 @@ extends CanvasLayer
 
 const BlueprintVisualizerScript = preload("res://systems/rendering/BlueprintVisualizer.gd")
 
-var _visualizer: BlueprintVisualizer = null
+var _visualizer: Node = null
 
 var grid_system: Node
 var orchestrator: CollapseOrchestrator
