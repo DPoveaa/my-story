@@ -118,7 +118,8 @@ func _evaluate_procedural_voxel(gx: int, gy: int, gz: int, chunk_pos: Vector2i, 
 
 	# Floating Island Presence & Shape Noise
 	var island_noise: float = _noise_2d.get_noise_2d(float(gx), float(gz))
-	if island_noise < -0.20:
+	# Ensure origin (0,0) starting area is always a solid starting island
+	if island_noise < -0.20 and (abs(gx) > 16 or abs(gz) > 16):
 		# Air space between floating islands
 		return &""
 
@@ -333,16 +334,36 @@ func mine_voxel(world_cell: Vector3i) -> StringName:
 	voxel_mined.emit(world_cell, b_type)
 	return b_type
 
+## Finds a safe, un-obstructed spawn position on natural top terrain at (x, z).
+## Accounts for player capsule height (~1.8m) to prevent spawning inside solid voxels.
 func get_spawn_position(x: int = 0, z: int = 0) -> Vector3:
 	var cx := floori(float(x) / float(VoxelChunk.SIZE_X))
 	var cz := floori(float(z) / float(VoxelChunk.SIZE_Z))
 	_load_or_generate_chunk(Vector2i(cx, cz))
 
+	# Scan downwards for top solid voxel
 	for y in range(VoxelChunk.SIZE_Y - 1, -1, -1):
 		if is_solid_block(Vector3i(x, y, z)):
-			return Vector3(float(x) + 0.5, float(y + 1) + 1.2, float(z) + 0.5)
+			# Check that 2 cells above top solid voxel (body + head) are clear air
+			var cell_above_1 := Vector3i(x, y + 1, z)
+			var cell_above_2 := Vector3i(x, y + 2, z)
+			if not is_solid_block(cell_above_1) and not is_solid_block(cell_above_2):
+				return Vector3(float(x) + 0.5, float(y + 1) + 1.0, float(z) + 0.5)
 
-	return Vector3(0.5, 12.0, 0.5)
+	# Search in expanding spiral around (x,z) if target column is blocked or void
+	for radius in range(1, 10):
+		for dx in range(-radius, radius + 1):
+			for dz in range(-radius, radius + 1):
+				if abs(dx) != radius and abs(dz) != radius:
+					continue
+				var nx := x + dx
+				var nz := z + dz
+				for ny in range(VoxelChunk.SIZE_Y - 1, -1, -1):
+					if is_solid_block(Vector3i(nx, ny, nz)):
+						if not is_solid_block(Vector3i(nx, ny + 1, nz)) and not is_solid_block(Vector3i(nx, ny + 2, nz)):
+							return Vector3(float(nx) + 0.5, float(ny + 1) + 1.0, float(nz) + 0.5)
+
+	return Vector3(0.5, 16.0, 0.5)
 
 func clear_world() -> void:
 	_generation_queue.clear()

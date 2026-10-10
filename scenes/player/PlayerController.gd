@@ -108,6 +108,7 @@ var target_is_terrain: bool = false
 var target_terrain_cell: Vector3i = Vector3i.ZERO
 var target_terrain_type: StringName = &""
 var mining_progress: float = 0.0
+var _last_mined_cell: Vector3i = Vector3i(99999, 99999, 99999)
 
 ## Accumulated raw materials recovered from low-durability debris.
 ## Dictionary[StringName, int] — block_type -> amount
@@ -524,11 +525,16 @@ func _physics_process(delta: float) -> void:
 
 	# Process hold-to-mine interaction when targeting natural terrain and holding RMB
 	if target_is_terrain and Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) and _mouse_captured and current_state != State.DEBUG_FLIGHT:
+		if target_terrain_cell != _last_mined_cell:
+			_last_mined_cell = target_terrain_cell
+			mining_progress = 0.0
+
 		mining_progress += delta / mine_duration_seconds
 		if mining_progress >= 1.0:
 			_complete_mining_action()
 	else:
 		mining_progress = 0.0
+		_last_mined_cell = Vector3i(99999, 99999, 99999)
 
 	if (Input.is_action_pressed(&"apply_cement") or Input.is_key_pressed(KEY_G)) and current_state != State.DEBUG_FLIGHT:
 		if debris_grabber == null or not debris_grabber.is_grabbing:
@@ -545,6 +551,7 @@ func _complete_mining_action() -> void:
 			target_face_status = "✓ Mined 1 %s!" % BlockTypeCatalog.get_display_name(mined_type)
 			target_face_changed.emit(has_target, target_remove_cell, target_face_dir, target_face_status)
 	mining_progress = 0.0
+	_last_mined_cell = Vector3i(99999, 99999, 99999)
 
 func _process_body_movement(delta: float) -> void:
 	# Gravity simulation
@@ -761,7 +768,13 @@ func _update_raycast() -> void:
 			target_place_cell = hit_cell + target_face_dir
 		else:
 			target_place_cell = grid.world_to_cell(hit_pos + hit_normal * (grid.cell_size * 0.5))
-			target_remove_cell = grid.world_to_cell(hit_pos - hit_normal * (grid.cell_size * 0.5))
+			# Derive hit voxel cell by stepping slightly inside the solid volume
+			var interior_point := hit_pos - hit_normal * 0.05
+			target_remove_cell = Vector3i(
+				int(floor(interior_point.x)),
+				int(floor(interior_point.y)),
+				int(floor(interior_point.z))
+			)
 			target_face_dir = _normal_to_cell_offset(hit_normal)
 
 			var vox_world := _get_voxel_world()

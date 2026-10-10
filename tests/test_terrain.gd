@@ -2,7 +2,7 @@
 ## Tests: VoxelChunk face rendering, CULL_BACK material settings, internal face culling,
 ##        collision geometry generation, VoxelWorld spawn positioning, queue deduplication,
 ##        single natural block mining, negative coordinate mapping, contiguous solid interiors,
-##        watertight chunk boundary interfaces, and diagnostics.
+##        watertight chunk boundary interfaces, hit voxel cell calculation, and diagnostics.
 extends RefCounted
 
 const VoxelChunkScript = preload("res://systems/terrain/VoxelChunk.gd")
@@ -30,6 +30,7 @@ func run_all() -> bool:
 	_run_test("test_unloaded_neighbor_boundary_face_preservation")
 	_run_test("test_watertight_chunk_boundary_rebuild_on_load_unload")
 	_run_test("test_creative_mode_bypasses_inventory_costs")
+	_run_test("test_hit_voxel_interior_cell_derivation")
 
 	print("\n--------------------------------------------------")
 	print("TERRAIN TESTS SUMMARY: %d Passed, %d Failed" % [_passed, _failed])
@@ -198,3 +199,15 @@ func test_creative_mode_bypasses_inventory_costs() -> void:
 	player.game_mode = PlayerControllerScript.GameMode.CREATIVE
 	var can_use := player.use_cement(100)
 	_assert(can_use, "Creative mode bypasses cement inventory consumption")
+
+func test_hit_voxel_interior_cell_derivation() -> void:
+	# Test hit_pos = (5.0, 10.5, 3.2), hit_normal = (0.0, 1.0, 0.0) -> top face of cell (5, 10, 3)
+	var hit_pos := Vector3(5.0, 10.5, 3.2)
+	var hit_normal := Vector3(0.0, 1.0, 0.0)
+	var interior_pt := hit_pos - hit_normal * 0.05
+	var derived_cell := Vector3i(
+		int(floor(interior_pt.x)),
+		int(floor(interior_pt.y)),
+		int(floor(interior_pt.z))
+	)
+	_assert(derived_cell == Vector3i(5, 10, 3), "Hit point on top face correctly resolves interior voxel cell (5,10,3)")
