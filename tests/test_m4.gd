@@ -9,6 +9,7 @@ const BuildHUDScript = preload("res://scenes/ui/BuildHUD.gd")
 const PlayerControllerScript = preload("res://scenes/player/PlayerController.gd")
 const JointSystemScript = preload("res://autoloads/JointSystem.gd")
 const InventoryManagerScript = preload("res://autoloads/InventoryManager.gd")
+const TerrainGeneratorScript = preload("res://systems/terrain/TerrainGenerator.gd")
 
 var _passed: int = 0
 var _failed: int = 0
@@ -81,6 +82,11 @@ func run_all() -> bool:
 	_run_test("test_debris_recovery_awards_materials")
 	_run_test("test_inventory_json_persistence")
 	_run_test("test_reconstruction_planner_material_status")
+	_run_test("test_terrain_seeded_generation_identical_seed")
+	_run_test("test_terrain_seeded_generation_different_seed")
+	_run_test("test_terrain_layers_and_height_data")
+	_run_test("test_terrain_spawn_position_safe")
+	_run_test("test_construction_stability_on_generated_terrain")
 
 	print("==================================================")
 	print("M4 TEST RESULTS: %d PASSED, %d FAILED" % [_passed, _failed])
@@ -1092,6 +1098,107 @@ func test_reconstruction_planner_material_status() -> bool:
 		return false
 
 	inv.queue_free()
+	return true
+
+func test_terrain_seeded_generation_identical_seed() -> bool:
+	var gen1 := TerrainGeneratorScript.new()
+	gen1.seed_value = 12345
+
+	var gen2 := TerrainGeneratorScript.new()
+	gen2.seed_value = 12345
+
+	for x in range(-10, 10):
+		for z in range(-10, 10):
+			if gen1.get_surface_y(x, z) != gen2.get_surface_y(x, z):
+				gen1.queue_free()
+				gen2.queue_free()
+				return false
+
+	gen1.queue_free()
+	gen2.queue_free()
+	return true
+
+func test_terrain_seeded_generation_different_seed() -> bool:
+	var gen1 := TerrainGeneratorScript.new()
+	gen1.seed_value = 12345
+
+	var gen2 := TerrainGeneratorScript.new()
+	gen2.seed_value = 99999
+
+	var matches := 0
+	var total := 0
+	for x in range(-10, 10):
+		for z in range(-10, 10):
+			total += 1
+			if gen1.get_surface_y(x, z) == gen2.get_surface_y(x, z):
+				matches += 1
+
+	gen1.queue_free()
+	gen2.queue_free()
+	return matches < total
+
+func test_terrain_layers_and_height_data() -> bool:
+	var gen := TerrainGeneratorScript.new()
+	gen.seed_value = 1337
+
+	var surf_y := gen.get_surface_y(0, 0)
+	if surf_y < gen.min_height or surf_y > gen.max_height:
+		gen.queue_free()
+		return false
+
+	if gen.get_block_type_at(0, surf_y, 0) != &"stone":
+		gen.queue_free()
+		return false
+
+	if gen.get_block_type_at(0, surf_y - 1, 0) != &"brick":
+		gen.queue_free()
+		return false
+
+	if gen.get_block_type_at(0, 0, 0) != &"wood":
+		gen.queue_free()
+		return false
+
+	gen.queue_free()
+	return true
+
+func test_terrain_spawn_position_safe() -> bool:
+	var gen := TerrainGeneratorScript.new()
+	gen.seed_value = 1337
+
+	var surf_y := gen.get_surface_y(0, 0)
+	var spawn_pos := gen.get_spawn_position(0, 0)
+
+	if spawn_pos.y <= float(surf_y + 1):
+		gen.queue_free()
+		return false
+
+	gen.queue_free()
+	return true
+
+func test_construction_stability_on_generated_terrain() -> bool:
+	var grid := _make_grid()
+	var js := _make_joint_sys(grid)
+	var stability := Node.new()
+	var script = load("res://autoloads/StabilitySystem.gd")
+	stability.set_script(script)
+	stability.grid_system = grid
+	stability.joint_system = js
+
+	var gen := TerrainGeneratorScript.new()
+	gen.seed_value = 1337
+	stability.terrain_generator = gen
+
+	var surf_y := gen.get_surface_y(5, 5)
+	var block_cell := Vector3i(5, surf_y + 1, 5)
+
+	grid.place_block(block_cell, &"stone")
+	if not stability.is_anchor_cell(block_cell):
+		gen.queue_free()
+		stability.queue_free()
+		return false
+
+	gen.queue_free()
+	stability.queue_free()
 	return true
 
 func test_reconstruct_single_missing_cell_success() -> bool:

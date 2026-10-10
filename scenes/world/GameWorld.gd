@@ -8,6 +8,7 @@ extends Node3D
 
 const PlayerControllerScript = preload("res://scenes/player/PlayerController.gd")
 const MortarOverlayRendererScript = preload("res://systems/rendering/MortarOverlayRenderer.gd")
+const TerrainGeneratorScript = preload("res://systems/terrain/TerrainGenerator.gd")
 
 @onready var grid_renderer: GridRenderer = $GridRenderer
 @onready var preview_ghost: PreviewGhost = $PreviewGhost
@@ -19,6 +20,7 @@ const MortarOverlayRendererScript = preload("res://systems/rendering/MortarOverl
 
 var grid_system: Node
 var stability_system: Node
+var terrain_generator: TerrainGenerator = null
 var _debug_camera_active: bool = false
 var _mortar_overlay_renderer: Node3D = null
 
@@ -28,6 +30,13 @@ func _ready() -> void:
 	if stability_system == null and has_node("/root/StabilitySystem"):
 		stability_system = get_node("/root/StabilitySystem")
 
+	# Instantiate procedural terrain generator
+	terrain_generator = TerrainGeneratorScript.new()
+	terrain_generator.name = "TerrainGenerator"
+	terrain_generator.seed_value = 1337
+	add_child(terrain_generator)
+	terrain_generator.generate_terrain()
+
 	# Spawn mortar overlay renderer as a child so face visuals work in-game.
 	_mortar_overlay_renderer = MortarOverlayRendererScript.new()
 	_mortar_overlay_renderer.name = "MortarOverlayRenderer"
@@ -35,6 +44,7 @@ func _ready() -> void:
 	add_child(_mortar_overlay_renderer)
 
 	if stability_system != null:
+		stability_system.terrain_generator = terrain_generator
 		stability_system.require_joints_for_lateral_support = true
 
 	# Wire HUD
@@ -43,13 +53,14 @@ func _ready() -> void:
 		build_hud.orchestrator = collapse_orchestrator
 		build_hud.player = player
 
-	# Wire Player (primary gameplay controller)
+	# Wire Player (primary gameplay controller) and spawn on safe surface
 	if player != null:
 		player.grid_system = grid_system
 		player.stability_system = stability_system
 		player.orchestrator = collapse_orchestrator
 		player.preview_ghost = preview_ghost
 		player.build_hud = build_hud
+		player.global_position = terrain_generator.get_spawn_position(0, 0)
 		player.block_type_changed.connect(build_hud.set_selected_block_type)
 		player.state_changed.connect(build_hud.set_player_state)
 		if player.has_signal("carried_block_changed"):
