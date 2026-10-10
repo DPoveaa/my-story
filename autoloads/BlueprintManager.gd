@@ -447,6 +447,88 @@ func plan_reconstruction(blueprint: BlueprintData, anchor_cell: Vector3i, player
 	var orch := _get_orchestrator()
 	return ReconstructionPlannerScript.generate_plan(blueprint, anchor_cell, grid, orch, player)
 
+## Reconstructs a single missing cell from a blueprint at target_world_cell.
+## Revalidates target cell safety, places expected block type with saved metadata,
+## restores mortar/joints with existing neighbors, and re-plans reconstruction.
+func reconstruct_single_cell(blueprint: BlueprintData, anchor_cell: Vector3i, target_world_cell: Vector3i, player: Node = null) -> Dictionary:
+	if blueprint == null:
+		return {"success": false, "reason": "NULL_BLUEPRINT", "placed_cell": target_world_cell, "plan": null}
+
+	var grid := _get_grid()
+	if grid == null:
+		return {"success": false, "reason": "NO_GRID", "placed_cell": target_world_cell, "plan": null}
+
+	var rel_pos := target_world_cell - anchor_cell
+	var block_dict: Dictionary = blueprint.get_block_at_rel_pos(rel_pos)
+	if block_dict.is_empty():
+		return {"success": false, "reason": "CELL_NOT_IN_BLUEPRINT", "placed_cell": target_world_cell, "plan": null}
+
+	var exp_type := StringName(block_dict.get("block_type", "stone"))
+	var exp_dur := float(block_dict.get("durability", 1.0))
+	var raw_meta = block_dict.get("metadata", {})
+	var exp_meta: Dictionary = raw_meta.duplicate(true) if raw_meta is Dictionary else {}
+
+	# 1. Immediate Safety Re-validation
+	if target_world_cell.y < grid.min_y or absi(target_world_cell.x) > grid.max_coord_bound or absi(target_world_cell.z) > grid.max_coord_bound or target_world_cell.y > grid.max_coord_bound:
+		return {"success": false, "reason": "OUT_OF_BOUNDS", "placed_cell": target_world_cell, "plan": null}
+
+	if grid.has_block(target_world_cell):
+		return {"success": false, "reason": "CELL_OCCUPIED", "placed_cell": target_world_cell, "plan": null}
+
+	var orch := _get_orchestrator()
+	if orch != null and orch.has_method("is_cell_blocked_by_debris"):
+		if orch.is_cell_blocked_by_debris(target_world_cell, grid.cell_size):
+			return {"success": false, "reason": "DEBRIS_COLLISION", "placed_cell": target_world_cell, "plan": null}
+
+	if player != null and player.has_method("is_cell_overlapping_player"):
+		if player.is_cell_overlapping_player(target_world_cell, grid.cell_size):
+			return {"success": false, "reason": "PLAYER_OVERLAP", "placed_cell": target_world_cell, "plan": null}
+
+	# 2. Place Block with exact expected BlockData
+	var b_data := BlockData.new(exp_type, exp_dur, exp_meta)
+	grid.place_block(target_world_cell, b_data)
+
+	# Notify intentional edit so registered area is maintained
+	notify_intentional_block_placed(target_world_cell, b_data)
+
+	# 3. Restore mortar coated faces and structural joints
+	var joint_sys := _get_joint_sys()
+	if joint_sys != null:
+		if exp_meta.has("coated_faces"):
+			var c_faces = exp_meta["coated_faces"]
+			if c_faces is Array:
+				for f in c_faces:
+					var fdir := Vector3i.ZERO
+					if f is Vector3i:
+						fdir = f
+					elif f is Array and f.size() == 3:
+						fdir = Vector3i(int(f[0]), int(f[1]), int(f[2]))
+					if fdir != Vector3i.ZERO and joint_sys.has_method("set_face_coated"):
+						joint_sys.set_face_coated(target_world_cell, fdir)
+
+		for j_item in blueprint.joints:
+			if not (j_item is Dictionary):
+				continue
+			var a_arr = j_item.get("rel_a", null)
+			var b_arr = j_item.get("rel_b", null)
+			if a_arr is Array and b_arr is Array:
+				var world_a := anchor_cell + Vector3i(int(a_arr[0]), int(a_arr[1]), int(a_arr[2]))
+				var world_b := anchor_cell + Vector3i(int(b_arr[0]), int(b_arr[1]), int(b_arr[2]))
+				if (world_a == target_world_cell or world_b == target_world_cell) and grid.has_block(world_a) and grid.has_block(world_b):
+					var is_mortared: bool = bool(j_item.get("is_mortared", false))
+					var strength: float = float(j_item.get("strength", 50.0))
+					if is_mortared and joint_sys.has_method("has_intact_joint"):
+						if not joint_sys.has_intact_joint(world_a, world_b):
+							joint_sys.bond_adjacent(world_a, world_b, strength)
+
+	var stab := _get_stability()
+	if stab != null and stab.has_method("recalculate_stability"):
+		stab.call_deferred("recalculate_stability")
+
+	# 4. Generate updated plan after placement
+	var new_plan = plan_reconstruction(blueprint, anchor_cell, player)
+	return {"success": true, "reason": "", "placed_cell": target_world_cell, "plan": new_plan}
+
 # ==============================================================================
 # INTENTIONAL PLAYER EDIT TRACKING (Vs. Collapses / Destruction)
 # ==============================================================================

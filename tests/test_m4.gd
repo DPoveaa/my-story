@@ -71,6 +71,10 @@ func run_all() -> bool:
 	_run_test("test_plan_reconstruction_reevaluates_on_anchor_change")
 	_run_test("test_startup_restoration_of_saved_blueprints")
 	_run_test("test_explicit_update_registered_blueprint_from_world")
+	_run_test("test_reconstruct_single_missing_cell_success")
+	_run_test("test_reconstruct_single_cell_rejection_safety")
+	_run_test("test_reconstruct_single_cell_restores_expected_block_type_and_metadata")
+	_run_test("test_reconstruct_single_cell_restores_mortared_joints_without_duplicates")
 
 	print("==================================================")
 	print("M4 TEST RESULTS: %d PASSED, %d FAILED" % [_passed, _failed])
@@ -1003,6 +1007,110 @@ func test_area_bounded_capture_only_includes_in_bounds_blocks() -> bool:
 
 	var block_entry = bp.blocks[0]
 	if block_entry.get("rel_pos", []) != [1, 1, 1] or block_entry.get("block_type", "") != "stone":
+		return false
+
+	return true
+
+func test_reconstruct_single_missing_cell_success() -> bool:
+	var grid := _make_grid()
+	var bp_mgr := _make_manager()
+	bp_mgr.grid_system = grid
+
+	var bp := BlueprintDataScript.new("m5_reconstruct_test")
+	bp.blocks = [
+		{"rel_pos": [0, 0, 0], "block_type": "wood", "durability": 1.0, "metadata": {}},
+		{"rel_pos": [1, 0, 0], "block_type": "brick", "durability": 1.0, "metadata": {}}
+	]
+
+	grid.place_block(Vector3i(0, 0, 0), &"wood")
+
+	var plan1 = bp_mgr.plan_reconstruction(bp, Vector3i(0, 0, 0))
+	if plan1 == null or plan1.present_count != 1 or plan1.missing_count != 1:
+		return false
+
+	var res := bp_mgr.reconstruct_single_cell(bp, Vector3i(0, 0, 0), Vector3i(1, 0, 0))
+	if not res.get("success", false):
+		return false
+
+	if not grid.has_block(Vector3i(1, 0, 0)) or grid.get_block(Vector3i(1, 0, 0)).block_type != &"brick":
+		return false
+
+	var plan2 = res.get("plan", null)
+	if plan2 == null or not plan2.is_fully_intact():
+		return false
+
+	return true
+
+func test_reconstruct_single_cell_rejection_safety() -> bool:
+	var grid := _make_grid()
+	var bp_mgr := _make_manager()
+	bp_mgr.grid_system = grid
+
+	var bp := BlueprintDataScript.new("m5_reject_test")
+	bp.blocks = [
+		{"rel_pos": [0, 0, 0], "block_type": "stone", "durability": 1.0, "metadata": {}}
+	]
+
+	grid.place_block(Vector3i(0, 0, 0), &"gold")
+
+	var res := bp_mgr.reconstruct_single_cell(bp, Vector3i(0, 0, 0), Vector3i(0, 0, 0))
+	if res.get("success", true) or res.get("reason", "") != "CELL_OCCUPIED":
+		return false
+
+	if grid.get_block(Vector3i(0, 0, 0)).block_type != &"gold":
+		return false
+
+	return true
+
+func test_reconstruct_single_cell_restores_expected_block_type_and_metadata() -> bool:
+	var grid := _make_grid()
+	var bp_mgr := _make_manager()
+	bp_mgr.grid_system = grid
+
+	var bp := BlueprintDataScript.new("m5_meta_test")
+	bp.blocks = [
+		{"rel_pos": [0, 0, 0], "block_type": "brick", "durability": 0.85, "metadata": {"coated_faces": [[0, 1, 0]]}}
+	]
+
+	var res := bp_mgr.reconstruct_single_cell(bp, Vector3i(0, 0, 0), Vector3i(0, 0, 0))
+	if not res.get("success", false):
+		return false
+
+	var placed_b: BlockData = grid.get_block(Vector3i(0, 0, 0))
+	if placed_b == null or placed_b.block_type != &"brick" or absf(placed_b.durability - 0.85) > 0.01:
+		return false
+
+	if not placed_b.metadata.has("coated_faces"):
+		return false
+
+	return true
+
+func test_reconstruct_single_cell_restores_mortared_joints_without_duplicates() -> bool:
+	var grid := _make_grid()
+	var js := _make_joint_sys(grid)
+	var bp_mgr := _make_manager()
+	bp_mgr.grid_system = grid
+	bp_mgr.joint_system = js
+
+	grid.place_block(Vector3i(0, 0, 0), &"stone")
+
+	var bp := BlueprintDataScript.new("m5_joint_test")
+	bp.blocks = [
+		{"rel_pos": [0, 0, 0], "block_type": "stone", "durability": 1.0, "metadata": {}},
+		{"rel_pos": [1, 0, 0], "block_type": "stone", "durability": 1.0, "metadata": {}}
+	]
+	bp.joints = [
+		{"rel_a": [0, 0, 0], "rel_b": [1, 0, 0], "strength": 90.0, "is_mortared": true, "material_a": "stone", "material_b": "stone"}
+	]
+
+	var res := bp_mgr.reconstruct_single_cell(bp, Vector3i(0, 0, 0), Vector3i(1, 0, 0))
+	if not res.get("success", false):
+		return false
+
+	if not js.is_joint_mortared(Vector3i(0, 0, 0), Vector3i(1, 0, 0)):
+		return false
+
+	if js.get_joint_count() != 1:
 		return false
 
 	return true

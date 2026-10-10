@@ -48,6 +48,7 @@ var _anchor_z: SpinBox = null
 var _replace_checkbox: CheckBox = null
 var _load_place_btn: Button = null
 var _load_inspect_btn: Button = null
+var _load_reconstruct_btn: Button = null
 var _load_delete_btn: Button = null
 
 func _ready() -> void:
@@ -430,6 +431,13 @@ func _create_load_modal() -> void:
 	_load_inspect_btn.pressed.connect(_on_inspect_plan_pressed)
 	btns_hbox.add_child(_load_inspect_btn)
 
+	_load_reconstruct_btn = Button.new()
+	_load_reconstruct_btn.text = "Reconstruct Cell"
+	_load_reconstruct_btn.tooltip_text = "Reconstructs the next buildable missing block in this blueprint."
+	_load_reconstruct_btn.custom_minimum_size = Vector2(120, 32)
+	_load_reconstruct_btn.pressed.connect(_on_reconstruct_cell_pressed)
+	btns_hbox.add_child(_load_reconstruct_btn)
+
 	var update_area_btn := Button.new()
 	update_area_btn.text = "Update Area"
 	update_area_btn.tooltip_text = "Explicitly update the saved blueprint layout from current live world blocks inside its area."
@@ -548,6 +556,64 @@ func _on_inspect_plan_pressed() -> void:
 
 	if _visualizer != null:
 		_visualizer.render_plan(plan, grid_system.cell_size if grid_system != null else 1.0)
+
+func _on_reconstruct_cell_pressed() -> void:
+	var selected_items: PackedInt32Array = _load_item_list.get_selected_items()
+	if selected_items.is_empty():
+		_load_feedback_label.text = "Select a blueprint to reconstruct."
+		_load_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
+		return
+
+	var bp_name: String = _load_item_list.get_item_text(selected_items[0])
+	var bp_mgr := _get_blueprint_manager()
+	if bp_mgr == null:
+		return
+
+	var bp = bp_mgr.load_blueprint(bp_name)
+	if bp == null:
+		return
+
+	var anchor := Vector3i(int(_anchor_x.value), int(_anchor_y.value), int(_anchor_z.value))
+	var plan = bp_mgr.plan_reconstruction(bp, anchor, player)
+	if plan == null:
+		return
+
+	var missing_entries: Array[Dictionary] = plan.get_missing_entries()
+	if missing_entries.is_empty():
+		if plan.is_fully_intact():
+			_load_feedback_label.text = "✓ Blueprint is fully intact! All blocks present."
+			_load_feedback_label.add_theme_color_override("font_color", Color(0.3, 1.0, 0.4))
+		else:
+			_load_feedback_label.text = "No buildable missing cells. Resolve conflicts (%d) or invalid cells (%d) first!" % [
+				plan.conflict_count, plan.invalid_count
+			]
+			_load_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.7, 0.2))
+		return
+
+	# Reconstruct the first buildable missing cell
+	var first_missing: Dictionary = missing_entries[0]
+	var target_cell: Vector3i = first_missing.get("world_cell", Vector3i.ZERO)
+	var res: Dictionary = bp_mgr.reconstruct_single_cell(bp, anchor, target_cell, player)
+
+	if res.get("success", false):
+		var exp_mat: StringName = first_missing.get("expected_type", &"stone")
+		var mat_display := BlockTypeCatalog.get_display_name(exp_mat)
+		_load_feedback_label.text = "✓ Reconstructed [%s] block at %s!" % [mat_display, str(target_cell)]
+		_load_feedback_label.add_theme_color_override("font_color", Color(0.3, 1.0, 0.4))
+
+		var updated_plan = res.get("plan", null)
+		if updated_plan != null:
+			if _visualizer != null:
+				_visualizer.render_plan(updated_plan, grid_system.cell_size if grid_system != null else 1.0)
+			var dims: Vector3i = bp.get_dimensions()
+			_load_details_label.text = "Blueprint: %s (%dx%dx%d) | PRESENT: %d | MISSING: %d | CONFLICT: %d | INVALID: %d" % [
+				bp.name, dims.x, dims.y, dims.z,
+				updated_plan.present_count, updated_plan.missing_count, updated_plan.conflict_count, updated_plan.invalid_count
+			]
+	else:
+		var reason: String = res.get("reason", "UNKNOWN")
+		_load_feedback_label.text = "Cannot reconstruct at %s: %s" % [str(target_cell), reason]
+		_load_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
 
 func _on_anchor_changed() -> void:
 	var selected_items: PackedInt32Array = _load_item_list.get_selected_items()
