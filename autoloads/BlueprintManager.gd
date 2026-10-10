@@ -441,11 +441,17 @@ func update_registered_blueprint_from_world(blueprint_name: String, custom_min: 
 
 	return save_blueprint(updated_bp, true)
 
+func _get_inventory_manager() -> Node:
+	if is_inside_tree() and has_node("/root/InventoryManager"):
+		return get_node("/root/InventoryManager")
+	return null
+
 ## Generates a ReconstructionPlanner comparison between a blueprint and current world state.
 func plan_reconstruction(blueprint: BlueprintData, anchor_cell: Vector3i, player: Node = null) -> RefCounted:
 	var grid := _get_grid()
 	var orch := _get_orchestrator()
-	return ReconstructionPlannerScript.generate_plan(blueprint, anchor_cell, grid, orch, player)
+	var inv := _get_inventory_manager()
+	return ReconstructionPlannerScript.generate_plan(blueprint, anchor_cell, grid, orch, player, inv)
 
 ## Reconstructs a single missing cell from a blueprint at target_world_cell.
 ## Revalidates target cell safety, places expected block type with saved metadata,
@@ -468,6 +474,12 @@ func reconstruct_single_cell(blueprint: BlueprintData, anchor_cell: Vector3i, ta
 	var raw_meta = block_dict.get("metadata", {})
 	var exp_meta: Dictionary = raw_meta.duplicate(true) if raw_meta is Dictionary else {}
 
+	# Check material availability
+	var cost := BlockTypeCatalog.get_cost(exp_type)
+	var inv_mgr := _get_inventory_manager()
+	if inv_mgr != null and not inv_mgr.has_materials(cost):
+		return {"success": false, "reason": "INSUFFICIENT_MATERIALS", "placed_cell": target_world_cell, "plan": null}
+
 	# 1. Immediate Safety Re-validation
 	if target_world_cell.y < grid.min_y or absi(target_world_cell.x) > grid.max_coord_bound or absi(target_world_cell.z) > grid.max_coord_bound or target_world_cell.y > grid.max_coord_bound:
 		return {"success": false, "reason": "OUT_OF_BOUNDS", "placed_cell": target_world_cell, "plan": null}
@@ -484,9 +496,11 @@ func reconstruct_single_cell(blueprint: BlueprintData, anchor_cell: Vector3i, ta
 		if player.is_cell_overlapping_player(target_world_cell, grid.cell_size):
 			return {"success": false, "reason": "PLAYER_OVERLAP", "placed_cell": target_world_cell, "plan": null}
 
-	# 2. Place Block with exact expected BlockData
+	# 2. Place Block with exact expected BlockData and consume cost
 	var b_data := BlockData.new(exp_type, exp_dur, exp_meta)
-	grid.place_block(target_world_cell, b_data)
+	if grid.place_block(target_world_cell, b_data):
+		if inv_mgr != null:
+			inv_mgr.consume_materials(cost)
 
 	# Notify intentional edit so registered area is maintained
 	notify_intentional_block_placed(target_world_cell, b_data)

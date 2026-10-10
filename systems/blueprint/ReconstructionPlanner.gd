@@ -15,6 +15,9 @@ class PlanResult extends RefCounted:
 	var conflict_count: int = 0
 	var invalid_count: int = 0
 
+	## Required material counts for missing cells: Dictionary[StringName, int]
+	var required_materials: Dictionary = {}
+
 	## Array of Dictionary entries:
 	## [
 	##   {
@@ -58,7 +61,7 @@ class PlanResult extends RefCounted:
 		return res
 
 ## Generates a deterministic ReconstructionPlan for the given blueprint and world anchor.
-static func generate_plan(blueprint: BlueprintData, anchor_cell: Vector3i, grid_system: Node, orchestrator: Node = null, player: Node = null) -> PlanResult:
+static func generate_plan(blueprint: BlueprintData, anchor_cell: Vector3i, grid_system: Node, orchestrator: Node = null, player: Node = null, inventory_manager: Node = null) -> PlanResult:
 	var result := PlanResult.new()
 	if blueprint == null:
 		return result
@@ -142,8 +145,15 @@ static func generate_plan(blueprint: BlueprintData, anchor_cell: Vector3i, grid_
 			result.conflict_count += 1
 		else:
 			entry["status"] = &"MISSING"
-			entry["reason"] = "EMPTY_CELL"
 			result.missing_count += 1
+			result.required_materials[exp_type] = int(result.required_materials.get(exp_type, 0)) + 1
+			if inventory_manager != null and inventory_manager.has_method("get_material_count"):
+				if inventory_manager.get_material_count(exp_type) < 1:
+					entry["reason"] = "INSUFFICIENT_MATERIALS"
+				else:
+					entry["reason"] = "EMPTY_CELL"
+			else:
+				entry["reason"] = "EMPTY_CELL"
 
 		result.entries.append(entry)
 

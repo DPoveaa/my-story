@@ -72,6 +72,25 @@ func _ready() -> void:
 	if _save_modal == null:
 		_create_blueprint_dialogs()
 
+	if has_node("/root/InventoryManager"):
+		var inv = get_node("/root/InventoryManager")
+		if not inv.inventory_changed.is_connected(_on_inventory_changed):
+			inv.inventory_changed.connect(_on_inventory_changed)
+		_on_inventory_changed(inv.get_materials())
+
+func _on_inventory_changed(materials: Dictionary) -> void:
+	if _raw_mats_label == null:
+		return
+	if materials.is_empty():
+		_raw_mats_label.visible = false
+		return
+	var parts: Array = []
+	for mat in materials.keys():
+		var count: int = int(materials[mat])
+		parts.append("%s: %d" % [BlockTypeCatalog.get_display_name(StringName(mat)), count])
+	_raw_mats_label.text = "Inv: " + " | ".join(parts)
+	_raw_mats_label.visible = true
+
 func set_cement(current: int, max_val: int) -> void:
 	if cement_label == null:
 		cement_label = get_node_or_null("PanelTop/HBox/CementLabel")
@@ -536,6 +555,16 @@ func _on_inspect_plan_pressed() -> void:
 		bp.name, anchor.x, anchor.y, anchor.z,
 		plan.present_count, plan.missing_count, plan.conflict_count, plan.invalid_count
 	]
+
+	if not plan.required_materials.is_empty():
+		details += "\nRequired:"
+		var inv_mgr = get_node_or_null("/root/InventoryManager")
+		for mat in plan.required_materials.keys():
+			var req: int = plan.required_materials[mat]
+			var avail: int = inv_mgr.get_material_count(mat) if inv_mgr != null else 0
+			var mat_name := BlockTypeCatalog.get_display_name(mat)
+			details += " %s: %d (avail %d) |" % [mat_name, req, avail]
+		details = details.trim_suffix(" |")
 
 	if plan.conflict_count > 0:
 		var conflicts: Array[Dictionary] = plan.get_conflict_entries()

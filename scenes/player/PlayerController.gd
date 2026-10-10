@@ -185,11 +185,19 @@ func _on_released_block() -> void:
 func _on_recovered_block(_cell: Vector3i, _b_type: StringName) -> void:
 	carried_block_changed.emit(false, &"")
 
+func _get_inventory_manager() -> Node:
+	if is_inside_tree() and has_node("/root/InventoryManager"):
+		return get_node("/root/InventoryManager")
+	return null
+
 func _on_recovered_raw_material(block_type: StringName, amount: int) -> void:
 	var current: int = raw_materials.get(block_type, 0)
 	raw_materials[block_type] = current + amount
 	carried_block_changed.emit(false, &"")
 	raw_materials_changed.emit(raw_materials)
+	var inv_mgr := _get_inventory_manager()
+	if inv_mgr != null:
+		inv_mgr.add_material(block_type, amount)
 
 func get_selected_type() -> StringName:
 	return available_types[selected_type_index]
@@ -871,12 +879,23 @@ func _handle_place_action() -> void:
 			return
 		if orchestrator != null and orchestrator.is_cell_blocked_by_debris(target_place_cell, grid.cell_size):
 			return
-		grid.place_block(target_place_cell, get_selected_type())
-		var bp_mgr := _get_blueprint_manager()
-		if bp_mgr != null and bp_mgr.has_method("notify_intentional_block_placed"):
-			var placed_b: BlockData = grid.get_block(target_place_cell)
-			if placed_b != null:
-				bp_mgr.notify_intentional_block_placed(target_place_cell, placed_b)
+
+		var b_type := get_selected_type()
+		var cost := BlockTypeCatalog.get_cost(b_type)
+		var inv_mgr := _get_inventory_manager()
+		if inv_mgr != null and not inv_mgr.has_materials(cost):
+			target_face_status = "Insufficient %s! (Need 1)" % BlockTypeCatalog.get_display_name(b_type)
+			target_face_changed.emit(has_target, target_remove_cell, target_face_dir, target_face_status)
+			return
+
+		if grid.place_block(target_place_cell, b_type):
+			if inv_mgr != null:
+				inv_mgr.consume_materials(cost)
+			var bp_mgr := _get_blueprint_manager()
+			if bp_mgr != null and bp_mgr.has_method("notify_intentional_block_placed"):
+				var placed_b: BlockData = grid.get_block(target_place_cell)
+				if placed_b != null:
+					bp_mgr.notify_intentional_block_placed(target_place_cell, placed_b)
 
 func _handle_remove_action() -> void:
 	if area_selection_step != AreaSelectionStep.NONE:

@@ -8,6 +8,7 @@ const DebrisIslandScript = preload("res://systems/collapse/DebrisIsland.gd")
 const BuildHUDScript = preload("res://scenes/ui/BuildHUD.gd")
 const PlayerControllerScript = preload("res://scenes/player/PlayerController.gd")
 const JointSystemScript = preload("res://autoloads/JointSystem.gd")
+const InventoryManagerScript = preload("res://autoloads/InventoryManager.gd")
 
 var _passed: int = 0
 var _failed: int = 0
@@ -75,6 +76,11 @@ func run_all() -> bool:
 	_run_test("test_reconstruct_single_cell_rejection_safety")
 	_run_test("test_reconstruct_single_cell_restores_expected_block_type_and_metadata")
 	_run_test("test_reconstruct_single_cell_restores_mortared_joints_without_duplicates")
+	_run_test("test_inventory_consumption_on_placement")
+	_run_test("test_insufficient_materials_prevents_placement")
+	_run_test("test_debris_recovery_awards_materials")
+	_run_test("test_inventory_json_persistence")
+	_run_test("test_reconstruction_planner_material_status")
 
 	print("==================================================")
 	print("M4 TEST RESULTS: %d PASSED, %d FAILED" % [_passed, _failed])
@@ -1009,6 +1015,83 @@ func test_area_bounded_capture_only_includes_in_bounds_blocks() -> bool:
 	if block_entry.get("rel_pos", []) != [1, 1, 1] or block_entry.get("block_type", "") != "stone":
 		return false
 
+	return true
+
+func test_inventory_consumption_on_placement() -> bool:
+	var inv := InventoryManagerScript.new()
+	inv.set_material_count(&"stone", 10)
+
+	var ok := inv.consume_materials({"stone": 1})
+	if not ok or inv.get_material_count(&"stone") != 9:
+		inv.queue_free()
+		return false
+
+	var failed := inv.consume_materials({"stone": 20})
+	if failed or inv.get_material_count(&"stone") != 9:
+		inv.queue_free()
+		return false
+
+	inv.queue_free()
+	return true
+
+func test_insufficient_materials_prevents_placement() -> bool:
+	var inv := InventoryManagerScript.new()
+	inv.set_material_count(&"stone", 0)
+
+	if inv.has_materials({"stone": 1}):
+		inv.queue_free()
+		return false
+
+	inv.queue_free()
+	return true
+
+func test_debris_recovery_awards_materials() -> bool:
+	var inv := InventoryManagerScript.new()
+	inv.set_material_count(&"stone", 5)
+
+	inv.add_material(&"stone", 1)
+	if inv.get_material_count(&"stone") != 6:
+		inv.queue_free()
+		return false
+
+	inv.queue_free()
+	return true
+
+func test_inventory_json_persistence() -> bool:
+	var inv := InventoryManagerScript.new()
+	inv.set_material_count(&"stone", 42)
+	inv.save_inventory()
+
+	var inv2 := InventoryManagerScript.new()
+	inv2.load_inventory()
+	if inv2.get_material_count(&"stone") != 42:
+		inv.queue_free()
+		inv2.queue_free()
+		return false
+
+	inv.queue_free()
+	inv2.queue_free()
+	return true
+
+func test_reconstruction_planner_material_status() -> bool:
+	var grid := _make_grid()
+	var inv := InventoryManagerScript.new()
+	inv.set_material_count(&"stone", 0)
+
+	var bp := BlueprintDataScript.new("inv_plan_test")
+	bp.blocks = [{"rel_pos": [0, 0, 0], "block_type": "stone", "durability": 1.0, "metadata": {}}]
+
+	var plan = ReconstructionPlanner.generate_plan(bp, Vector3i(0, 0, 0), grid, null, null, inv)
+	if plan == null or plan.missing_count != 1:
+		inv.queue_free()
+		return false
+
+	var missing = plan.get_missing_entries()
+	if missing.is_empty() or missing[0].get("reason", "") != "INSUFFICIENT_MATERIALS":
+		inv.queue_free()
+		return false
+
+	inv.queue_free()
 	return true
 
 func test_reconstruct_single_missing_cell_success() -> bool:

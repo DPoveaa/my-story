@@ -55,3 +55,6 @@ static func get_max_durability(type_id: StringName) -> float:
 	if TYPES.has(type_id):
 		return TYPES[type_id].get("max_durability", 1.0)
 	return 1.0
+
+static func get_cost(type_id: StringName) -> Dictionary:
+	return {type_id: 1}
