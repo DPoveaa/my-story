@@ -116,18 +116,21 @@ func _evaluate_procedural_voxel(gx: int, gy: int, gz: int, chunk_pos: Vector2i, 
 	if _noise_2d == null or _noise_3d == null:
 		_setup_noise()
 
-	# Floating Island Presence & Shape Noise
+	# Organic Radial Distance Falloff for Starting Island
+	var dist_from_origin := sqrt(float(gx * gx + gz * gz))
+	var spawn_island_radial_mask := clampf(1.0 - (dist_from_origin / 24.0), 0.0, 1.0)
+
+	# 2D Noise Mask for Outer Floating Islands
 	var island_noise: float = _noise_2d.get_noise_2d(float(gx), float(gz))
-	# Ensure origin (0,0) starting area is always a solid starting island
-	if island_noise < -0.20 and (abs(gx) > 16 or abs(gz) > 16):
-		# Air space between floating islands
+	var is_island_area := (spawn_island_radial_mask > 0.05) or (island_noise > -0.15)
+	if not is_island_area:
 		return &""
 
 	# 2D Height Surface Noise
 	var n2d_surf: float = (_noise_2d.get_noise_2d(float(gx) + 500.0, float(gz) + 500.0) + 1.0) * 0.5
 	var surf_height: int = int(floor(lerpf(12.0, 22.0, n2d_surf)))
 
-	# 2D Bottom Base Noise for Castle Story-style floating island underside
+	# 2D Bottom Base Noise with 3D Tapering for Castle Story-style floating island underside
 	var n2d_base: float = (_noise_3d.get_noise_2d(float(gx) - 500.0, float(gz) - 500.0) + 1.0) * 0.5
 	var bottom_height: int = int(floor(lerpf(3.0, 9.0, n2d_base)))
 

@@ -3,7 +3,7 @@ extends StaticBody3D
 
 ## Individual 16x32x16 3D Voxel Chunk for procedural floating terrain islands.
 ## Stores 3D voxel data array and generates single ArrayMesh and ConcavePolygonShape3D collision geometry.
-## Hides internal faces between adjacent solid blocks to eliminate internal geometry.
+## Node is positioned at its world-space chunk origin; mesh/collision geometry use chunk-local coordinates.
 
 const SIZE_X: int = 16
 const SIZE_Y: int = 32
@@ -104,13 +104,13 @@ func get_voxel_local(lx: int, ly: int, lz: int) -> StringName:
 func is_solid_local(lx: int, ly: int, lz: int) -> bool:
 	return not get_voxel_local(lx, ly, lz).is_empty()
 
-## Rebuilds chunk mesh and ConcavePolygonShape3D collision geometry.
-## Only generates exposed faces bordering air or unloaded neighbor chunks to ensure watertight boundaries.
+## Rebuilds chunk mesh and ConcavePolygonShape3D collision geometry in chunk-local coordinates.
+## Position of Node3D is aligned to world-space chunk origin.
 func rebuild_mesh_and_collision() -> void:
 	setup_nodes()
 
-	var start_x := chunk_pos.x * SIZE_X
-	var start_z := chunk_pos.y * SIZE_Z
+	# Set chunk node position to its world-space origin
+	position = Vector3(float(chunk_pos.x * SIZE_X), 0.0, float(chunk_pos.y * SIZE_Z))
 
 	# Separate SurfaceTools per material type to avoid per-vertex material spam
 	var st_map: Dictionary = {}
@@ -131,6 +131,9 @@ func rebuild_mesh_and_collision() -> void:
 		Vector3i(0, 0, 1), Vector3i(0, 0, -1)
 	]
 
+	var world_origin_x := chunk_pos.x * SIZE_X
+	var world_origin_z := chunk_pos.y * SIZE_Z
+
 	for lx in range(SIZE_X):
 		for ly in range(SIZE_Y):
 			for lz in range(SIZE_Z):
@@ -138,11 +141,7 @@ func rebuild_mesh_and_collision() -> void:
 				if b_type.is_empty():
 					continue
 
-				var gx := start_x + lx
-				var gy := ly
-				var gz := start_z + lz
-				var block_min := Vector3(float(gx), float(gy), float(gz))
-
+				var block_min_local := Vector3(float(lx), float(ly), float(lz))
 				var st: SurfaceTool = st_map.get(b_type, st_default)
 
 				for d: Vector3i in dirs:
@@ -154,21 +153,21 @@ func rebuild_mesh_and_collision() -> void:
 					if nx >= 0 and nx < SIZE_X and ny >= 0 and ny < SIZE_Y and nz >= 0 and nz < SIZE_Z:
 						neighbor_is_solid = not StringName(voxels[nx][ny][nz]).is_empty()
 					else:
-						# Query world for neighbor voxel across chunk boundary ONLY if neighbor chunk is loaded
-						var target_cell := Vector3i(gx + d.x, gy + d.y, gz + d.z)
-						var n_cx := floori(float(target_cell.x) / float(SIZE_X))
-						var n_cz := floori(float(target_cell.z) / float(SIZE_Z))
+						# Calculate world cell for neighbor across chunk boundary
+						var target_world_cell := Vector3i(world_origin_x + nx, ly + d.y, world_origin_z + nz)
+						var n_cx := floori(float(target_world_cell.x) / float(SIZE_X))
+						var n_cz := floori(float(target_world_cell.z) / float(SIZE_Z))
 						var n_cp := Vector2i(n_cx, n_cz)
 
 						if voxel_world != null and voxel_world.has_method("is_chunk_loaded") and voxel_world.is_chunk_loaded(n_cp):
-							neighbor_is_solid = voxel_world.is_solid_block(target_cell)
+							neighbor_is_solid = voxel_world.is_solid_block(target_world_cell)
 						else:
 							# Neighbor chunk is NOT loaded — keep boundary face rendered & collidable so world is watertight
 							neighbor_is_solid = false
 
 					# Render face ONLY if adjacent neighbor is empty space (air) or unloaded
 					if not neighbor_is_solid:
-						_add_face_quad(block_min, d, st, collision_faces)
+						_add_face_quad(block_min_local, d, st, collision_faces)
 
 	# Combine surfaces into a single ArrayMesh
 	var combined_mesh := ArrayMesh.new()

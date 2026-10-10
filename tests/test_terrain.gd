@@ -22,6 +22,7 @@ func run_all() -> bool:
 	_run_test("test_chunk_single_block_faces_and_collision")
 	_run_test("test_chunk_adjacent_blocks_cull_internal_faces")
 	_run_test("test_voxel_world_spawn_position")
+	_run_test("test_voxel_world_spawn_headroom_clearance")
 	_run_test("test_voxel_world_generation_queue_deduplication")
 	_run_test("test_voxel_world_mine_single_voxel")
 	_run_test("test_negative_coordinate_mapping")
@@ -31,6 +32,7 @@ func run_all() -> bool:
 	_run_test("test_watertight_chunk_boundary_rebuild_on_load_unload")
 	_run_test("test_creative_mode_bypasses_inventory_costs")
 	_run_test("test_hit_voxel_interior_cell_derivation")
+	_run_test("test_chunk_local_coordinate_mesh_transforms")
 
 	print("\n--------------------------------------------------")
 	print("TERRAIN TESTS SUMMARY: %d Passed, %d Failed" % [_passed, _failed])
@@ -96,6 +98,19 @@ func test_voxel_world_spawn_position() -> void:
 	var spawn_pos := world.get_spawn_position(0, 0)
 	_assert(spawn_pos.y > 2.0, "Spawn position Y is on top of terrain island (Y=%.1f)" % spawn_pos.y)
 
+func test_voxel_world_spawn_headroom_clearance() -> void:
+	var world: VoxelWorld = VoxelWorldScript.new()
+	world.seed_value = 1337
+	var spawn_pos := world.get_spawn_position(0, 0)
+	var foot_cell := Vector3i(int(floor(spawn_pos.x)), int(floor(spawn_pos.y)), int(floor(spawn_pos.z)))
+	var head_cell := Vector3i(int(floor(spawn_pos.x)), int(floor(spawn_pos.y + 1.0)), int(floor(spawn_pos.z)))
+
+	var foot_clear: bool = not world.is_solid_block(foot_cell)
+	var head_clear: bool = not world.is_solid_block(head_cell)
+	var ground_solid: bool = world.is_solid_block(foot_cell - Vector3i(0, 1, 0))
+
+	_assert(foot_clear and head_clear and ground_solid, "Player spawn position provides 1.8m capsule headroom clearance above solid ground")
+
 func test_voxel_world_generation_queue_deduplication() -> void:
 	var world: VoxelWorld = VoxelWorldScript.new()
 	world.seed_value = 1337
@@ -110,7 +125,7 @@ func test_voxel_world_mine_single_voxel() -> void:
 	world.seed_value = 1337
 	# Load spawn chunk
 	var spawn_pos := world.get_spawn_position(0, 0)
-	var terrain_cell := Vector3i(0, int(floor(spawn_pos.y - 1.2)), 0)
+	var terrain_cell := Vector3i(0, int(floor(spawn_pos.y - 1.0)), 0)
 	var orig_type := world.get_voxel_at(terrain_cell)
 	_assert(not orig_type.is_empty(), "Mined target cell starts as solid natural voxel (%s)" % orig_type)
 
@@ -211,3 +226,15 @@ func test_hit_voxel_interior_cell_derivation() -> void:
 		int(floor(interior_pt.z))
 	)
 	_assert(derived_cell == Vector3i(5, 10, 3), "Hit point on top face correctly resolves interior voxel cell (5,10,3)")
+
+func test_chunk_local_coordinate_mesh_transforms() -> void:
+	var chunk := VoxelChunkScript.new()
+	chunk.chunk_pos = Vector2i(-1, 2)
+	chunk.set_voxel_local(0, 0, 0, &"stone")
+	chunk.rebuild_mesh_and_collision()
+
+	_assert(chunk.position == Vector3(-16.0, 0.0, 32.0), "Chunk node position aligned to world origin (-16, 0, 32)")
+	var col_shape: CollisionShape3D = chunk._col_shape
+	if col_shape != null and col_shape.shape is ConcavePolygonShape3D:
+		var faces: PackedVector3Array = col_shape.shape.get_faces()
+		_assert(faces[0].x >= 0.0 and faces[0].x <= 1.0, "Mesh/collision vertices generated in chunk-local coordinates (0 to 1)")
