@@ -224,21 +224,41 @@ func _add_face_quad(min_p: Vector3, normal: Vector3i, st: SurfaceTool, collision
 		v2 = Vector3(min_p.x, max_p.y, min_p.z)
 		v3 = Vector3(max_p.x, max_p.y, min_p.z)
 
-	# Set explicit normal for SurfaceTool
-	st.set_normal(norm_v)
+	var uv0 := Vector2(0.0, 0.0)
+	var uv1 := Vector2(1.0, 0.0)
+	var uv2 := Vector2(1.0, 1.0)
+	var uv3 := Vector2(0.0, 1.0)
 
 	# Triangle 1
+	st.set_normal(norm_v)
+	st.set_uv(uv0)
 	st.add_vertex(v0)
+
+	st.set_normal(norm_v)
+	st.set_uv(uv1)
 	st.add_vertex(v1)
+
+	st.set_normal(norm_v)
+	st.set_uv(uv2)
 	st.add_vertex(v2)
+
 	collision_faces.append(v0)
 	collision_faces.append(v1)
 	collision_faces.append(v2)
 
 	# Triangle 2
+	st.set_normal(norm_v)
+	st.set_uv(uv0)
 	st.add_vertex(v0)
+
+	st.set_normal(norm_v)
+	st.set_uv(uv2)
 	st.add_vertex(v2)
+
+	st.set_normal(norm_v)
+	st.set_uv(uv3)
 	st.add_vertex(v3)
+
 	collision_faces.append(v0)
 	collision_faces.append(v2)
 	collision_faces.append(v3)

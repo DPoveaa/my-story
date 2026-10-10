@@ -1,7 +1,7 @@
 ## Voxel terrain system automated tests.
 ## Tests: VoxelChunk face rendering, CULL_BACK material settings, internal face culling,
 ##        collision geometry generation, VoxelWorld spawn positioning, queue deduplication,
-##        and single natural block mining.
+##        single natural block mining, negative coordinate mapping, and diagnostics.
 extends RefCounted
 
 const VoxelChunkScript = preload("res://systems/terrain/VoxelChunk.gd")
@@ -22,6 +22,8 @@ func run_all() -> bool:
 	_run_test("test_voxel_world_spawn_position")
 	_run_test("test_voxel_world_generation_queue_deduplication")
 	_run_test("test_voxel_world_mine_single_voxel")
+	_run_test("test_negative_coordinate_mapping")
+	_run_test("test_voxel_world_diagnostics")
 
 	print("\n--------------------------------------------------")
 	print("TERRAIN TESTS SUMMARY: %d Passed, %d Failed" % [_passed, _failed])
@@ -110,3 +112,19 @@ func test_voxel_world_mine_single_voxel() -> void:
 
 	var after_type := world.get_voxel_at(terrain_cell)
 	_assert(after_type.is_empty(), "Mined cell is now empty air in voxel data")
+
+func test_negative_coordinate_mapping() -> void:
+	var world: VoxelWorld = VoxelWorldScript.new()
+	world.seed_value = 1337
+	var neg_cell := Vector3i(-5, 10, -5)
+	var voxel_type := world.get_voxel_at(neg_cell)
+	# Should deterministically return a valid block type string (or empty air string)
+	_assert(voxel_type is StringName, "Negative world coordinates evaluate without crash or index out of bounds")
+
+func test_voxel_world_diagnostics() -> void:
+	var world: VoxelWorld = VoxelWorldScript.new()
+	world.seed_value = 1337
+	world._load_or_generate_chunk(Vector2i(0, 0))
+	var diag := world.get_diagnostics()
+	_assert(diag.get("loaded_chunks", 0) == 1, "Diagnostics track loaded chunk count (1)")
+	_assert(diag.get("total_chunks_generated", 0) >= 1, "Diagnostics track total generated chunk count")

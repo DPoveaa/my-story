@@ -4,7 +4,7 @@ extends Node3D
 ## Infinite 3D Chunked Voxel Terrain Engine inspired by Castle Story's floating islands.
 ## Manages 3D voxel chunk loading/unloading, FastNoiseLite density noise generation,
 ## mining interaction, persistence, and ground support for construction.
-## Uses incremental chunk loading queue to eliminate frame stalls during world exploration.
+## Uses incremental chunk loading queue with frame time budget to eliminate frame stalls.
 
 signal chunk_loaded(chunk_pos: Vector2i)
 signal chunk_unloaded(chunk_pos: Vector2i)
@@ -19,6 +19,7 @@ const DELTA_SAVE_PATH: String = "user://terrain_deltas.json"
 
 @export var view_distance_chunks: int = 3
 @export var max_chunks_per_frame: int = 2
+@export var max_frame_time_ms: float = 6.0
 @export var noise_frequency_2d: float = 0.025
 @export var noise_frequency_3d: float = 0.045
 
@@ -37,6 +38,10 @@ var _generation_queue: Array[Vector2i] = []
 var _queued_chunks: Dictionary = {} # Vector2i -> bool
 
 var _last_player_chunk: Vector2i = Vector2i(99999, 99999)
+
+## Lightweight Diagnostics
+var total_chunks_generated: int = 0
+var last_chunk_build_time_ms: float = 0.0
 
 func _ready() -> void:
 	_setup_noise()
@@ -190,7 +195,9 @@ func _process_generation_queue() -> void:
 	if _generation_queue.is_empty():
 		return
 
+	var start_time := Time.get_ticks_usec()
 	var processed := 0
+
 	while not _generation_queue.is_empty() and processed < max_chunks_per_frame:
 		var cp: Vector2i = _generation_queue.pop_front()
 		_queued_chunks.erase(cp)
@@ -198,9 +205,16 @@ func _process_generation_queue() -> void:
 			_load_or_generate_chunk(cp)
 			processed += 1
 
+		# Time budget guard
+		var elapsed_ms := float(Time.get_ticks_usec() - start_time) / 1000.0
+		if elapsed_ms >= max_frame_time_ms:
+			break
+
 func _load_or_generate_chunk(chunk_pos: Vector2i) -> VoxelChunk:
 	if _chunks.has(chunk_pos):
 		return _chunks[chunk_pos]
+
+	var t_start := Time.get_ticks_usec()
 
 	# If this chunk was queued, remove it from queue since we're generating it synchronously
 	if _queued_chunks.has(chunk_pos):
@@ -227,6 +241,10 @@ func _load_or_generate_chunk(chunk_pos: Vector2i) -> VoxelChunk:
 	add_child(chunk)
 	chunk.rebuild_mesh_and_collision()
 	_chunks[chunk_pos] = chunk
+
+	total_chunks_generated += 1
+	last_chunk_build_time_ms = float(Time.get_ticks_usec() - t_start) / 1000.0
+
 	chunk_loaded.emit(chunk_pos)
 	return chunk
 
@@ -237,6 +255,15 @@ func _unload_chunk(chunk_pos: Vector2i) -> void:
 			chunk.queue_free()
 		_chunks.erase(chunk_pos)
 		chunk_unloaded.emit(chunk_pos)
+
+## Diagnostics accessor dictionary
+func get_diagnostics() -> Dictionary:
+	return {
+		"loaded_chunks": _chunks.size(),
+		"queued_chunks": _generation_queue.size(),
+		"total_chunks_generated": total_chunks_generated,
+		"last_chunk_build_time_ms": last_chunk_build_time_ms
+	}
 
 ## Mines an individual natural terrain block at world_cell.
 ## Updates voxel data, rebuilds affected chunk geometry/collision, and returns the mined block_type.
