@@ -1383,7 +1383,7 @@ func test_reconstruct_single_missing_cell_success() -> bool:
 	if plan1 == null or plan1.present_count != 1 or plan1.missing_count != 1:
 		return false
 
-	var res := bp_mgr.reconstruct_single_cell(bp, Vector3i(0, 0, 0), Vector3i(1, 0, 0))
+	var res: Dictionary = bp_mgr.reconstruct_single_cell(bp, Vector3i(0, 0, 0), Vector3i(1, 0, 0))
 	if not res.get("success", false):
 		return false
 
@@ -1408,7 +1408,7 @@ func test_reconstruct_single_cell_rejection_safety() -> bool:
 
 	grid.place_block(Vector3i(0, 0, 0), &"gold")
 
-	var res := bp_mgr.reconstruct_single_cell(bp, Vector3i(0, 0, 0), Vector3i(0, 0, 0))
+	var res: Dictionary = bp_mgr.reconstruct_single_cell(bp, Vector3i(0, 0, 0), Vector3i(0, 0, 0))
 	if res.get("success", true) or res.get("reason", "") != "CELL_OCCUPIED":
 		return false
 
@@ -1427,7 +1427,7 @@ func test_reconstruct_single_cell_restores_expected_block_type_and_metadata() ->
 		{"rel_pos": [0, 0, 0], "block_type": "brick", "durability": 0.85, "metadata": {"coated_faces": [[0, 1, 0]]}}
 	]
 
-	var res := bp_mgr.reconstruct_single_cell(bp, Vector3i(0, 0, 0), Vector3i(0, 0, 0))
+	var res: Dictionary = bp_mgr.reconstruct_single_cell(bp, Vector3i(0, 0, 0), Vector3i(0, 0, 0))
 	if not res.get("success", false):
 		return false
 
@@ -1458,7 +1458,7 @@ func test_reconstruct_single_cell_restores_mortared_joints_without_duplicates() 
 		{"rel_a": [0, 0, 0], "rel_b": [1, 0, 0], "strength": 90.0, "is_mortared": true, "material_a": "stone", "material_b": "stone"}
 	]
 
-	var res := bp_mgr.reconstruct_single_cell(bp, Vector3i(0, 0, 0), Vector3i(1, 0, 0))
+	var res: Dictionary = bp_mgr.reconstruct_single_cell(bp, Vector3i(0, 0, 0), Vector3i(1, 0, 0))
 	if not res.get("success", false):
 		return false
 
@@ -1542,7 +1542,7 @@ func test_explicit_update_registered_blueprint_from_world() -> bool:
 
 	grid.place_block(Vector3i(2, 2, 2), &"wood")
 
-	var ok := bp_mgr.update_registered_blueprint_from_world("update_area_test")
+	var ok: bool = bp_mgr.update_registered_blueprint_from_world("update_area_test")
 	if not ok:
 		return false
 
@@ -1737,7 +1737,7 @@ func test_atomic_restoration_failure() -> bool:
 
 	grid.place_block(Vector3i(5, 5, 5), &"gold")
 
-	var res := bp_mgr.apply_blueprint(bp, Vector3i(5, 5, 5), false)
+	var res: Dictionary = bp_mgr.apply_blueprint(bp, Vector3i(5, 5, 5), false)
 	if res.get("success", true):
 		return false
 
