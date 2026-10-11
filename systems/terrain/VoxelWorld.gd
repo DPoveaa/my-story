@@ -60,6 +60,34 @@ var _chunk_cache: Dictionary = {}  # Vector2i -> VoxelChunk
 var _chunk_cache_order: Array[Vector2i] = []
 @export var max_chunk_cache_size: int = 100
 
+@export var noise_frequency_2d: float = 0.025
+@export var noise_frequency_3d: float = 0.045
+
+var _noise_2d: FastNoiseLite
+var _noise_3d: FastNoiseLite
+var _noise_ore: FastNoiseLite
+
+## Dictionary[Vector2i, VoxelChunk]
+var _chunks: Dictionary = {}
+
+## Dictionary[Vector2i, Array[Vector3i]] — mined local cell coordinates per chunk
+var _mined_deltas: Dictionary = {}
+var _mined_deltas_set: Dictionary = {}  # Vector2i -> Dictionary[Vector3i, bool]
+
+## Per-chunk edit generation counter. Incremented on each mining edit.
+## Stale worker results with old generation numbers are discarded.
+var _chunk_generation: Dictionary = {}  # Vector2i -> int
+
+## === THREADED PIPELINE ===
+
+## Chunks waiting to be dispatched to background thread (sorted, deduplicated)
+var _pending_queue: Array[Vector2i] = []
+var _pending_set: Dictionary = {}  # Vector2i -> bool
+
+## Chunks currently running Stage 1+2 on a background thread.
+var _in_flight: Dictionary = {}       # Vector2i -> int (generation at dispatch)
+var _in_flight_count: int = 0
+
 ## Completed results waiting to be consumed on main thread via turnstile.
 ## Protected by _results_mutex.
 var _results_mutex: Mutex = Mutex.new()
