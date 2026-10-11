@@ -149,12 +149,18 @@ func _build_terrain() -> void:
 
 	# Max view distance in voxels supported by terrain (viewer distance is configured on _viewer)
 	_terrain.max_view_distance = maxi(128, view_distance_chunks * 16)
+	_terrain.block_enter_notification_enabled = true
+	_terrain.mesh_block_entered.connect(_on_mesh_block_entered)
 
 	add_child(_terrain)
 
 	_voxel_tool = _terrain.get_voxel_tool()
 	if _voxel_tool != null:
 		_voxel_tool.channel = VoxelBuffer.CHANNEL_TYPE
+
+func _on_mesh_block_entered(_block_pos: Vector3i) -> void:
+	if is_chunk_ready(Vector3(0.5, 16.0, 0.5)):
+		spawn_chunks_ready.emit()
 
 # ---------------------------------------------------------------------------
 # VoxelViewer — tells the C++ engine where the player is.
@@ -206,27 +212,115 @@ func _setup_fallback_noise() -> void:
 # Spawn helpers
 # ---------------------------------------------------------------------------
 
-## Async: waits for the terrain to generate the spawn chunks, then waits one
-## physics frame for collision shapes to be committed to PhysicsServer3D.
-## Mirrors the old force_sync_spawn_chunks() call contract used by GameWorld.
-func force_sync_spawn_chunks(_cx: int = 0, _cz: int = 0) -> void:
+## Checks if a solid voxel exists in the live terrain buffer or procedural fallback.
+func has_voxel(world_cell: Vector3i) -> bool:
+	if _terrain != null and _voxel_tool != null:
+		var block_pos: Vector3i = _terrain.voxel_to_data_block(Vector3(world_cell))
+		if _terrain.has_data_block(block_pos):
+			var block_id: int = _voxel_tool.get_voxel(world_cell)
+			return block_id != BLOCK_AIR
+	return is_solid_block(world_cell)
+
+## Verifies whether the chunk and collision mesh directly under world_pos are generated and ready.
+func is_chunk_ready(world_pos: Vector3) -> bool:
+	if _terrain == null:
+		return true
+	var ipos := Vector3i(int(floor(world_pos.x)), int(floor(world_pos.y)), int(floor(world_pos.z)))
+	var block_pos: Vector3i = _terrain.voxel_to_data_block(Vector3(ipos))
+	if not _terrain.has_data_block(block_pos):
+		return false
+
+	if _terrain.has_method("is_area_meshed"):
+		var aabb := AABB(Vector3(world_pos.x - 1.0, maxf(0.0, world_pos.y - 4.0), world_pos.z - 1.0), Vector3(2.0, 8.0, 2.0))
+		if not _terrain.is_area_meshed(aabb):
+			return false
+
+	if _voxel_tool != null and _voxel_tool.has_method("is_area_editable"):
+		var aabb_tool := AABB(Vector3(world_pos.x - 1.0, maxf(0.0, world_pos.y - 4.0), world_pos.z - 1.0), Vector3(2.0, 8.0, 2.0))
+		if not _voxel_tool.is_area_editable(aabb_tool):
+			return false
+
+	# Ensure solid terrain exists in this column
+	var solid_y := get_highest_solid_y(int(floor(world_pos.x)), int(floor(world_pos.z)))
+	return solid_y >= 0
+
+## Async: waits for Zylann's VoxelTerrain to finish generating and meshing the chunk under world_pos.
+func wait_for_terrain_at(world_pos: Vector3) -> void:
+	if not is_inside_tree() or _terrain == null:
+		return
+
+	if is_chunk_ready(world_pos):
+		await get_tree().physics_frame
+		return
+
+	var max_wait_cycles := 300
+	var cycles := 0
+	while not is_chunk_ready(world_pos) and cycles < max_wait_cycles:
+		cycles += 1
+		await get_tree().physics_frame
+
+	# Wait two physics frames so PhysicsServer3D synchronizes collision shapes with Jolt
+	for _i in range(2):
+		await get_tree().physics_frame
+
+## Async: waits for the terrain to generate the spawn chunks, then waits for
+## collision shapes to be committed to PhysicsServer3D.
+func force_sync_spawn_chunks(cx: int = 0, cz: int = 0) -> void:
 	if not is_inside_tree():
 		return
-	# VoxelTerrain streams automatically once a VoxelViewer is present.
-	# Wait several physics frames so the nearest chunks are meshed and their
-	# collision shapes committed to PhysicsServer3D.
-	for _i in range(4):
-		await get_tree().physics_frame
+	var world_pos := Vector3(float(cx * 16) + 0.5, 16.0, float(cz * 16) + 0.5)
+	await wait_for_terrain_at(world_pos)
+
+## Queries the highest solid block Y coordinate at world (x, z) using top-down raycast or VoxelTool.
+func get_highest_solid_y(x: int, z: int) -> int:
+	# 1. Try VoxelTool raycast downward from above world height
+	if _voxel_tool != null:
+		var ray_origin := Vector3(float(x) + 0.5, float(WORLD_HEIGHT) + 4.0, float(z) + 0.5)
+		var hit = _voxel_tool.raycast(ray_origin, Vector3.DOWN, float(WORLD_HEIGHT) + 8.0)
+		if hit != null and hit.position != null:
+			return hit.position.y
+
+	# 2. Check live VoxelTool voxel coordinates directly from top to bottom
+	if _terrain != null and _voxel_tool != null:
+		var block_pos: Vector3i = _terrain.voxel_to_data_block(Vector3(x, 16, z))
+		if _terrain.has_data_block(block_pos):
+			for y in range(WORLD_HEIGHT - 1, -1, -1):
+				var cell := Vector3i(x, y, z)
+				if _voxel_tool.get_voxel(cell) != BLOCK_AIR:
+					return y
+
+	# 3. Deterministic procedural fallback if chunk is not yet loaded in live buffer
+	for y in range(WORLD_HEIGHT - 1, -1, -1):
+		if is_solid_block(Vector3i(x, y, z)):
+			return y
+
+	return -1
+
+## Top-down physics raycast to find the exact top surface collision point in PhysicsServer3D.
+func get_spawn_position_raycast(x: float = 0.5, z: float = 0.5) -> Vector3:
+	if is_inside_tree() and get_world_3d() != null:
+		var space_state := get_world_3d().direct_space_state
+		if space_state != null:
+			var query := PhysicsRayQueryParameters3D.create(
+				Vector3(x, float(WORLD_HEIGHT) + 10.0, z),
+				Vector3(x, -5.0, z)
+			)
+			query.collide_with_areas = false
+			query.collide_with_bodies = true
+			var hit := space_state.intersect_ray(query)
+			if not hit.is_empty() and hit.has("position"):
+				# Feet positioned safely 0.1m above collision mesh face
+				return Vector3(x, hit.position.y + 0.1, z)
+	return get_spawn_position(int(floor(x)), int(floor(z)))
 
 ## Returns a safe above-surface world position for the player to spawn at.
 func get_spawn_position(x: int = 0, z: int = 0) -> Vector3:
-	for y in range(WORLD_HEIGHT - 1, -1, -1):
-		var cell := Vector3i(x, y, z)
-		if is_solid_block(cell):
-			var a1 := Vector3i(x, y + 1, z)
-			var a2 := Vector3i(x, y + 2, z)
-			if not is_solid_block(a1) and not is_solid_block(a2):
-				return Vector3(float(x) + 0.5, float(y) + 1.1, float(z) + 0.5)
+	var top_y := get_highest_solid_y(x, z)
+	if top_y >= 0:
+		var a1 := Vector3i(x, top_y + 1, z)
+		var a2 := Vector3i(x, top_y + 2, z)
+		if not is_solid_block(a1) and not is_solid_block(a2):
+			return Vector3(float(x) + 0.5, float(top_y) + 1.1, float(z) + 0.5)
 
 	# Spiral fallback
 	for radius in range(1, 8):
@@ -234,11 +328,11 @@ func get_spawn_position(x: int = 0, z: int = 0) -> Vector3:
 			for dz in range(-radius, radius + 1):
 				if abs(dx) != radius and abs(dz) != radius:
 					continue
-				for ny in range(WORLD_HEIGHT - 1, -1, -1):
-					if is_solid_block(Vector3i(x + dx, ny, z + dz)):
-						if not is_solid_block(Vector3i(x + dx, ny + 1, z + dz)) \
-						and not is_solid_block(Vector3i(x + dx, ny + 2, z + dz)):
-							return Vector3(float(x + dx) + 0.5, float(ny) + 1.1, float(z + dz) + 0.5)
+				var sy := get_highest_solid_y(x + dx, z + dz)
+				if sy >= 0:
+					if not is_solid_block(Vector3i(x + dx, sy + 1, z + dz)) \
+					and not is_solid_block(Vector3i(x + dx, sy + 2, z + dz)):
+						return Vector3(float(x + dx) + 0.5, float(sy) + 1.1, float(z + dz) + 0.5)
 
 	return Vector3(0.5, SURF_MAX + 2.0, 0.5)
 

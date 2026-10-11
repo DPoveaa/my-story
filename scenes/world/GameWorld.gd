@@ -92,13 +92,21 @@ func _ready() -> void:
 		build_hud.set_player_mode("Survival" if current_game_mode == GameMode.SURVIVAL else "Creative")
 		build_hud.set_cement(player.get_cement_count(), player.max_cement)
 
-		# Move player far below terrain while we await physics registration, preventing
-		# any first-frame partial-overlap that the engine might solve incorrectly.
-		player.global_position = Vector3(0.5, -100.0, 0.5)
-		if player.has_method("set_physics_process"):
+		# Suspend player physics immediately so player does not fall into void
+		if player.has_method("suspend_physics"):
+			player.suspend_physics()
+		elif player.has_method("set_physics_process"):
 			player.set_physics_process(false)
 
-		# Deferred async spawn: awaits one physics_frame inside force_sync_spawn_chunks.
+		# Initial position above spawn surface
+		var initial_spawn := voxel_world.get_spawn_position(0, 0)
+		player.global_position = initial_spawn
+
+		# Attach viewer to player so Zylann VoxelTerrain streams around player location
+		if voxel_world.has_method("attach_viewer_to_player"):
+			voxel_world.attach_viewer_to_player(player)
+
+		# Deferred async spawn: awaits terrain generation and verifies chunk readiness
 		_spawn_player_on_terrain.call_deferred()
 
 	# Wire BuildCamera as secondary/debug tool
@@ -113,28 +121,31 @@ func _ready() -> void:
 			build_camera.block_type_changed.connect(build_hud.set_selected_block_type)
 			build_hud.set_selected_block_type(build_camera.get_selected_type())
 
-## Async coroutine: awaits voxel_world.force_sync_spawn_chunks() which yields one physics_frame,
-## guaranteeing that all VoxelChunk StaticBody3D collision shapes are registered in PhysicsServer3D
-## before we query a spawn position and set player.global_position.
-## This is the ONLY correct way to spawn the player — never position in the same _ready() frame
-## as add_child(voxel_world).
+## Async coroutine: waits for VoxelTerrain to finish generating and meshing the chunk
+## directly under the player before querying the safe surface Y and re-enabling physics.
 func _spawn_player_on_terrain() -> void:
 	if player == null or voxel_world == null:
 		return
 
-	# Synchronously generate spawn-area chunks and wait one physics frame for collision registration
-	await voxel_world.force_sync_spawn_chunks(0, 0)
+	# Wait for VoxelTerrain to finish generating and meshing the chunk directly under the player
+	if voxel_world.has_method("wait_for_terrain_at"):
+		await voxel_world.wait_for_terrain_at(player.global_position)
+	else:
+		await voxel_world.force_sync_spawn_chunks(0, 0)
 
-	# Derive safe spawn position from real solid surface voxel data (not an arbitrary offset)
-	var safe_spawn := voxel_world.get_spawn_position(0, 0)
+	# Derive safe spawn position from real solid surface voxel data using top-down raycast or VoxelTool
+	var safe_spawn: Vector3
+	if voxel_world.has_method("get_spawn_position_raycast"):
+		safe_spawn = voxel_world.get_spawn_position_raycast(player.global_position.x, player.global_position.z)
+	else:
+		safe_spawn = voxel_world.get_spawn_position(int(floor(player.global_position.x)), int(floor(player.global_position.z)))
 	player.global_position = safe_spawn
 
-	# Attach viewer to player so Zylann VoxelTerrain streams around player movement
-	if voxel_world.has_method("attach_viewer_to_player"):
-		voxel_world.attach_viewer_to_player(player)
-
-	# Re-enable physics_process now that terrain collision is committed
-	player.set_physics_process(true)
+	# Re-enable player physics now that terrain collision is committed to PhysicsServer3D
+	if player.has_method("resume_physics"):
+		player.resume_physics()
+	elif player.has_method("set_physics_process"):
+		player.set_physics_process(true)
 
 func _unhandled_input(event: InputEvent) -> void:
 	if build_hud != null and build_hud.has_method("is_modal_open") and build_hud.is_modal_open():

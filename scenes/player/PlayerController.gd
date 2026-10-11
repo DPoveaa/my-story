@@ -166,9 +166,34 @@ func _ready() -> void:
 	# Auto-capture mouse when game starts so first-person look works immediately
 	set_mouse_capture(true)
 
+	# Suspend physics immediately on spawn until terrain chunk is generated and ready
+	suspend_physics()
+
 	set_state(State.BODY_CONTROL)
 	block_type_changed.emit(get_selected_type())
 	cement_changed.emit(cement_count, max_cement)
+
+## Physics suspension state — prevents gravity and movement until terrain finishes generating.
+var is_physics_suspended: bool = false
+
+func suspend_physics() -> void:
+	is_physics_suspended = true
+	velocity = Vector3.ZERO
+	set_physics_process(false)
+
+func resume_physics() -> void:
+	is_physics_suspended = false
+	velocity = Vector3.ZERO
+	set_physics_process(true)
+
+## Waits for terrain directly under player to finish generating, then safely resumes physics.
+func await_terrain_and_resume() -> void:
+	var vox := _get_voxel_world()
+	if vox != null and vox.has_method("wait_for_terrain_at"):
+		await vox.wait_for_terrain_at(global_position)
+		if vox.has_method("get_spawn_position_raycast"):
+			global_position = vox.get_spawn_position_raycast(global_position.x, global_position.z)
+	resume_physics()
 
 func get_cement_count() -> int:
 	return cement_count
@@ -502,6 +527,10 @@ func _select_type_by_index(idx: int) -> void:
 		block_type_changed.emit(get_selected_type())
 
 func _physics_process(delta: float) -> void:
+	if is_physics_suspended:
+		velocity = Vector3.ZERO
+		return
+
 	if _is_ui_modal_open():
 		velocity.x = 0.0
 		velocity.z = 0.0
@@ -554,6 +583,10 @@ func _complete_mining_action() -> void:
 	_last_mined_cell = Vector3i(99999, 99999, 99999)
 
 func _process_body_movement(delta: float) -> void:
+	if is_physics_suspended:
+		velocity = Vector3.ZERO
+		return
+
 	# Gravity simulation
 	if not is_on_floor():
 		velocity.y -= gravity * delta
