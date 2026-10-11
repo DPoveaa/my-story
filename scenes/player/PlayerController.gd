@@ -988,6 +988,11 @@ func _handle_place_action() -> void:
 		debris_grabber.try_place_to_grid()
 		return
 
+	# LMB on natural terrain = instant voxel destruction via Zylann's native API.
+	if target_is_terrain:
+		_mine_terrain_with_voxel_tool()
+		return
+
 	if not has_target:
 		return
 	if target_is_debris and is_instance_valid(target_debris_island) and target_debris_island.is_moving():
@@ -1026,6 +1031,74 @@ func _handle_place_action() -> void:
 				var placed_b: BlockData = grid.get_block(target_place_cell)
 				if placed_b != null:
 					bp_mgr.notify_intentional_block_placed(target_place_cell, placed_b)
+
+## Destroys the terrain voxel under the crosshair using Zylann's native VoxelTool API.
+## Called on LMB when target_is_terrain is true.
+## DOES NOT use PhysicsServer raycasting — uses voxel_tool.raycast() exclusively.
+func _mine_terrain_with_voxel_tool() -> void:
+	var vox_world := _get_voxel_world()
+	if vox_world == null:
+		return
+
+	# Obtain a fresh VoxelTool from the live VoxelTerrain.
+	var terrain: Node = null
+	if vox_world.has_node("VoxelTerrain"):
+		terrain = vox_world.get_node("VoxelTerrain")
+	if terrain == null or not terrain.has_method("get_voxel_tool"):
+		# Fallback: use VoxelWorld.mine_voxel() on the already-known terrain cell.
+		if not target_terrain_cell == Vector3i(99999, 99999, 99999):
+			var mined: StringName = vox_world.mine_voxel(target_terrain_cell)
+			if not mined.is_empty():
+				var inv_mgr := _get_inventory_manager()
+				if inv_mgr != null:
+					inv_mgr.add_material(mined, 1)
+		return
+
+	var voxel_tool: VoxelTool = terrain.get_voxel_tool()
+	if voxel_tool == null:
+		return
+	voxel_tool.channel = VoxelBuffer.CHANNEL_TYPE
+
+	# Use the active camera to build the ray.
+	var cam := get_active_camera()
+	if cam == null:
+		return
+
+	var ray_origin: Vector3    = cam.global_position
+	var ray_forward: Vector3   = -cam.global_transform.basis.z
+	const REACH_DISTANCE: float = 8.0
+
+	# Zylann-native voxel raycast — no PhysicsServer involved.
+	var hit: VoxelRaycastResult = voxel_tool.raycast(ray_origin, ray_forward, REACH_DISTANCE)
+	if hit == null:
+		return
+
+	var hit_pos: Vector3i = hit.position
+
+	# Record the block type before destruction for inventory.
+	var mined_type: StringName = &""
+	if vox_world.has_method("get_voxel_at"):
+		mined_type = vox_world.get_voxel_at(hit_pos)
+
+	# Destroy: set the hit voxel to AIR (ID 0).
+	voxel_tool.set_voxel(hit_pos, 0)
+
+	# Notify VoxelWorld's delta-persistence layer so the mine is remembered on reload.
+	if vox_world.has_method("mine_voxel") and mined_type.is_empty():
+		# mine_voxel will also set AIR; only call it if we didn't already get the type.
+		vox_world.mine_voxel(hit_pos)
+	elif not mined_type.is_empty():
+		# Manually record the delta without re-setting AIR (already done above).
+		if vox_world.has_method("_record_mine_delta"):
+			vox_world._record_mine_delta(hit_pos)
+		var inv_mgr := _get_inventory_manager()
+		if inv_mgr != null:
+			inv_mgr.add_material(mined_type, 1)
+		if vox_world.has_signal("voxel_mined"):
+			vox_world.emit_signal("voxel_mined", hit_pos, mined_type)
+
+	target_face_status = "✓ Mined 1 %s!" % mined_type
+	target_face_changed.emit(has_target, hit_pos, target_face_dir, target_face_status)
 
 func _handle_remove_action() -> void:
 	if area_selection_step != AreaSelectionStep.NONE:

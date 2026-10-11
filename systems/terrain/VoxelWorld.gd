@@ -22,11 +22,15 @@ const BLOCK_IRON:  int = 5
 const BLOCK_GOLD:  int = 6
 
 ## World height used for spawn surface search.
-const WORLD_HEIGHT: int = 32
+const WORLD_HEIGHT: int = 128
 
-## Approximate surface band — the noise generator targets this band.
-const SURF_MIN: float = 12.0
-const SURF_MAX: float = 22.0
+## Floating-island band — islands cluster between these Y values.
+const ISLAND_Y_MIN: float = 32.0
+const ISLAND_Y_MAX: float = 80.0
+
+## Legacy aliases kept so external callers compile without changes.
+const SURF_MIN: float = ISLAND_Y_MIN
+const SURF_MAX: float = ISLAND_Y_MAX
 
 ## Legacy test compatibility radius
 const SPAWN_SYNC_RADIUS: int = 2
@@ -52,8 +56,15 @@ signal spawn_chunks_ready
 		if _viewer != null:
 			_viewer.view_distance = clampi(view_distance_chunks * 16, 64, 128)
 
-@export var noise_frequency_2d: float = 0.025
-@export var noise_frequency_3d: float = 0.045
+@export var noise_frequency_2d: float = 0.025   # kept for fallback ore noise
+@export var noise_frequency_3d: float = 0.045   # primary 3D island density noise
+
+## Density threshold: voxels with 3D noise > this value become solid.
+## Lower = thinner, more sky-punching islands; raise for massive landmasses.
+@export var island_density_threshold: float = 0.18
+
+## Vertical scale factor for the island shape bias (squishes islands flat-ish).
+@export var island_vertical_scale: float = 3.5
 
 # ---------------------------------------------------------------------------
 # Internal nodes
@@ -68,6 +79,11 @@ var _chunks: Dictionary          = {}
 var _noise_2d:  FastNoiseLite = null
 var _noise_3d:  FastNoiseLite = null
 var _noise_ore: FastNoiseLite = null
+
+## Reference to the active IslandGenerator instance so we can re-inject noise on seed changes.
+var _island_gen = null
+
+const _IslandGeneratorScript = preload("res://systems/terrain/IslandGenerator.gd")
 
 # Mined-cell persistence (same format as before so save files stay compatible).
 const DELTA_SAVE_PATH: String = "user://terrain_deltas.json"
@@ -136,16 +152,16 @@ func _build_terrain() -> void:
 	mesher.library = _library
 	_terrain.mesher = mesher
 
-	# Generator — VoxelGeneratorNoise2D produces a heightmap blocky terrain.
-	# We pass our already-configured FastNoiseLite so the shape is identical.
-	var gen := VoxelGeneratorNoise2D.new()
-	gen.channel      = VoxelBuffer.CHANNEL_TYPE
-	gen.noise        = _noise_2d
-	gen.height_start = SURF_MIN
-	gen.height_range  = SURF_MAX - SURF_MIN
-	_terrain.generator = gen
+	# Generator — IslandGenerator extends VoxelGeneratorScript to create
+	# Castle Story-style floating islands using a 3D density field.
+	_island_gen = _IslandGeneratorScript.new()
+	_island_gen.noise_island       = _noise_3d
+	_island_gen.noise_ore          = _noise_ore
+	_island_gen.density_threshold  = island_density_threshold
+	_island_gen.vertical_scale     = island_vertical_scale
+	_terrain.generator = _island_gen
 
-	# Max view distance in voxels supported by terrain (viewer distance is configured on _viewer)
+	# Max view distance in voxels supported by terrain
 	_terrain.max_view_distance = clampi(maxi(128, view_distance_chunks * 16), 128, 256)
 	_terrain.generate_collisions = true
 
@@ -198,9 +214,10 @@ func attach_viewer_to_player(player_node: Node3D) -> void:
 # ---------------------------------------------------------------------------
 func _apply_generator_params() -> void:
 	_setup_fallback_noise()
-	if _terrain != null and _terrain.generator is VoxelGeneratorNoise2D:
-		var gen: VoxelGeneratorNoise2D = _terrain.generator
-		gen.noise = _noise_2d
+	# Re-inject updated noise into the live generator so seed changes take effect.
+	if _island_gen != null:
+		_island_gen.noise_island = _noise_3d
+		_island_gen.noise_ore    = _noise_ore
 
 func _setup_fallback_noise() -> void:
 	_noise_2d = FastNoiseLite.new()
@@ -282,7 +299,7 @@ func get_highest_solid_y(x: int, z: int) -> int:
 
 	# 2. Check live VoxelTool voxel coordinates directly from top to bottom
 	if _terrain != null and _voxel_tool != null:
-		var block_pos: Vector3i = _terrain.voxel_to_data_block(Vector3(x, 16, z))
+		var block_pos: Vector3i = _terrain.voxel_to_data_block(Vector3(x, int(ISLAND_Y_MAX), z))
 		if _terrain.has_data_block(block_pos):
 			for y in range(WORLD_HEIGHT - 1, -1, -1):
 				var cell := Vector3i(x, y, z)
@@ -303,7 +320,7 @@ func get_spawn_position_raycast(x: float = 0.5, z: float = 0.5) -> Vector3:
 		if space_state != null:
 			var query := PhysicsRayQueryParameters3D.create(
 				Vector3(x, float(WORLD_HEIGHT) + 10.0, z),
-				Vector3(x, -5.0, z)
+				Vector3(x, -10.0, z)  # islands float, cast all the way to negative Y
 			)
 			query.collide_with_areas = false
 			query.collide_with_bodies = true
@@ -335,7 +352,7 @@ func get_spawn_position(x: int = 0, z: int = 0) -> Vector3:
 					and not is_solid_block(Vector3i(x + dx, sy + 2, z + dz)):
 						return Vector3(float(x + dx) + 0.5, float(sy) + 1.5, float(z + dz) + 0.5)
 
-	return Vector3(0.5, SURF_MAX + 2.0, 0.5)
+	return Vector3(0.5, ISLAND_Y_MAX + 2.0, 0.5)
 
 # ---------------------------------------------------------------------------
 # Query API (mirrors old public surface)
@@ -405,6 +422,22 @@ func mine_voxel(world_cell: Vector3i) -> StringName:
 	voxel_mined.emit(world_cell, b_type)
 	return b_type
 
+## Records world_cell in the mined-delta persistence layer without touching VoxelTool.
+## Called by PlayerController when the voxel was already set to AIR externally.
+func _record_mine_delta(world_cell: Vector3i) -> void:
+	var cx := floori(float(world_cell.x) / 16.0)
+	var cz := floori(float(world_cell.z) / 16.0)
+	var cp  := Vector2i(cx, cz)
+	var lc  := Vector3i(posmod(world_cell.x, 16), world_cell.y, posmod(world_cell.z, 16))
+	if not _mined_deltas.has(cp):
+		_mined_deltas[cp]     = []
+		_mined_deltas_set[cp] = {}
+	if not _mined_deltas_set[cp].has(lc):
+		_mined_deltas[cp].append(lc)
+		_mined_deltas_set[cp][lc] = true
+	save_terrain_deltas()
+
+
 # ---------------------------------------------------------------------------
 # Stub: update_loaded_chunks — no-op; streaming is handled by VoxelViewer.
 # Kept so GameWorld / PlayerController callers need no changes.
@@ -453,41 +486,70 @@ func _id_to_name(id: int) -> StringName:
 		BLOCK_GOLD:  return &"gold"
 		_:           return &""
 
-## Deterministic procedural evaluation — mirrors the old VoxelWorld logic exactly.
+## Deterministic procedural evaluation — floating-island 3D density version.
 ## Used as a fallback when a chunk is not yet streamed by VoxelTerrain.
 func _procedural_voxel(gx: int, gy: int, gz: int, cp: Vector2i, local_cell: Vector3i) -> StringName:
 	if _mined_deltas_set.has(cp) and _mined_deltas_set[cp].has(local_cell):
 		return &""
-	if _noise_2d == null or _noise_3d == null:
+	if _noise_3d == null:
 		return &""
 
-	var dist_from_origin := sqrt(float(gx * gx + gz * gz))
-	var spawn_mask := clampf(1.0 - (dist_from_origin / 24.0), 0.0, 1.0)
-	var island_n: float = _noise_2d.get_noise_2d(float(gx), float(gz))
-	if spawn_mask <= 0.05 and island_n <= -0.15:
+	# Sample the island density and decide block type (same logic as _IslandGenerator).
+	var block_id: int = _island_density_to_id(gx, gy, gz)
+	if block_id == BLOCK_AIR:
 		return &""
+	return _id_to_name(block_id)
 
-	var n_surf: float = (_noise_2d.get_noise_2d(float(gx) + 500.0, float(gz) + 500.0) + 1.0) * 0.5
-	var surf_h: int   = int(floor(lerpf(SURF_MIN, SURF_MAX, n_surf)))
+## Shared density → block-ID logic used by both the procedural fallback and _IslandGenerator.
+func _island_density_to_id(gx: int, gy: int, gz: int) -> int:
+	# Voxels entirely outside the island band are always air.
+	if float(gy) < ISLAND_Y_MIN - 12.0 or float(gy) > ISLAND_Y_MAX + 12.0:
+		return BLOCK_AIR
 
-	var n_base: float = (_noise_3d.get_noise_2d(float(gx) - 500.0, float(gz) - 500.0) + 1.0) * 0.5
-	var bot_h: int    = int(floor(lerpf(3.0, 9.0, n_base)))
+	# 3D density noise — the primary island shape.
+	var fy: float = float(gy) * island_vertical_scale
+	var density: float = _noise_3d.get_noise_3d(float(gx), fy, float(gz))
 
-	if gy < bot_h or gy > surf_h:
-		return &""
+	# Vertical bias: carve air above ISLAND_Y_MAX and below ISLAND_Y_MIN.
+	var band_center: float = (ISLAND_Y_MIN + ISLAND_Y_MAX) * 0.5
+	var band_half:   float = (ISLAND_Y_MAX - ISLAND_Y_MIN) * 0.5
+	var dist_from_center: float = abs(float(gy) - band_center)
+	var bias: float = clampf((dist_from_center - band_half * 0.3) / (band_half * 0.7), 0.0, 1.0)
+	density -= bias * 0.55
 
-	if gy == surf_h:
-		return &"grass"
-	if gy >= surf_h - 2:
-		return &"dirt"
+	if density < island_density_threshold:
+		return BLOCK_AIR
 
+	# Classify solid voxel: grass cap, dirt sub-cap, then stone / ores.
+	# Check whether the voxel directly above is air → grass surface.
+	var fy_above: float = float(gy + 1) * island_vertical_scale
+	var density_above: float = _noise_3d.get_noise_3d(float(gx), fy_above, float(gz))
+	var dist_above: float = abs(float(gy + 1) - band_center)
+	var bias_above: float = clampf((dist_above - band_half * 0.3) / (band_half * 0.7), 0.0, 1.0)
+	density_above -= bias_above * 0.55
+	var is_surface: bool = density_above < island_density_threshold
+
+	if is_surface:
+		return BLOCK_GRASS
+
+	# Check 2 voxels above for dirt.
+	var fy2: float = float(gy + 2) * island_vertical_scale
+	var density2: float = _noise_3d.get_noise_3d(float(gx), fy2, float(gz))
+	var dist2: float = abs(float(gy + 2) - band_center)
+	var bias2: float = clampf((dist2 - band_half * 0.3) / (band_half * 0.7), 0.0, 1.0)
+	density2 -= bias2 * 0.55
+	if density2 < island_density_threshold:
+		return BLOCK_DIRT
+
+	# Ore veins inside the island core.
 	if _noise_ore != null:
 		var ore_n: float = _noise_ore.get_noise_3d(float(gx), float(gy), float(gz))
-		if gy <= 8  and ore_n > 0.45: return &"gold"
-		if gy <= 12 and ore_n > 0.35: return &"iron"
-		if gy <= 15 and ore_n > 0.25: return &"coal"
+		var core_y: float = (ISLAND_Y_MIN + ISLAND_Y_MAX) * 0.5
+		if gy < int(core_y) - 8  and ore_n > 0.45: return BLOCK_GOLD
+		if gy < int(core_y) - 4  and ore_n > 0.35: return BLOCK_IRON
+		if gy < int(core_y)      and ore_n > 0.25: return BLOCK_COAL
 
-	return &"stone"
+	return BLOCK_STONE
 
 # ---------------------------------------------------------------------------
 # Persistence
