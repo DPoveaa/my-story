@@ -168,7 +168,7 @@ func _process(_delta: float) -> void:
 		var cached_chunk: VoxelChunk = chunk_entry.get("cached_chunk", null)
 
 		if cached_chunk != null:
-			var insert_start_usec := Time.get_ticks_usec()
+			var t_ac_start := Time.get_ticks_usec()
 
 			cached_chunk.collision_layer = 1
 			cached_chunk.collision_mask = 7
@@ -176,10 +176,13 @@ func _process(_delta: float) -> void:
 			if cached_chunk.get_parent() == null:
 				add_child(cached_chunk)
 
-			var insert_elapsed_usec := Time.get_ticks_usec() - insert_start_usec
-			if insert_elapsed_usec > 3000:
-				var elapsed_ms := float(insert_elapsed_usec) / 1000.0
-				print_rich("[color=red]STUTTER WARNING: Chunk insertion took %0.2f ms[/color]" % elapsed_ms)
+			var time_add_child := Time.get_ticks_usec() - t_ac_start
+			if time_add_child > 2000:
+				var total_ms := float(time_add_child) / 1000.0
+				print_rich("[color=red]STUTTER WARNING: Chunk insertion took %0.2f ms | Time_NodeCreation: 0 us | Time_MeshAssign: 0 us | Time_CollisionAssign: 0 us | Time_AddChild: %d us[/color]" % [
+					total_ms,
+					time_add_child
+				])
 
 			_chunks[cp] = cached_chunk
 			chunk_loaded.emit(cp)
@@ -190,27 +193,44 @@ func _process(_delta: float) -> void:
 			var collision_shape: ConcavePolygonShape3D = chunk_entry.get("collision_shape", null)
 			last_worker_gen_time_ms = chunk_entry.get("worker_time_ms", 0.0)
 
+			# 1. Time_NodeCreation: Time to new() the MeshInstance3D/StaticBody3D
+			var t_nc_start := Time.get_ticks_usec()
 			var chunk := VoxelChunk.new()
 			chunk.name = "Chunk_%d_%d" % [cp.x, cp.y]
 			chunk.chunk_pos = cp
 			chunk.voxel_world = self
-
-			var t_copy0 := Time.get_ticks_usec()
 			chunk.load_from_flat(flat)
-			last_main_voxel_copy_time_ms = float(Time.get_ticks_usec() - t_copy0) / 1000.0
+			chunk.setup_nodes()
+			var time_node_creation := Time.get_ticks_usec() - t_nc_start
 
-			# Self-Profiling Code: Wrap add_child and mesh/collision assignment block
-			var insert_start_usec := Time.get_ticks_usec()
-
-			add_child(chunk)
+			# 2. Time_MeshAssign: Time to execute mesh_instance.mesh = ...
+			var t_ma_start := Time.get_ticks_usec()
 			last_main_mesh_upload_time_ms = chunk.apply_mesh_data(surfaces)
-			if collision_shape != null:
-				chunk.apply_collision_data(collision_shape)
+			var time_mesh_assign := Time.get_ticks_usec() - t_ma_start
 
-			var insert_elapsed_usec := Time.get_ticks_usec() - insert_start_usec
-			if insert_elapsed_usec > 3000:
-				var elapsed_ms := float(insert_elapsed_usec) / 1000.0
-				print_rich("[color=red]STUTTER WARNING: Chunk insertion took %0.2f ms[/color]" % elapsed_ms)
+			# 3. Time_CollisionAssign: Time to execute collision.shape = ...
+			var t_ca_start := Time.get_ticks_usec()
+			if chunk._col_shape != null:
+				chunk._col_shape.shape = collision_shape
+			var time_collision_assign := Time.get_ticks_usec() - t_ca_start
+			last_main_collision_time_ms = float(time_collision_assign) / 1000.0
+
+			# 4. Time_AddChild: Time to execute add_child()
+			var t_ac_start := Time.get_ticks_usec()
+			add_child(chunk)
+			var time_add_child := Time.get_ticks_usec() - t_ac_start
+
+			# Only print these 4 metrics IF total time exceeds 2000 microseconds (2ms)
+			var total_insertion_usec := time_node_creation + time_mesh_assign + time_collision_assign + time_add_child
+			if total_insertion_usec > 2000:
+				var total_ms := float(total_insertion_usec) / 1000.0
+				print_rich("[color=red]STUTTER WARNING: Chunk insertion took %0.2f ms | Time_NodeCreation: %d us | Time_MeshAssign: %d us | Time_CollisionAssign: %d us | Time_AddChild: %d us[/color]" % [
+					total_ms,
+					time_node_creation,
+					time_mesh_assign,
+					time_collision_assign,
+					time_add_child
+				])
 
 			_chunks[cp] = chunk
 			total_chunks_generated += 1
