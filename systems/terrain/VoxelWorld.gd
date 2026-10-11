@@ -17,6 +17,10 @@ extends Node3D
 ##     5. Prunes and cancels stale in-flight/queued tasks when player moves.
 ##     6. Per-chunk edit counter prevents stale worker results from overwriting newer mining edits.
 ##     7. Bounded result cache (max_cached_results) avoids unbounded memory growth.
+## - ZERO MAIN-THREAD STALLS:
+##     force_sync_spawn_chunks() dispatches spawn chunks through the async WorkerThreadPool
+##     pipeline and awaits a one-shot 'spawn_chunks_ready' signal — the main thread never
+##     runs noise/mesh/collision synchronously. Neighbor remeshes are always rate-limited.
 
 ## Number of chunk-radius to pre-load synchronously around spawn.
 ## IMPORTANT: Keep this at 1. Larger values freeze the main thread at startup.
@@ -25,6 +29,8 @@ const SPAWN_SYNC_RADIUS: int = 1
 signal chunk_loaded(chunk_pos: Vector2i)
 signal chunk_unloaded(chunk_pos: Vector2i)
 signal voxel_mined(world_cell: Vector3i, block_type: StringName)
+## Emitted once when all chunks requested by force_sync_spawn_chunks() are available.
+signal spawn_chunks_ready
 
 const DELTA_SAVE_PATH: String = "user://terrain_deltas.json"
 
@@ -96,6 +102,12 @@ var _remesh_queue: Array[Vector2i] = []
 var _remesh_set: Dictionary = {}
 
 var _last_player_chunk: Vector2i = Vector2i(99999, 99999)
+
+## === ASYNC SPAWN TRACKING ===
+## Set of chunk positions that must arrive from the worker pipeline before
+## spawn_chunks_ready is emitted. Populated by force_sync_spawn_chunks().
+var _spawn_pending_positions: Dictionary = {}  # Vector2i -> true
+var _spawn_waiting: bool = false
 
 ## Diagnostics & Frame Profiling
 var total_chunks_generated: int = 0
@@ -529,6 +541,13 @@ func _consume_ready_results(frame_start_usec: int) -> void:
 		_queue_neighbor_remesh(chunk)
 		processed += 1
 
+		# Check if this chunk satisfies a pending async spawn wait
+		if _spawn_waiting and _spawn_pending_positions.has(cp):
+			_spawn_pending_positions.erase(cp)
+			if _spawn_pending_positions.is_empty():
+				_spawn_waiting = false
+				spawn_chunks_ready.emit()
+
 ## Applies deferred collision shapes within frame budget
 func _process_pending_collisions(frame_start_usec: int) -> void:
 	if _pending_collision_queue.is_empty():
@@ -566,6 +585,21 @@ func _queue_neighbor_remesh(new_chunk: VoxelChunk) -> void:
 				if n_chunk.shares_solid_boundary_with(new_chunk, dir_to_new):
 					_remesh_queue.append(n_pos)
 					_remesh_set[n_pos] = true
+
+## Unconditionally enqueues all 4 cardinal neighbours of cp for rate-limited remeshing.
+## Used when a chunk is unloaded or removed: the neighbour faces become exposed regardless
+## of solid-boundary checks (which would fail on an already-freed chunk's data).
+func _enqueue_all_neighbors_for_remesh(cp: Vector2i) -> void:
+	var neighbors: Array[Vector2i] = [
+		cp + Vector2i(1, 0), cp + Vector2i(-1, 0),
+		cp + Vector2i(0, 1), cp + Vector2i(0, -1)
+	]
+	for n_pos in neighbors:
+		if _chunks.has(n_pos) and not _remesh_set.has(n_pos):
+			var n_chunk: VoxelChunk = _chunks[n_pos]
+			if is_instance_valid(n_chunk):
+				_remesh_queue.append(n_pos)
+				_remesh_set[n_pos] = true
 
 ## Updates at most max_remeshes_per_frame neighbor seams within budget
 func _process_remesh_queue(frame_start_usec: int) -> void:
@@ -674,7 +708,8 @@ func _load_or_generate_chunk_sync(chunk_pos: Vector2i) -> VoxelChunk:
 	last_chunk_build_time_ms = float(Time.get_ticks_usec() - t_start) / 1000.0
 	total_chunks_generated += 1
 	chunk_loaded.emit(chunk_pos)
-	_rebuild_neighbor_chunks(chunk_pos)
+	# Enqueue neighbor remeshes rate-limited — never trigger a synchronous rebuild cascade.
+	_queue_neighbor_remesh(chunk)
 	return chunk
 
 func _unload_chunk(chunk_pos: Vector2i) -> void:
@@ -708,7 +743,8 @@ func _unload_chunk(chunk_pos: Vector2i) -> void:
 					if is_instance_valid(oldest_chunk):
 						oldest_chunk.queue_free()
 
-		_rebuild_neighbor_chunks(chunk_pos)
+		# Enqueue neighbor remeshes rate-limited — never trigger synchronous rebuilds on unload.
+		_enqueue_all_neighbors_for_remesh(chunk_pos)
 		chunk_unloaded.emit(chunk_pos)
 
 ## Restores a previously cached chunk back into the active world.
@@ -733,29 +769,16 @@ func _restore_chunk_from_cache(chunk_pos: Vector2i, sync_rebuild: bool = false) 
 	_chunks[chunk_pos] = chunk
 	chunk_loaded.emit(chunk_pos)
 
-	if sync_rebuild:
-		_rebuild_neighbor_chunks(chunk_pos)
-	else:
-		_queue_neighbor_remesh(chunk)
+	# Always rate-limit neighbor remeshes via the queue — never synchronous rebuilds.
+	_queue_neighbor_remesh(chunk)
 
 	return chunk
 
+## Legacy stub kept for API compatibility. All callers have been migrated to
+## _enqueue_all_neighbors_for_remesh() which is rate-limited through the _remesh_queue.
+## Direct calls to this function should be avoided: they bypass the frame budget.
 func _rebuild_neighbor_chunks(cp: Vector2i) -> void:
-	var neighbors: Array[Vector2i] = [
-		cp + Vector2i(1, 0), cp + Vector2i(-1, 0),
-		cp + Vector2i(0, 1), cp + Vector2i(0, -1)
-	]
-	var current_chunk: VoxelChunk = _chunks.get(cp, null)
-	for n_pos in neighbors:
-		if _chunks.has(n_pos):
-			var n_chunk: VoxelChunk = _chunks[n_pos]
-			if is_instance_valid(n_chunk):
-				# If current_chunk is loaded, only rebuild if they actually share a solid boundary
-				if current_chunk != null:
-					var dir := cp - n_pos
-					if not n_chunk.shares_solid_boundary_with(current_chunk, dir):
-						continue
-				n_chunk.rebuild_mesh_and_collision()
+	_enqueue_all_neighbors_for_remesh(cp)
 
 func get_diagnostics() -> Dictionary:
 	return {
@@ -847,16 +870,60 @@ func _enqueue_neighbor_remesh_if_needed(n_pos: Vector2i, _trigger_chunk: VoxelCh
 # SPAWN SYSTEM
 # ============================================================
 
-## Pre-loads the spawn area synchronously (SPAWN_SYNC_RADIUS = 1 → 9 chunks max),
-## then waits one physics frame so PhysicsServer3D commits all CollisionShapes.
-## This is the ONLY safe way to call get_spawn_position() before placing the player.
+## Async spawn-area loader — ZERO main-thread stalls.
+##
+## Dispatches all required spawn-radius chunks through the WorkerThreadPool pipeline
+## (noise, greedy meshing, and collision geometry all run off the main thread).
+## Waits for the 'spawn_chunks_ready' signal, which is emitted by _consume_ready_results()
+## as each chunk lands. After all chunks are loaded, waits one physics_frame to guarantee
+## PhysicsServer3D has committed all CollisionShape3Ds before the caller queries spawn position.
+##
+## IMPORTANT: This replaces the old synchronous loop that ran rebuild_mesh_and_collision()
+## on the main thread for every spawn chunk — that caused 0-FPS stalls on startup.
 func force_sync_spawn_chunks(center_chunk_x: int = 0, center_chunk_z: int = 0) -> void:
+	# Collect positions that still need to be loaded.
+	var needed: Array[Vector2i] = []
 	for dx in range(-SPAWN_SYNC_RADIUS, SPAWN_SYNC_RADIUS + 1):
 		for dz in range(-SPAWN_SYNC_RADIUS, SPAWN_SYNC_RADIUS + 1):
 			var cp := Vector2i(center_chunk_x + dx, center_chunk_z + dz)
 			if not _chunks.has(cp):
-				_load_or_generate_chunk_sync(cp)
+				needed.append(cp)
+
+	if needed.is_empty():
+		# All spawn chunks already loaded — just sync one physics frame.
+		if is_inside_tree():
+			await get_tree().physics_frame
+		return
+
+	# Register which positions we are waiting for.
+	_spawn_pending_positions.clear()
+	for cp in needed:
+		_spawn_pending_positions[cp] = true
+	_spawn_waiting = true
+
+	# Dispatch each needed chunk into the async pipeline.
+	# Chunks already cached are restored immediately (cheap).
+	# Everything else goes to WorkerThreadPool.
+	for cp in needed:
+		if _chunk_cache.has(cp):
+			_restore_chunk_from_cache(cp, false)
+			# Restored from cache — remove from pending immediately.
+			_spawn_pending_positions.erase(cp)
+		elif not _in_flight.has(cp) and not _pending_set.has(cp):
+			_pending_queue.push_front(cp)   # Insert at front = highest priority.
+			_pending_set[cp] = true
+
+	# If everything was cache-restored, signal is never emitted — clear flag manually.
+	if _spawn_pending_positions.is_empty():
+		_spawn_waiting = false
+		if is_inside_tree():
+			await get_tree().physics_frame
+		return
+
+	# Yield until _consume_ready_results() emits spawn_chunks_ready.
 	if is_inside_tree():
+		await spawn_chunks_ready
+		# One more physics frame so CollisionShapes are committed to PhysicsServer3D.
 		await get_tree().physics_frame
 
 func verify_spawn_physics(candidate_pos: Vector3, exclude_rids: Array[RID] = []) -> bool:
