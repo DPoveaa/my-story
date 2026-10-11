@@ -430,7 +430,7 @@ static func build_mesh_data_from_flat(
 				var right_solid: bool
 				if lx + 1 < SIZE_X:
 					right_solid = flat[base_xy + 512 + lz] != 0
-				elif right_border != null:
+				elif right_border != null and not right_border.is_empty():
 					right_solid = bool(right_border[ly * 16 + lz])
 				else:
 					right_solid = false
@@ -441,7 +441,7 @@ static func build_mesh_data_from_flat(
 				var left_solid: bool
 				if lx > 0:
 					left_solid = flat[base_xy - 512 + lz] != 0
-				elif left_border != null:
+				elif left_border != null and not left_border.is_empty():
 					left_solid = bool(left_border[ly * 16 + lz])
 				else:
 					left_solid = false
@@ -532,7 +532,7 @@ static func build_mesh_data_from_flat(
 				var front_solid: bool
 				if lz + 1 < SIZE_Z:
 					front_solid = flat[base_xy + lz + 1] != 0
-				elif front_border != null:
+				elif front_border != null and not front_border.is_empty():
 					front_solid = bool(front_border[lx * 32 + ly])
 				else:
 					front_solid = false
@@ -543,7 +543,7 @@ static func build_mesh_data_from_flat(
 				var back_solid: bool
 				if lz > 0:
 					back_solid = flat[base_xy + lz - 1] != 0
-				elif back_border != null:
+				elif back_border != null and not back_border.is_empty():
 					back_solid = bool(back_border[lx * 32 + ly])
 				else:
 					back_solid = false
@@ -821,10 +821,10 @@ func rebuild_mesh_and_collision() -> void:
 		n_back = chunks.get(chunk_pos + Vector2i(0, -1), null)
 		n_front = chunks.get(chunk_pos + Vector2i(0, 1), null)
 
-	var left_border: Variant = n_left.get_x_border_slice(SIZE_X - 1) if n_left != null else null
-	var right_border: Variant = n_right.get_x_border_slice(0) if n_right != null else null
-	var back_border: Variant = n_back.get_z_border_slice(SIZE_Z - 1) if n_back != null else null
-	var front_border: Variant = n_front.get_z_border_slice(0) if n_front != null else null
+	var left_border: Array = n_left.get_x_border_slice(SIZE_X - 1) if n_left != null else []
+	var right_border: Array = n_right.get_x_border_slice(0) if n_right != null else []
+	var back_border: Array = n_back.get_z_border_slice(SIZE_Z - 1) if n_back != null else []
+	var front_border: Array = n_front.get_z_border_slice(0) if n_front != null else []
 
 	var mesh_data := build_mesh_data_from_flat(voxels, left_border, right_border, back_border, front_border)
 	apply_mesh_and_collision_data(mesh_data["surfaces"], mesh_data["collision_faces"])

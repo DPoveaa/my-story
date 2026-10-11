@@ -92,9 +92,6 @@ var _in_flight_count: int = 0
 ## Protected by _results_mutex.
 var _results_mutex: Mutex = Mutex.new()
 var chunks_ready: Array = []
-var _results_ready: Array:
-	get: return chunks_ready
-	set(val): chunks_ready = val
 
 ## Rate-limited neighbor remesh queue for boundary seam cleanup (deduplicated)
 var _remesh_queue: Array[Vector2i] = []
@@ -168,7 +165,7 @@ func _process(_delta: float) -> void:
 		var cached_chunk: VoxelChunk = chunk_entry.get("cached_chunk", null)
 
 		if cached_chunk != null:
-			var t_ac_start := Time.get_ticks_usec()
+			var t_ti_start := Time.get_ticks_usec()
 
 			cached_chunk.collision_layer = 1
 			cached_chunk.collision_mask = 7
@@ -176,12 +173,12 @@ func _process(_delta: float) -> void:
 			if cached_chunk.get_parent() == null:
 				add_child(cached_chunk)
 
-			var time_add_child := Time.get_ticks_usec() - t_ac_start
-			if time_add_child > 2000:
-				var total_ms := float(time_add_child) / 1000.0
-				print_rich("[color=red]STUTTER WARNING: Chunk insertion took %0.2f ms | Time_NodeCreation: 0 us | Time_MeshAssign: 0 us | Time_CollisionAssign: 0 us | Time_AddChild: %d us[/color]" % [
+			var time_tree_insert := Time.get_ticks_usec() - t_ti_start
+			if time_tree_insert > 2000:
+				var total_ms := float(time_tree_insert) / 1000.0
+				print_rich("[color=red]STUTTER WARNING: Chunk insertion took %0.2f ms | Time_Instantiate: 0 us | Time_MeshAssign: 0 us | Time_CollisionAssign: 0 us | Time_TreeInsert: %d us[/color]" % [
 					total_ms,
-					time_add_child
+					time_tree_insert
 				])
 
 			_chunks[cp] = cached_chunk
@@ -190,13 +187,11 @@ func _process(_delta: float) -> void:
 		else:
 			var flat: PackedByteArray = chunk_entry["flat"]
 			var compiled_mesh: ArrayMesh = chunk_entry.get("mesh", null)
-			if compiled_mesh == null and chunk_entry.has("surfaces"):
-				compiled_mesh = VoxelChunk.build_array_mesh_from_surfaces(chunk_entry["surfaces"])
 			var collision_shape: ConcavePolygonShape3D = chunk_entry.get("collision_shape", null)
 			last_worker_gen_time_ms = chunk_entry.get("worker_time_ms", 0.0)
 
-			# 1. Time_NodeCreation: Time to new() the MeshInstance3D/StaticBody3D
-			var t_nc_start := Time.get_ticks_usec()
+			# 1. Time_Instantiate: Time taken to preload().instantiate() or VoxelChunk.new()
+			var t_inst_start := Time.get_ticks_usec()
 			var chunk := VoxelChunk.new()
 			chunk.name = "Chunk_%d_%d" % [cp.x, cp.y]
 			chunk.chunk_pos = cp
@@ -204,36 +199,36 @@ func _process(_delta: float) -> void:
 			chunk.position = Vector3(float(cp.x * VoxelChunk.SIZE_X), 0.0, float(cp.y * VoxelChunk.SIZE_Z))
 			chunk.load_from_flat(flat)
 			chunk.setup_nodes()
-			var time_node_creation := Time.get_ticks_usec() - t_nc_start
+			var time_instantiate := Time.get_ticks_usec() - t_inst_start
 
-			# 2. Time_MeshAssign: Time to execute mesh_instance.mesh = ...
+			# 2. Time_MeshAssign: Time taken to assign node.mesh = ...
 			var t_ma_start := Time.get_ticks_usec()
 			chunk._mesh_inst.mesh = compiled_mesh
 			var time_mesh_assign := Time.get_ticks_usec() - t_ma_start
 			last_main_mesh_upload_time_ms = float(time_mesh_assign) / 1000.0
 
-			# 3. Time_CollisionAssign: Time to execute collision.shape = ...
+			# 3. Time_CollisionAssign: Time taken to assign node.shape = ...
 			var t_ca_start := Time.get_ticks_usec()
 			if chunk._col_shape != null:
 				chunk._col_shape.shape = collision_shape
 			var time_collision_assign := Time.get_ticks_usec() - t_ca_start
 			last_main_collision_time_ms = float(time_collision_assign) / 1000.0
 
-			# 4. Time_AddChild: Time to execute add_child()
-			var t_ac_start := Time.get_ticks_usec()
+			# 4. Time_TreeInsert: Time taken to call add_child()
+			var t_ti_start := Time.get_ticks_usec()
 			add_child(chunk)
-			var time_add_child := Time.get_ticks_usec() - t_ac_start
+			var time_tree_insert := Time.get_ticks_usec() - t_ti_start
 
 			# Only print these 4 metrics IF total time exceeds 2000 microseconds (2ms)
-			var total_insertion_usec := time_node_creation + time_mesh_assign + time_collision_assign + time_add_child
+			var total_insertion_usec := time_instantiate + time_mesh_assign + time_collision_assign + time_tree_insert
 			if total_insertion_usec > 2000:
 				var total_ms := float(total_insertion_usec) / 1000.0
-				print_rich("[color=red]STUTTER WARNING: Chunk insertion took %0.2f ms | Time_NodeCreation: %d us | Time_MeshAssign: %d us | Time_CollisionAssign: %d us | Time_AddChild: %d us[/color]" % [
+				print_rich("[color=red]STUTTER WARNING: Chunk insertion took %0.2f ms | Time_Instantiate: %d us | Time_MeshAssign: %d us | Time_CollisionAssign: %d us | Time_TreeInsert: %d us[/color]" % [
 					total_ms,
-					time_node_creation,
+					time_instantiate,
 					time_mesh_assign,
 					time_collision_assign,
-					time_add_child
+					time_tree_insert
 				])
 
 			_chunks[cp] = chunk
@@ -492,10 +487,10 @@ func _dispatch_pending_tasks() -> void:
 		var n_back: VoxelChunk = _chunks.get(cp + Vector2i(0, -1), null)
 		var n_front: VoxelChunk = _chunks.get(cp + Vector2i(0, 1), null)
 
-		var left_border: Variant = n_left.get_x_border_slice(VoxelChunk.SIZE_X - 1) if n_left != null else null
-		var right_border: Variant = n_right.get_x_border_slice(0) if n_right != null else null
-		var back_border: Variant = n_back.get_z_border_slice(VoxelChunk.SIZE_Z - 1) if n_back != null else null
-		var front_border: Variant = n_front.get_z_border_slice(0) if n_front != null else null
+		var left_border: Array = n_left.get_x_border_slice(VoxelChunk.SIZE_X - 1) if n_left != null else []
+		var right_border: Array = n_right.get_x_border_slice(0) if n_right != null else []
+		var back_border: Array = n_back.get_z_border_slice(VoxelChunk.SIZE_Z - 1) if n_back != null else []
+		var front_border: Array = n_front.get_z_border_slice(0) if n_front != null else []
 
 		var cp_captured := cp
 
@@ -789,7 +784,7 @@ func _unload_chunk(chunk_pos: Vector2i) -> void:
 		chunk_unloaded.emit(chunk_pos)
 
 ## Restores a previously cached chunk back into the active world.
-func _restore_chunk_from_cache(chunk_pos: Vector2i, sync_rebuild: bool = false) -> VoxelChunk:
+func _restore_chunk_from_cache(chunk_pos: Vector2i, _sync_rebuild: bool = false) -> VoxelChunk:
 	if not _chunk_cache.has(chunk_pos):
 		return null
 
