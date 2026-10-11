@@ -1235,8 +1235,8 @@ func test_voxel_chunk_boundary_collision_continuity() -> bool:
 	var world := VoxelWorldScript.new()
 	world.seed_value = 1337
 
-	var c1 = world._load_or_generate_chunk(Vector2i(0, 0))
-	var c2 = world._load_or_generate_chunk(Vector2i(1, 0))
+	var c1 = world._load_or_generate_chunk_sync(Vector2i(0, 0))
+	var c2 = world._load_or_generate_chunk_sync(Vector2i(1, 0))
 
 	if c1 == null or c2 == null:
 		world.queue_free()
@@ -1327,13 +1327,13 @@ func test_voxel_terrain_deltas_persistence_across_unload() -> bool:
 	world.seed_value = 1337
 
 	var target_cell := Vector3i(0, 5, 0)
-	var chunk = world._load_or_generate_chunk(Vector2i(0, 0))
+	var chunk = world._load_or_generate_chunk_sync(Vector2i(0, 0))
 	chunk.set_voxel_local(0, 5, 0, &"stone")
 
 	world.mine_voxel(target_cell)
 
 	world._unload_chunk(Vector2i(0, 0))
-	var reloaded_chunk = world._load_or_generate_chunk(Vector2i(0, 0))
+	var reloaded_chunk = world._load_or_generate_chunk_sync(Vector2i(0, 0))
 
 	if reloaded_chunk.get_voxel_local(0, 5, 0) != &"":
 		world.queue_free()

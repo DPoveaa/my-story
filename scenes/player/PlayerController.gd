@@ -760,6 +760,8 @@ func _update_raycast() -> void:
 		if owner_id >= 0:
 			col_shape = hit_collider.shape_owner_get_owner(owner_id) as CollisionShape3D
 
+		var vox_world := _get_voxel_world()
+
 		if col_shape != null and col_shape.has_meta("grid_cell"):
 			target_is_terrain = false
 			var hit_cell: Vector3i = col_shape.get_meta("grid_cell")
@@ -777,7 +779,6 @@ func _update_raycast() -> void:
 			)
 			target_face_dir = _normal_to_cell_offset(hit_normal)
 
-			var vox_world := _get_voxel_world()
 			if vox_world != null and vox_world.has_method("is_solid_block") and vox_world.is_solid_block(target_remove_cell):
 				target_is_terrain = true
 				target_terrain_cell = target_remove_cell
@@ -790,8 +791,11 @@ func _update_raycast() -> void:
 		if orchestrator != null:
 			blocked_by_debris = orchestrator.is_cell_blocked_by_debris(target_place_cell, grid.cell_size)
 		var overlaps_player: bool = is_cell_overlapping_player(target_place_cell, grid.cell_size)
+		var blocked_by_terrain: bool = false
+		if vox_world != null and vox_world.has_method("is_solid_block"):
+			blocked_by_terrain = vox_world.is_solid_block(target_place_cell)
 
-		can_place_target = grid_valid and not blocked_by_debris and not overlaps_player
+		can_place_target = grid_valid and not blocked_by_terrain and not blocked_by_debris and not overlaps_player
 
 		if target_is_terrain:
 			var mat_disp := BlockTypeCatalog.get_display_name(target_terrain_type)
@@ -953,6 +957,9 @@ func _handle_place_action() -> void:
 		if is_cell_overlapping_player(target_place_cell, grid.cell_size):
 			return
 		if orchestrator != null and orchestrator.is_cell_blocked_by_debris(target_place_cell, grid.cell_size):
+			return
+		var vox := _get_voxel_world()
+		if vox != null and vox.has_method("is_solid_block") and vox.is_solid_block(target_place_cell):
 			return
 
 		var b_type := get_selected_type()

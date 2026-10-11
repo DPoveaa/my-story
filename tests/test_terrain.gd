@@ -173,7 +173,7 @@ func test_spawn_chunk_collision_shape_exists() -> void:
 	var world: VoxelWorld = VoxelWorldScript.new()
 	world.seed_value = 1337
 	# Directly generate spawn chunk (same as get_spawn_position does internally)
-	var chunk: VoxelChunk = world._load_or_generate_chunk(Vector2i(0, 0))
+	var chunk: VoxelChunk = world._load_or_generate_chunk_sync(Vector2i(0, 0))
 	_assert(chunk != null, "Spawn chunk (0,0) generated successfully")
 	if chunk != null:
 		_assert(chunk._col_shape != null, "Spawn chunk has a CollisionShape3D node")
@@ -206,7 +206,7 @@ func test_force_sync_spawn_chunks_generates_radius() -> void:
 	var radius := VoxelWorld.SPAWN_SYNC_RADIUS
 	for dx in range(-radius, radius + 1):
 		for dz in range(-radius, radius + 1):
-			world._load_or_generate_chunk(Vector2i(dx, dz))
+			world._load_or_generate_chunk_sync(Vector2i(dx, dz))
 	var expected := (2 * radius + 1) * (2 * radius + 1)
 	_assert(world._chunks.size() == expected, "force_sync_spawn_chunks generates %d chunks for radius %d (got %d)" % [expected, radius, world._chunks.size()])
 
@@ -215,9 +215,9 @@ func test_voxel_world_generation_queue_deduplication() -> void:
 	var world: VoxelWorld = VoxelWorldScript.new()
 	world.seed_value = 1337
 	world.update_loaded_chunks(Vector3(0, 0, 0))
-	var q_size_1 := world._generation_queue.size()
+	var q_size_1: int = world._pending_queue.size()
 	world.update_loaded_chunks(Vector3(0, 0, 0))
-	var q_size_2 := world._generation_queue.size()
+	var q_size_2: int = world._pending_queue.size()
 	_assert(q_size_1 == q_size_2, "Chunk update deduplicates queued chunk generation requests")
 
 func test_voxel_world_mine_single_voxel() -> void:
@@ -279,7 +279,7 @@ func test_unloaded_neighbor_boundary_face_preservation() -> void:
 	var world: VoxelWorld = VoxelWorldScript.new()
 	world.seed_value = 1337
 	# Generate only chunk (0,0) without neighbor (1,0) loaded
-	var chunk: VoxelChunk = world._load_or_generate_chunk(Vector2i(0, 0))
+	var chunk: VoxelChunk = world._load_or_generate_chunk_sync(Vector2i(0, 0))
 
 	# Border voxel at x=15 (right boundary facing unloaded chunk 1,0)
 	var border_solid := chunk.is_solid_local(15, 10, 5)
@@ -292,14 +292,14 @@ func test_unloaded_neighbor_boundary_face_preservation() -> void:
 func test_watertight_chunk_boundary_rebuild_on_load_unload() -> void:
 	var world: VoxelWorld = VoxelWorldScript.new()
 	world.seed_value = 1337
-	var c0 := world._load_or_generate_chunk(Vector2i(0, 0))
-	var initial_faces := 0
+	var c0: VoxelChunk = world._load_or_generate_chunk_sync(Vector2i(0, 0))
+	var initial_faces: int = 0
 	if c0._col_shape != null and c0._col_shape.shape != null:
 		initial_faces = c0._col_shape.shape.get_faces().size()
 
 	# Loading neighbor chunk (1,0) rebuilds c0 to cull shared internal boundary faces
-	var c1 := world._load_or_generate_chunk(Vector2i(1, 0))
-	var faces_after_neighbor := 0
+	var c1: VoxelChunk = world._load_or_generate_chunk_sync(Vector2i(1, 0))
+	var faces_after_neighbor: int = 0
 	if c0._col_shape != null and c0._col_shape.shape != null:
 		faces_after_neighbor = c0._col_shape.shape.get_faces().size()
 
@@ -307,7 +307,7 @@ func test_watertight_chunk_boundary_rebuild_on_load_unload() -> void:
 
 	# Unloading neighbor chunk (1,0) rebuilds c0 to restore exposed boundary faces
 	world._unload_chunk(Vector2i(1, 0))
-	var faces_after_unload := 0
+	var faces_after_unload: int = 0
 	if c0._col_shape != null and c0._col_shape.shape != null:
 		faces_after_unload = c0._col_shape.shape.get_faces().size()
 

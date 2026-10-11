@@ -531,9 +531,8 @@ func reconstruct_single_cell(blueprint: BlueprintData, anchor_cell: Vector3i, ta
 				if (world_a == target_world_cell or world_b == target_world_cell) and grid.has_block(world_a) and grid.has_block(world_b):
 					var is_mortared: bool = bool(j_item.get("is_mortared", false))
 					var strength: float = float(j_item.get("strength", 50.0))
-					if is_mortared and joint_sys.has_method("has_intact_joint"):
-						if not joint_sys.has_intact_joint(world_a, world_b):
-							joint_sys.bond_adjacent(world_a, world_b, strength)
+					if is_mortared and joint_sys != null:
+						joint_sys.bond_adjacent(world_a, world_b, strength)
 
 	var stab := _get_stability()
 	if stab != null and stab.has_method("recalculate_stability"):

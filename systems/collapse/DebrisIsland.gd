@@ -364,6 +364,12 @@ func apply_impact_damage(hit_cell: Vector3i, impact_energy: float) -> Array:
 	if impact_energy < 8.0:
 		return broken
 
+	if constituent_blocks.has(hit_cell):
+		var bd: BlockData = constituent_blocks[hit_cell]
+		var max_dur := BlockTypeCatalog.get_max_durability(bd.block_type)
+		var dmg := (impact_energy / 200.0) / maxf(0.5, max_dur)
+		bd.durability = maxf(0.05, bd.durability - dmg)
+
 	var relevant_joints: Array = []
 	for j in internal_joints.values():
 		if not j.is_broken and j.connects_cell(hit_cell):

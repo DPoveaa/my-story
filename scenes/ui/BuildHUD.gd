@@ -25,6 +25,7 @@ var player: CharacterBody3D = null
 
 ## Dynamically created label for raw material counts (no .tscn edit required).
 var _raw_mats_label: Label = null
+var _objective_label: Label = null
 
 ## Blueprint Save Modal Nodes
 var _save_modal: PanelContainer = null
@@ -51,6 +52,10 @@ var _load_inspect_btn: Button = null
 var _load_reconstruct_btn: Button = null
 var _load_delete_btn: Button = null
 
+func _init() -> void:
+	if _save_modal == null:
+		_create_blueprint_dialogs()
+
 func _ready() -> void:
 	if grid_system == null and has_node("/root/GridSystem"):
 		grid_system = get_node("/root/GridSystem")
@@ -61,9 +66,18 @@ func _ready() -> void:
 	_raw_mats_label.visible = false
 	_raw_mats_label.add_theme_font_size_override("font_size", 14)
 	_raw_mats_label.add_theme_color_override("font_color", Color(0.95, 0.80, 0.40))
+
+	_objective_label = Label.new()
+	_objective_label.name = "ObjectiveLabel"
+	_objective_label.text = ""
+	_objective_label.visible = false
+	_objective_label.add_theme_font_size_override("font_size", 14)
+	_objective_label.add_theme_color_override("font_color", Color(0.35, 0.85, 1.0))
+
 	var hbox := get_node_or_null("PanelTop/HBox")
 	if hbox != null:
 		hbox.add_child(_raw_mats_label)
+		hbox.add_child(_objective_label)
 
 	_visualizer = BlueprintVisualizerScript.new()
 	_visualizer.name = "BlueprintVisualizer"
@@ -77,6 +91,26 @@ func _ready() -> void:
 		if not inv.inventory_changed.is_connected(_on_inventory_changed):
 			inv.inventory_changed.connect(_on_inventory_changed)
 		_on_inventory_changed(inv.get_materials())
+
+	if has_node("/root/SurvivalObjectiveManager"):
+		var obj = get_node("/root/SurvivalObjectiveManager")
+		if not obj.objective_updated.is_connected(_on_objective_updated):
+			obj.objective_updated.connect(_on_objective_updated)
+		if not obj.cycle_completed.is_connected(_on_objective_cycle_completed):
+			obj.cycle_completed.connect(_on_objective_cycle_completed)
+		_on_objective_updated(int(obj.current_stage), obj.current_progress, obj.get_target_for_stage(obj.current_stage), obj.get_objective_display_text())
+
+func _on_objective_updated(_stage: int, _cur: int, _target: int, desc: String) -> void:
+	if _objective_label == null:
+		return
+	_objective_label.text = "[Goal: " + desc + "]"
+	_objective_label.visible = true
+
+func _on_objective_cycle_completed(cycle: int, reward_desc: String) -> void:
+	if _objective_label == null:
+		return
+	_objective_label.text = "★ Cycle %d Complete! %s" % [cycle, reward_desc]
+	_objective_label.visible = true
 
 func _on_inventory_changed(materials: Dictionary) -> void:
 	if _raw_mats_label == null:
@@ -199,24 +233,46 @@ func open_save_blueprint_dialog_bounded(min_cell: Vector3i, max_cell: Vector3i) 
 	_save_min_cell = min_cell
 	_save_max_cell = max_cell
 	_has_area_selected = true
-	_save_info_label.text = "Bounded Area: (%d,%d,%d) to (%d,%d,%d)" % [
-		min_cell.x, min_cell.y, min_cell.z, max_cell.x, max_cell.y, max_cell.z
-	]
+	if _save_info_label != null:
+		_save_info_label.text = "Bounded Area: (%d,%d,%d) to (%d,%d,%d)" % [
+			min_cell.x, min_cell.y, min_cell.z, max_cell.x, max_cell.y, max_cell.z
+		]
+	if _save_feedback_label != null:
+		_save_feedback_label.text = ""
+	if _save_btn != null:
+		_save_btn.disabled = false
 
 ## Opens the Save Blueprint dialog, releases mouse capture, and focuses input.
 func open_save_blueprint_dialog() -> void:
 	close_all_modals()
 	if _save_modal == null:
-		return
+		_create_blueprint_dialogs()
 	_save_confirm_overwrite = false
 	if _save_btn != null:
 		_save_btn.text = "Save"
 	if not _has_area_selected:
 		var count: int = grid_system.get_block_count() if grid_system != null else 0
-		_save_info_label.text = "Structure to Save: %d block(s) in grid" % count
-	_save_feedback_label.text = ""
-	_save_btn.disabled = false
-	_save_modal.visible = true
+		if count == 0:
+			if _save_info_label != null:
+				_save_info_label.text = "Structure to Save: 0 block(s) in grid"
+			if _save_feedback_label != null:
+				_save_feedback_label.text = "Grid is empty. Place blocks before saving."
+			if _save_btn != null:
+				_save_btn.disabled = true
+		else:
+			if _save_info_label != null:
+				_save_info_label.text = "Structure to Save: %d block(s) in grid" % count
+			if _save_feedback_label != null:
+				_save_feedback_label.text = ""
+			if _save_btn != null:
+				_save_btn.disabled = false
+	else:
+		if _save_feedback_label != null:
+			_save_feedback_label.text = ""
+		if _save_btn != null:
+			_save_btn.disabled = false
+	if _save_modal != null:
+		_save_modal.visible = true
 	if player != null and player.has_method("set_mouse_capture"):
 		player.set_mouse_capture(false)
 	if _save_name_input != null and _save_name_input.is_inside_tree():
@@ -227,15 +283,20 @@ func open_save_blueprint_dialog() -> void:
 func open_load_blueprint_dialog(anchor: Vector3i = Vector3i.ZERO) -> void:
 	close_all_modals()
 	if _load_modal == null:
-		return
+		_create_blueprint_dialogs()
 
-	_anchor_x.value = anchor.x
-	_anchor_y.value = anchor.y
-	_anchor_z.value = anchor.z
-	_load_feedback_label.text = ""
+	if _anchor_x != null:
+		_anchor_x.value = anchor.x
+	if _anchor_y != null:
+		_anchor_y.value = anchor.y
+	if _anchor_z != null:
+		_anchor_z.value = anchor.z
+	if _load_feedback_label != null:
+		_load_feedback_label.text = ""
 	_refresh_blueprint_list()
 
-	_load_modal.visible = true
+	if _load_modal != null:
+		_load_modal.visible = true
 	if player != null and player.has_method("set_mouse_capture"):
 		player.set_mouse_capture(false)
 
@@ -772,7 +833,7 @@ func _on_load_confirm_pressed() -> void:
 			"DEBRIS_COLLISION": reason_msg = "Obstructed by fallen debris"
 			"PLAYER_OVERLAP": reason_msg = "Overlaps player position"
 			"EMPTY_BLUEPRINT": reason_msg = "Blueprint is empty"
-		_load_feedback_label.text = "Cannot place [%s]: %d conflict(s)%s" % [reason_msg, conflicts.size(), conflict_str]
+		_load_feedback_label.text = "Cannot place [%s]: %d conflict(s)%s" % [reason, conflicts.size(), conflict_str]
 		_load_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
 		return
 

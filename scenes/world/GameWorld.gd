@@ -54,6 +54,13 @@ func _ready() -> void:
 		stability_system.terrain_generator = voxel_world
 		stability_system.require_joints_for_lateral_support = true
 
+	# Wire Survival Objectives
+	if has_node("/root/SurvivalObjectiveManager"):
+		var obj_mgr = get_node("/root/SurvivalObjectiveManager")
+		obj_mgr.is_active = (current_game_mode == GameMode.SURVIVAL)
+		if voxel_world != null and not voxel_world.voxel_mined.is_connected(obj_mgr.on_voxel_mined):
+			voxel_world.voxel_mined.connect(obj_mgr.on_voxel_mined)
+
 	# Wire HUD
 	if build_hud != null:
 		build_hud.grid_system = grid_system

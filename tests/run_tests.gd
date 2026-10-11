@@ -10,6 +10,7 @@ const TestMortarBrushScript = preload("res://tests/test_mortar_brush.gd")
 const TestM3Script = preload("res://tests/test_m3.gd")
 const TestM4Script = preload("res://tests/test_m4.gd")
 const TestTerrainScript = preload("res://tests/test_terrain.gd")
+const TestSurvivalLoopScript = preload("res://tests/test_survival_loop.gd")
 
 func _init() -> void:
 	print("Initializing test runner...")
@@ -43,9 +44,12 @@ func _init() -> void:
 	var suite_terrain = TestTerrainScript.new()
 	var success_terrain: bool = suite_terrain.run_all()
 
-	if success_brush and success1 and success2 and success3 and success4 and success5 and success6 and success7 and success8 and success_terrain:
+	var suite_survival = TestSurvivalLoopScript.new()
+	var success_survival: bool = suite_survival.run_all()
+
+	if success_brush and success1 and success2 and success3 and success4 and success5 and success6 and success7 and success8 and success_terrain and success_survival:
 		print("==================================================")
-		print("ALL TEST SUITES (INCLUDING TERRAIN) PASSED SUCCESSFULLY!")
+		print("ALL TEST SUITES (INCLUDING TERRAIN & SURVIVAL) PASSED SUCCESSFULLY!")
 		print("==================================================")
 		quit(0)
 	else:

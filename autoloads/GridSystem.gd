@@ -117,7 +117,7 @@ func remove_block(cell: Vector3i) -> BlockData:
 
 ## Atomically removes a batch of cells from the grid (used during collapse).
 ## Returns a Dictionary[Vector3i, BlockData] of the removed blocks.
-func remove_cells_batch(cells: Array[Vector3i]) -> Dictionary:
+func remove_cells_batch(cells: Array) -> Dictionary:
 	var removed_map: Dictionary = {}
 	var removed_keys: Array[Vector3i] = []
 	for cell in cells:

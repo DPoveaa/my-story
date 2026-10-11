@@ -23,6 +23,7 @@ StabilitySystem="*res://autoloads/StabilitySystem.gd"
 InputManager="*res://autoloads/InputManager.gd"
 BlueprintManager="*res://autoloads/BlueprintManager.gd"
 InventoryManager="*res://autoloads/InventoryManager.gd"
+SurvivalObjectiveManager="*res://autoloads/SurvivalObjectiveManager.gd"
 
 [display]
 
