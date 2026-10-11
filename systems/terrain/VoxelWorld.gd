@@ -80,9 +80,12 @@ var _chunk_generation: Dictionary = {}  # Vector2i -> int
 
 ## === THREADED PIPELINE ===
 
-## Chunks waiting to be dispatched to background thread (sorted, deduplicated)
-var _pending_queue: Array[Vector2i] = []
+## Request Queue: Missing chunk coordinates waiting to be dispatched (throttled)
+var _chunks_to_request: Array = []
 var _pending_set: Dictionary = {}  # Vector2i -> bool
+
+## Garbage Queue: Out of bounds chunks waiting to be freed (throttled)
+var _chunks_to_free: Array = []
 
 ## Chunks currently running Stage 1+2 on a background thread.
 var _in_flight: Dictionary = {}       # Vector2i -> int (generation at dispatch)
@@ -92,6 +95,7 @@ var _in_flight_count: int = 0
 ## Protected by _results_mutex.
 var _results_mutex: Mutex = Mutex.new()
 var chunks_ready: Array = []
+var _pending_queue: Array = _chunks_to_request
 
 ## Rate-limited neighbor remesh queue for boundary seam cleanup (deduplicated)
 var _remesh_queue: Array[Vector2i] = []
@@ -123,134 +127,122 @@ func _ready() -> void:
 	load_terrain_deltas()
 
 func _process(_delta: float) -> void:
-	var frame_start_usec := Time.get_ticks_usec()
-	_dispatch_pending_tasks()
+	var frame_start_time := Time.get_ticks_usec()
+	var chunks_added_this_frame := 0
 
-	# STRICT Frame-Throttling (The "Turnstile"):
-	# Pop ONLY ONE chunk, call add_child(), set its mesh/collision, and immediately return.
-	# 1 frame = 1 chunk insertion. DO NOT use a while loop that drains the queue.
-	var chunk_entry: Dictionary = {}
-	_results_mutex.lock()
-	while not chunks_ready.is_empty():
-		var candidate: Dictionary = chunks_ready.pop_front()
-		var candidate_pos: Vector2i = candidate["pos"]
-		var result_generation: int = candidate.get("generation", 0)
-
-		_in_flight.erase(candidate_pos)
-		_in_flight_count = maxi(0, _in_flight_count - 1)
-
-		# Prune obsolete task if player has moved away
-		if _last_player_chunk != Vector2i(99999, 99999):
-			var dist_x := absi(candidate_pos.x - _last_player_chunk.x)
-			var dist_z := absi(candidate_pos.y - _last_player_chunk.y)
-			if dist_x > view_distance_chunks or dist_z > view_distance_chunks:
-				cancelled_tasks_count += 1
-				continue
-
-		# Discard stale results: chunk was edited after worker was dispatched
-		var current_gen: int = _chunk_generation.get(candidate_pos, 0)
-		if result_generation < current_gen:
-			stale_results_discarded += 1
-			continue
-
-		if _chunks.has(candidate_pos):
-			continue
-
-		chunk_entry = candidate
-		break
-	_results_mutex.unlock()
-
-	if not chunk_entry.is_empty():
-		var cp: Vector2i = chunk_entry["pos"]
-		var cached_chunk: VoxelChunk = chunk_entry.get("cached_chunk", null)
-
-		if cached_chunk != null:
-			var t_ti_start := Time.get_ticks_usec()
-
-			cached_chunk.collision_layer = 1
-			cached_chunk.collision_mask = 7
-			cached_chunk.visible = true
-			if cached_chunk.get_parent() == null:
-				add_child(cached_chunk)
-
-			var time_tree_insert := Time.get_ticks_usec() - t_ti_start
-			if time_tree_insert > 2000:
-				var total_ms := float(time_tree_insert) / 1000.0
-				print_rich("[color=red]STUTTER WARNING: Chunk insertion took %0.2f ms | Time_Instantiate: 0 us | Time_MeshAssign: 0 us | Time_CollisionAssign: 0 us | Time_TreeInsert: %d us[/color]" % [
-					total_ms,
-					time_tree_insert
-				])
-
-			_chunks[cp] = cached_chunk
-			chunk_loaded.emit(cp)
-			_queue_neighbor_remesh(cached_chunk)
-		else:
-			var flat: PackedByteArray = chunk_entry["flat"]
-			var compiled_mesh: ArrayMesh = chunk_entry.get("mesh", null)
-			var collision_shape: ConcavePolygonShape3D = chunk_entry.get("collision_shape", null)
-			last_worker_gen_time_ms = chunk_entry.get("worker_time_ms", 0.0)
-
-			# 1. Time_Instantiate: Time taken to preload().instantiate() or VoxelChunk.new()
-			var t_inst_start := Time.get_ticks_usec()
-			var chunk := VoxelChunk.new()
-			chunk.name = "Chunk_%d_%d" % [cp.x, cp.y]
-			chunk.chunk_pos = cp
-			chunk.voxel_world = self
-			chunk.position = Vector3(float(cp.x * VoxelChunk.SIZE_X), 0.0, float(cp.y * VoxelChunk.SIZE_Z))
-			chunk.load_from_flat(flat)
-			chunk.setup_nodes()
-			var time_instantiate := Time.get_ticks_usec() - t_inst_start
-
-			# 2. Time_MeshAssign: Time taken to assign node.mesh = ...
-			var t_ma_start := Time.get_ticks_usec()
-			chunk._mesh_inst.mesh = compiled_mesh
-			var time_mesh_assign := Time.get_ticks_usec() - t_ma_start
-			last_main_mesh_upload_time_ms = float(time_mesh_assign) / 1000.0
-
-			# 3. Time_CollisionAssign: Time taken to assign node.shape = ...
-			var t_ca_start := Time.get_ticks_usec()
-			if chunk._col_shape != null:
-				chunk._col_shape.shape = collision_shape
-			var time_collision_assign := Time.get_ticks_usec() - t_ca_start
-			last_main_collision_time_ms = float(time_collision_assign) / 1000.0
-
-			# 4. Time_TreeInsert: Time taken to call add_child()
-			var t_ti_start := Time.get_ticks_usec()
-			add_child(chunk)
-			var time_tree_insert := Time.get_ticks_usec() - t_ti_start
-
-			# Only print these 4 metrics IF total time exceeds 2000 microseconds (2ms)
-			var total_insertion_usec := time_instantiate + time_mesh_assign + time_collision_assign + time_tree_insert
-			if total_insertion_usec > 2000:
-				var total_ms := float(total_insertion_usec) / 1000.0
-				print_rich("[color=red]STUTTER WARNING: Chunk insertion took %0.2f ms | Time_Instantiate: %d us | Time_MeshAssign: %d us | Time_CollisionAssign: %d us | Time_TreeInsert: %d us[/color]" % [
-					total_ms,
-					time_instantiate,
-					time_mesh_assign,
-					time_collision_assign,
-					time_tree_insert
-				])
-
-			_chunks[cp] = chunk
-			total_chunks_generated += 1
-			chunk_loaded.emit(cp)
-			_queue_neighbor_remesh(chunk)
-
-		if _spawn_waiting and _spawn_pending_positions.has(cp):
-			_spawn_pending_positions.erase(cp)
-			if _spawn_pending_positions.is_empty():
-				_spawn_waiting = false
-				spawn_chunks_ready.emit()
-
-		main_total_frame_time_ms = float(Time.get_ticks_usec() - frame_start_usec) / 1000.0
+	# 1. Throttle Unloader (Garbage Queue): Pop and queue_free() exactly ONE chunk
+	if not _chunks_to_free.is_empty():
+		var chunk_to_free = _chunks_to_free.pop_front()
+		if is_instance_valid(chunk_to_free):
+			chunk_to_free.queue_free()
+		main_total_frame_time_ms = float(Time.get_ticks_usec() - frame_start_time) / 1000.0
 		return
 
-	# If no chunk was inserted this frame, process remeshing within frame budget
-	var time_used_ms := float(Time.get_ticks_usec() - frame_start_usec) / 1000.0
-	if time_used_ms < max_frame_budget_ms:
-		_process_remesh_queue(frame_start_usec)
+	# 2. Throttle Dispatcher (Request Queue): Pop ONE coordinate and dispatch to WorkerThreadPool
+	elif not _chunks_to_request.is_empty() and _in_flight_count < 3:
+		var cp: Vector2i = _chunks_to_request.pop_front()
+		_pending_set.erase(cp)
+		_dispatch_single_task(cp)
+		main_total_frame_time_ms = float(Time.get_ticks_usec() - frame_start_time) / 1000.0
+		return
 
-	main_total_frame_time_ms = float(Time.get_ticks_usec() - frame_start_usec) / 1000.0
+	# 3. Master Turnstile: Pop and add_child() exactly ONE chunk from ready to instantiate queue
+	elif not chunks_ready.is_empty():
+		var chunk_entry: Dictionary = {}
+		if _results_mutex.try_lock():
+			if not chunks_ready.is_empty():
+				var candidate_val: Variant = chunks_ready.pop_front()
+				if candidate_val is Dictionary:
+					var candidate: Dictionary = candidate_val
+					var candidate_pos: Vector2i = candidate["pos"]
+					var result_generation: int = candidate.get("generation", 0)
+
+					_in_flight.erase(candidate_pos)
+					_in_flight_count = maxi(0, _in_flight_count - 1)
+
+					var is_valid := true
+					# Prune obsolete task if player has moved away
+					if _last_player_chunk != Vector2i(99999, 99999):
+						var dist_x := absi(candidate_pos.x - _last_player_chunk.x)
+						var dist_z := absi(candidate_pos.y - _last_player_chunk.y)
+						if dist_x > view_distance_chunks or dist_z > view_distance_chunks:
+							cancelled_tasks_count += 1
+							is_valid = false
+
+					# Discard stale results: chunk was edited after worker was dispatched
+					if is_valid:
+						var current_gen: int = _chunk_generation.get(candidate_pos, 0)
+						if result_generation < current_gen:
+							stale_results_discarded += 1
+							is_valid = false
+
+					if is_valid and not _chunks.has(candidate_pos):
+						chunk_entry = candidate
+			_results_mutex.unlock()
+
+		if not chunk_entry.is_empty():
+			var cp: Vector2i = chunk_entry["pos"]
+			var cached_chunk: VoxelChunk = chunk_entry.get("cached_chunk", null)
+
+			if cached_chunk != null:
+				cached_chunk.collision_layer = 1
+				cached_chunk.collision_mask = 7
+				cached_chunk.visible = true
+				if cached_chunk.get_parent() == null:
+					add_child(cached_chunk)
+
+				_chunks[cp] = cached_chunk
+				chunks_added_this_frame = 1
+				chunk_loaded.emit(cp)
+				_queue_neighbor_remesh(cached_chunk)
+			else:
+				var flat: PackedByteArray = chunk_entry["flat"]
+				var compiled_mesh: ArrayMesh = chunk_entry.get("mesh", null)
+				var collision_shape: ConcavePolygonShape3D = chunk_entry.get("collision_shape", null)
+				last_worker_gen_time_ms = chunk_entry.get("worker_time_ms", 0.0)
+
+				var chunk := VoxelChunk.new()
+				chunk.name = "Chunk_%d_%d" % [cp.x, cp.y]
+				chunk.chunk_pos = cp
+				chunk.voxel_world = self
+				chunk.position = Vector3(float(cp.x * VoxelChunk.SIZE_X), 0.0, float(cp.y * VoxelChunk.SIZE_Z))
+				chunk.load_from_flat(flat)
+				chunk.setup_nodes()
+
+				var time_instantiate := Time.get_ticks_usec()
+				chunk._mesh_inst.mesh = compiled_mesh
+				var time_mesh := Time.get_ticks_usec()
+				last_main_mesh_upload_time_ms = float(time_mesh - time_instantiate) / 1000.0
+
+				if chunk._col_shape != null:
+					chunk._col_shape.shape = collision_shape
+				var time_collision := Time.get_ticks_usec()
+				last_main_collision_time_ms = float(time_collision - time_mesh) / 1000.0
+
+				add_child(chunk)
+
+				_chunks[cp] = chunk
+				chunks_added_this_frame = 1
+				total_chunks_generated += 1
+				chunk_loaded.emit(cp)
+				_queue_neighbor_remesh(chunk)
+
+			if _spawn_waiting and _spawn_pending_positions.has(cp):
+				_spawn_pending_positions.erase(cp)
+				if _spawn_pending_positions.is_empty():
+					_spawn_waiting = false
+					spawn_chunks_ready.emit()
+
+			print_rich("[color=yellow]Chunk Process Frame Time: %.2f ms[/color] | Chunks Added: %d" % [(Time.get_ticks_usec() - frame_start_time) / 1000.0, chunks_added_this_frame])
+			main_total_frame_time_ms = float(Time.get_ticks_usec() - frame_start_time) / 1000.0
+			return
+
+	# If no chunk was freed, dispatched, or inserted this frame, process remeshing within frame budget
+	var time_used_ms := float(Time.get_ticks_usec() - frame_start_time) / 1000.0
+	if time_used_ms < max_frame_budget_ms:
+		_process_remesh_queue(frame_start_time)
+
+	main_total_frame_time_ms = float(Time.get_ticks_usec() - frame_start_time) / 1000.0
 
 func _setup_noise() -> void:
 	_noise_2d = FastNoiseLite.new()
@@ -374,6 +366,7 @@ func update_loaded_chunks(player_world_pos: Vector3, force_sync: bool = false) -
 
 	_last_player_chunk = current_player_chunk
 
+	var t_grid_start := Time.get_ticks_usec()
 	var required_chunks: Dictionary = {}
 	for dx in range(-view_distance_chunks, view_distance_chunks + 1):
 		for dz in range(-view_distance_chunks, view_distance_chunks + 1):
@@ -386,122 +379,122 @@ func update_loaded_chunks(player_world_pos: Vector3, force_sync: bool = false) -
 						_restore_chunk_from_cache(cp, true)
 					else:
 						_load_or_generate_chunk_sync(cp)
-				elif _chunk_cache.has(cp):
-					# Restore from cache via turnstile without waiting or blocking
-					var cached_chunk: VoxelChunk = _chunk_cache[cp]
-					_chunk_cache.erase(cp)
-					_chunk_cache_order.erase(cp)
-					_in_flight[cp] = _chunk_generation.get(cp, 0)
-					_results_mutex.lock()
-					chunks_ready.append({
-						"pos": cp,
-						"cached_chunk": cached_chunk,
-						"generation": _chunk_generation.get(cp, 0)
-					})
-					_results_mutex.unlock()
 				elif not _pending_set.has(cp):
-					_pending_queue.append(cp)
+					_chunks_to_request.append(cp)
 					_pending_set[cp] = true
 
+	var grid_time_ms := float(Time.get_ticks_usec() - t_grid_start) / 1000.0
+	if grid_time_ms > 2.0:
+		print_rich("[color=orange]Grid Check took: %.2f ms[/color]" % grid_time_ms)
+
 	# Nearest-first sorting
-	_pending_queue.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+	_chunks_to_request.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
 		return a.distance_squared_to(current_player_chunk) < b.distance_squared_to(current_player_chunk)
 	)
 
-	# Unload chunks outside active range
+	# Unload chunks outside active range (Garbage Queue)
 	var to_unload: Array[Vector2i] = []
 	for cp in _chunks.keys():
 		if not required_chunks.has(cp):
 			to_unload.append(cp)
 	for cp in to_unload:
-		_unload_chunk(cp)
+		if _chunks.has(cp):
+			var chunk: VoxelChunk = _chunks[cp]
+			_chunks.erase(cp)
+			if is_instance_valid(chunk):
+				if chunk.get_parent() == self:
+					remove_child(chunk)
+				chunk.visible = false
+				chunk.collision_layer = 0
+				chunk.collision_mask = 0
+				_chunks_to_free.append(chunk)
+			_enqueue_all_neighbors_for_remesh(cp)
+			chunk_unloaded.emit(cp)
 
 	# Clean stale entries from queue
-	var filtered: Array[Vector2i] = []
-	for cp in _pending_queue:
+	var filtered: Array = []
+	for cp in _chunks_to_request:
 		if required_chunks.has(cp):
 			filtered.append(cp)
 		else:
 			_pending_set.erase(cp)
 			cancelled_tasks_count += 1
-	_pending_queue = filtered
-
-	# Staggered Thread Dispatching:
-	# Dispatch pending tasks to WorkerThreadPool without waiting or blocking.
-	_dispatch_pending_tasks()
+	_chunks_to_request = filtered
 
 # ============================================================
 # MULTI-THREADED PIPELINE INTERNALS
 # ============================================================
 
 func _dispatch_pending_tasks() -> void:
-	if _pending_queue.is_empty():
+	if not _chunks_to_request.is_empty() and _in_flight_count < 3:
+		var cp: Vector2i = _chunks_to_request.pop_front()
+		_pending_set.erase(cp)
+		_dispatch_single_task(cp)
+
+func _dispatch_single_task(cp: Vector2i) -> void:
+	# Prune obsolete task if player has moved away
+	if _last_player_chunk != Vector2i(99999, 99999):
+		var dist_x := absi(cp.x - _last_player_chunk.x)
+		var dist_z := absi(cp.y - _last_player_chunk.y)
+		if dist_x > view_distance_chunks or dist_z > view_distance_chunks:
+			cancelled_tasks_count += 1
+			return
+
+	if _chunks.has(cp) or _in_flight.has(cp):
 		return
 
-	while not _pending_queue.is_empty() and _in_flight_count < max_parallel_tasks:
-		var cp: Vector2i = _pending_queue.pop_front()
-		_pending_set.erase(cp)
+	if _chunk_cache.has(cp):
+		if not _results_mutex.try_lock():
+			_chunks_to_request.push_front(cp)
+			_pending_set[cp] = true
+			return
+		var cached_chunk: VoxelChunk = _chunk_cache[cp]
+		_chunk_cache.erase(cp)
+		_chunk_cache_order.erase(cp)
+		_in_flight[cp] = _chunk_generation.get(cp, 0)
+		chunks_ready.append({
+			"pos": cp,
+			"cached_chunk": cached_chunk,
+			"generation": _chunk_generation.get(cp, 0)
+		})
+		_results_mutex.unlock()
+		return
 
-		# Prune obsolete task if player has moved away
-		if _last_player_chunk != Vector2i(99999, 99999):
-			var dist_x := absi(cp.x - _last_player_chunk.x)
-			var dist_z := absi(cp.y - _last_player_chunk.y)
-			if dist_x > view_distance_chunks or dist_z > view_distance_chunks:
-				cancelled_tasks_count += 1
-				continue
+	# Capture current edit generation so worker result can be validated on return
+	var current_gen: int = _chunk_generation.get(cp, 0)
+	_in_flight[cp] = current_gen
+	_in_flight_count += 1
 
-		if _chunks.has(cp) or _in_flight.has(cp):
-			continue
+	var start_x: int = cp.x * VoxelChunk.SIZE_X
+	var start_z: int = cp.y * VoxelChunk.SIZE_Z
+	var has_deltas: bool = _mined_deltas_set.has(cp)
+	var chunk_deltas: Dictionary = _mined_deltas_set.get(cp, {}).duplicate()
 
-		if _chunk_cache.has(cp):
-			var cached_chunk: VoxelChunk = _chunk_cache[cp]
-			_chunk_cache.erase(cp)
-			_chunk_cache_order.erase(cp)
-			_in_flight[cp] = _chunk_generation.get(cp, 0)
-			_results_mutex.lock()
-			chunks_ready.append({
-				"pos": cp,
-				"cached_chunk": cached_chunk,
-				"generation": _chunk_generation.get(cp, 0)
-			})
-			_results_mutex.unlock()
-			continue
+	var n2d := _noise_2d
+	var n3d := _noise_3d
+	var n_ore := _noise_ore
 
-		# Capture current edit generation so worker result can be validated on return
-		var current_gen: int = _chunk_generation.get(cp, 0)
-		_in_flight[cp] = current_gen
-		_in_flight_count += 1
+	# Extract neighbor border slices for seamless watertight meshing
+	var n_left: VoxelChunk = _chunks.get(cp + Vector2i(-1, 0), null)
+	var n_right: VoxelChunk = _chunks.get(cp + Vector2i(1, 0), null)
+	var n_back: VoxelChunk = _chunks.get(cp + Vector2i(0, -1), null)
+	var n_front: VoxelChunk = _chunks.get(cp + Vector2i(0, 1), null)
 
-		var start_x: int = cp.x * VoxelChunk.SIZE_X
-		var start_z: int = cp.y * VoxelChunk.SIZE_Z
-		var has_deltas: bool = _mined_deltas_set.has(cp)
-		var chunk_deltas: Dictionary = _mined_deltas_set.get(cp, {}).duplicate()
+	var left_border: Array = n_left.get_x_border_slice(VoxelChunk.SIZE_X - 1) if n_left != null else []
+	var right_border: Array = n_right.get_x_border_slice(0) if n_right != null else []
+	var back_border: Array = n_back.get_z_border_slice(VoxelChunk.SIZE_Z - 1) if n_back != null else []
+	var front_border: Array = n_front.get_z_border_slice(0) if n_front != null else []
 
-		var n2d := _noise_2d
-		var n3d := _noise_3d
-		var n_ore := _noise_ore
+	var cp_captured := cp
 
-		# Extract neighbor border slices for seamless watertight meshing
-		var n_left: VoxelChunk = _chunks.get(cp + Vector2i(-1, 0), null)
-		var n_right: VoxelChunk = _chunks.get(cp + Vector2i(1, 0), null)
-		var n_back: VoxelChunk = _chunks.get(cp + Vector2i(0, -1), null)
-		var n_front: VoxelChunk = _chunks.get(cp + Vector2i(0, 1), null)
-
-		var left_border: Array = n_left.get_x_border_slice(VoxelChunk.SIZE_X - 1) if n_left != null else []
-		var right_border: Array = n_right.get_x_border_slice(0) if n_right != null else []
-		var back_border: Array = n_back.get_z_border_slice(VoxelChunk.SIZE_Z - 1) if n_back != null else []
-		var front_border: Array = n_front.get_z_border_slice(0) if n_front != null else []
-
-		var cp_captured := cp
-
-		WorkerThreadPool.add_task(func():
-			_worker_generate_chunk(
-				cp_captured, start_x, start_z, has_deltas, chunk_deltas,
-				n2d, n3d, n_ore,
-				left_border, right_border, back_border, front_border,
-				current_gen
-			)
+	WorkerThreadPool.add_task(func():
+		_worker_generate_chunk(
+			cp_captured, start_x, start_z, has_deltas, chunk_deltas,
+			n2d, n3d, n_ore,
+			left_border, right_border, back_border, front_border,
+			current_gen
 		)
+	)
 
 ## Worker Thread Function: Computes voxel data AND builds all mesh/collision geometry.
 func _worker_generate_chunk(
@@ -947,7 +940,7 @@ func force_sync_spawn_chunks(center_chunk_x: int = 0, center_chunk_z: int = 0) -
 			# Restored from cache — remove from pending immediately.
 			_spawn_pending_positions.erase(cp)
 		elif not _in_flight.has(cp) and not _pending_set.has(cp):
-			_pending_queue.push_front(cp)   # Insert at front = highest priority.
+			_chunks_to_request.push_front(cp)   # Insert at front = highest priority.
 			_pending_set[cp] = true
 
 	# If everything was cache-restored, signal is never emitted — clear flag manually.
@@ -1045,11 +1038,15 @@ func get_spawn_position(x: int = 0, z: int = 0) -> Vector3:
 	return Vector3(0.5, 16.0, 0.5)
 
 func clear_world() -> void:
+	_chunks_to_request.clear()
+	_chunks_to_free.clear()
 	_pending_queue.clear()
 	_pending_set.clear()
-	_results_mutex.lock()
-	chunks_ready.clear()
-	_results_mutex.unlock()
+	if _results_mutex.try_lock():
+		chunks_ready.clear()
+		_results_mutex.unlock()
+	else:
+		chunks_ready.clear()
 	_remesh_queue.clear()
 	_remesh_set.clear()
 	for chunk in _chunks.values():
