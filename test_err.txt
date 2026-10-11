@@ -1,0 +1,342 @@
+ERROR: GridSystem: JSON parse error at line 0: Expected 'true', 'false', or 'null', got 'INVALID'
+   at: VariantUtilityFunctions::push_error (core\variant\variant_utility.cpp:1023)
+   GDScript backtrace (most recent call first):
+       [0] deserialize_json (res://autoloads/GridSystem.gd:179)
+       [1] test_json_serialization_and_validation (res://tests/test_m1.gd:370)
+       [2] _run_test (res://tests/test_m1.gd:38)
+       [3] run_all (res://tests/test_m1.gd:28)
+       [4] _init (res://tests/run_tests.gd:21)
+ERROR: Condition "!is_inside_tree()" is true. Returning: Transform3D()
+   at: Node3D::get_global_transform (scene\3d\node_3d.cpp:649)
+   GDScript backtrace (most recent call first):
+       [0] try_grab (res://systems/interaction/DebrisGrabber.gd:108)
+       [1] test_debris_grabber_detaches_from_multiblock_island (res://tests/test_m2_1.gd:151)
+       [2] _run_test (res://tests/test_m2_1.gd:42)
+       [3] run_all (res://tests/test_m2_1.gd:29)
+       [4] _init (res://tests/run_tests.gd:30)
+ERROR: BlueprintData: Missing or invalid 'blocks' array
+   at: VariantUtilityFunctions::push_error (core\variant\variant_utility.cpp:1023)
+   GDScript backtrace (most recent call first):
+       [0] from_dict (res://data/BlueprintData.gd:90)
+       [1] test_blueprintdata_empty_blocks_returns_null (res://tests/test_m4.gd:177)
+       [2] _run_test (res://tests/test_m4.gd:107)
+       [3] run_all (res://tests/test_m4.gd:26)
+       [4] _init (res://tests/run_tests.gd:42)
+WARNING: BlueprintData: Format version mismatch (got 99, expected 1)
+   at: VariantUtilityFunctions::push_warning (core\variant\variant_utility.cpp:1033)
+   GDScript backtrace (most recent call first):
+       [0] from_dict (res://data/BlueprintData.gd:68)
+       [1] test_blueprintdata_version_mismatch_warning (res://tests/test_m4.gd:186)
+       [2] _run_test (res://tests/test_m4.gd:107)
+       [3] run_all (res://tests/test_m4.gd:27)
+       [4] _init (res://tests/run_tests.gd:42)
+WARNING: BlueprintManager: Blueprint 'overwrite_test' already exists and overwrite is false
+   at: VariantUtilityFunctions::push_warning (core\variant\variant_utility.cpp:1033)
+   GDScript backtrace (most recent call first):
+       [0] save_blueprint (res://autoloads/BlueprintManager.gd:113)
+       [1] test_blueprint_overwrite_false_rejects (res://tests/test_m4.gd:273)
+       [2] _run_test (res://tests/test_m4.gd:107)
+       [3] run_all (res://tests/test_m4.gd:32)
+       [4] _init (res://tests/run_tests.gd:42)
+SCRIPT ERROR: Invalid access to property or key '_pending_queue' on a base object of type 'Node3D (VoxelWorld)'.
+   at: test_voxel_world_generation_queue_deduplication (res://tests/test_terrain.gd:229)
+   GDScript backtrace (most recent call first):
+       [0] test_voxel_world_generation_queue_deduplication (res://tests/test_terrain.gd:229)
+       [1] _run_test (res://tests/test_terrain.gd:58)
+       [2] run_all (res://tests/test_terrain.gd:32)
+       [3] _init (res://tests/run_tests.gd:45)
+SCRIPT ERROR: Invalid call. Nonexistent function '_load_or_generate_chunk' in base 'Node3D (VoxelWorld)'.
+   at: test_voxel_world_diagnostics (res://tests/test_terrain.gd:263)
+   GDScript backtrace (most recent call first):
+       [0] test_voxel_world_diagnostics (res://tests/test_terrain.gd:263)
+       [1] _run_test (res://tests/test_terrain.gd:58)
+       [2] run_all (res://tests/test_terrain.gd:35)
+       [3] _init (res://tests/run_tests.gd:45)
+ERROR: Can't use get_node() with absolute paths from outside the active scene tree.
+   at: Node::get_node_or_null (scene\main\node.cpp:1910)
+   GDScript backtrace (most recent call first):
+       [0] _complete_cycle (res://autoloads/SurvivalObjectiveManager.gd:132)
+       [1] _complete_current_stage (res://autoloads/SurvivalObjectiveManager.gd:121)
+       [2] _advance_progress (res://autoloads/SurvivalObjectiveManager.gd:111)
+       [3] _on_face_coated (res://autoloads/SurvivalObjectiveManager.gd:104)
+       [4] test_survival_objective_fortification_progress_and_reward (res://tests/test_survival_loop.gd:107)
+       [5] run_all (res://tests/test_survival_loop.gd:37)
+       [6] _init (res://tests/run_tests.gd:48)
+ERROR: Pages in use exist at exit in PagedAllocator: class RasterizerSceneDummy::GeometryInstanceDummy
+   at: PagedAllocator<class RasterizerSceneDummy::GeometryInstanceDummy,0,4096>::~PagedAllocator (.\core/templates/paged_allocator.h:170)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: Leaked instance dependency: Bug - did not call instance_notify_deleted when freeing.
+   at: Dependency::~Dependency (servers\rendering\storage\utilities.cpp:56)
+WARNING: 1012 ObjectDB instances were leaked at exit (run with `--verbose` for details).
+   at: ObjectDB::cleanup (core\object\object.cpp:2536)
+ERROR: 12 resources still in use at exit (run with --verbose for details).
+   at: ResourceCache::clear (core\io\resource.cpp:822)

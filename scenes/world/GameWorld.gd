@@ -129,6 +129,10 @@ func _spawn_player_on_terrain() -> void:
 	var safe_spawn := voxel_world.get_spawn_position(0, 0)
 	player.global_position = safe_spawn
 
+	# Attach viewer to player so Zylann VoxelTerrain streams around player movement
+	if voxel_world.has_method("attach_viewer_to_player"):
+		voxel_world.attach_viewer_to_player(player)
+
 	# Re-enable physics_process now that terrain collision is committed
 	player.set_physics_process(true)
 

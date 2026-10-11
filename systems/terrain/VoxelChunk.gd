@@ -34,6 +34,9 @@ const BLOCK_NAMES: Array[StringName] = [&"", &"grass", &"dirt", &"stone", &"coal
 const BLOCK_IDS: Dictionary = {&"": 0, &"grass": 1, &"dirt": 2, &"stone": 3, &"coal": 4, &"iron": 5, &"gold": 6}
 
 var chunk_pos: Vector2i = Vector2i.ZERO
+var chunk_position: Vector2i:
+	get: return chunk_pos
+	set(val): chunk_pos = val
 var voxel_world: Node = null # Back reference to VoxelWorld for neighbor chunk lookups
 
 ## Flat 1D Voxel block PackedByteArray of size 8192: [lx * 512 + ly * 16 + lz] = byte block ID
@@ -41,6 +44,30 @@ var voxel_world: Node = null # Back reference to VoxelWorld for neighbor chunk l
 var voxels: PackedByteArray
 var _mesh_inst: MeshInstance3D = null
 var _col_shape: CollisionShape3D = null
+
+func rebuild() -> void:
+	setup_nodes()
+	var left_border = null
+	var right_border = null
+	var back_border = null
+	var front_border = null
+	if voxel_world != null and voxel_world.get("_chunks") != null:
+		var chunks_dict: Dictionary = voxel_world._chunks
+		var left_chunk: VoxelChunk = chunks_dict.get(chunk_pos + Vector2i(-1, 0), null)
+		if left_chunk != null:
+			left_border = left_chunk.get_x_border_slice(SIZE_X - 1)
+		var right_chunk: VoxelChunk = chunks_dict.get(chunk_pos + Vector2i(1, 0), null)
+		if right_chunk != null:
+			right_border = right_chunk.get_x_border_slice(0)
+		var back_chunk: VoxelChunk = chunks_dict.get(chunk_pos + Vector2i(0, -1), null)
+		if back_chunk != null:
+			back_border = back_chunk.get_z_border_slice(SIZE_Z - 1)
+		var front_chunk: VoxelChunk = chunks_dict.get(chunk_pos + Vector2i(0, 1), null)
+		if front_chunk != null:
+			front_border = front_chunk.get_z_border_slice(0)
+
+	var mesh_data := build_mesh_data_from_flat(voxels, left_border, right_border, back_border, front_border)
+	apply_mesh_and_collision_data(mesh_data["surfaces"], mesh_data["collision_faces"])
 
 ## Opaque StandardMaterial3D instances per material type
 static var _materials: Dictionary = {}
@@ -394,12 +421,27 @@ static func _append_greedy_y_face(
 ## Reduces face and vertex counts drastically for planar geometry and contiguous terrain.
 ## Masks are PackedByteArray (int IDs) instead of Array[StringName], eliminating GC overhead.
 static func build_mesh_data_from_flat(
-	flat: PackedByteArray,
+	flat_input: Variant,
 	left_border: Variant,   # Array of bool: [ly * 16 + lz]
 	right_border: Variant,  # Array of bool: [ly * 16 + lz]
 	back_border: Variant,   # Array of bool: [lx * 32 + ly]
 	front_border: Variant   # Array of bool: [lx * 32 + ly]
 ) -> Dictionary:
+	var flat: PackedByteArray
+	if flat_input is PackedByteArray:
+		flat = flat_input
+	elif flat_input is Array:
+		flat.resize(TOTAL_CELLS)
+		var arr_size: int = mini(flat_input.size(), TOTAL_CELLS)
+		for i in range(arr_size):
+			var val = flat_input[i]
+			if val is StringName or val is String:
+				flat[i] = BLOCK_IDS.get(val, 0)
+			elif val is int:
+				flat[i] = val
+			else:
+				flat[i] = 0
+
 	var mat_buffers: Dictionary = {}
 	var col_faces: PackedVector3Array = PackedVector3Array()
 
