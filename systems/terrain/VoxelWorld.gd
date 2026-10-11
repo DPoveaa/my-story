@@ -63,6 +63,10 @@ var _chunk_cache_order: Array[Vector2i] = []
 ## Queue for deferred geometric collision assignment to guarantee frame budget
 var _pending_collision_queue: Array[Dictionary] = []
 
+## Strict instantiation queue: chunks fully built off-thread, waiting for add_child().
+## Processed STRICTLY 1 per frame (or within 2 ms budget) on the main thread.
+var _chunks_to_instantiate: Array[Dictionary] = []
+
 @export var noise_frequency_2d: float = 0.025
 @export var noise_frequency_3d: float = 0.045
 
@@ -133,6 +137,10 @@ func _process(_delta: float) -> void:
 	var time_used_ms := float(Time.get_ticks_usec() - frame_start_usec) / 1000.0
 	if time_used_ms < max_frame_budget_ms:
 		_consume_ready_results(frame_start_usec)
+
+	time_used_ms = float(Time.get_ticks_usec() - frame_start_usec) / 1000.0
+	if time_used_ms < max_frame_budget_ms:
+		_process_instantiation_queue(frame_start_usec)
 
 	time_used_ms = float(Time.get_ticks_usec() - frame_start_usec) / 1000.0
 	if time_used_ms < max_frame_budget_ms:
@@ -304,6 +312,14 @@ func update_loaded_chunks(player_world_pos: Vector3, force_sync: bool = false) -
 			cancelled_tasks_count += 1
 	_pending_queue = filtered
 
+	var filtered_inst: Array[Dictionary] = []
+	for entry in _chunks_to_instantiate:
+		if required_chunks.has(entry.get("pos", Vector2i.ZERO)):
+			filtered_inst.append(entry)
+		else:
+			cancelled_tasks_count += 1
+	_chunks_to_instantiate = filtered_inst
+
 # ============================================================
 # MULTI-THREADED PIPELINE INTERNALS
 # ============================================================
@@ -439,6 +455,15 @@ func _worker_generate_chunk(
 	# Generate mesh surface arrays & collision faces directly on worker thread
 	var mesh_data := VoxelChunk.build_mesh_data_from_flat(flat, left_border, right_border, back_border, front_border)
 	var col_faces: PackedVector3Array = mesh_data["collision_faces"]
+
+	# Build ConcavePolygonShape3D HERE on the worker thread — this is the expensive
+	# set_faces() BVH construction that must NEVER run on the main thread.
+	var collision_shape: ConcavePolygonShape3D = null
+	if not col_faces.is_empty():
+		collision_shape = ConcavePolygonShape3D.new()
+		collision_shape.set_faces(col_faces)
+		collision_shape.backface_collision = true
+
 	var worker_duration_ms := float(Time.get_ticks_usec() - t_worker_start) / 1000.0
 
 	_results_mutex.lock()
@@ -449,13 +474,14 @@ func _worker_generate_chunk(
 		"pos": cp,
 		"flat": flat,
 		"surfaces": mesh_data["surfaces"],
-		"collision_faces": col_faces,
+		"collision_shape": collision_shape,
 		"worker_time_ms": worker_duration_ms,
 		"generation": generation
 	})
 	_results_mutex.unlock()
 
-## Main thread: applies pre-built mesh and collision under strict time/work budget.
+## Main thread: validates worker results and pushes them to the instantiation queue.
+## Does NOT call add_child() — that is deferred to _process_instantiation_queue().
 func _consume_ready_results(frame_start_usec: int) -> void:
 	if _results_ready.is_empty():
 		return
@@ -465,21 +491,15 @@ func _consume_ready_results(frame_start_usec: int) -> void:
 	_results_ready.clear()
 	_results_mutex.unlock()
 
-	var processed := 0
 	for entry in batch:
 		var elapsed_ms := float(Time.get_ticks_usec() - frame_start_usec) / 1000.0
-		if processed >= max_uploads_per_frame or elapsed_ms >= max_frame_budget_ms:
-			# Defer leftovers to next frame to guarantee zero stutters
+		if elapsed_ms >= max_frame_budget_ms:
 			_results_mutex.lock()
-			_results_ready.append_array(batch.slice(processed))
+			_results_ready.append_array(batch.slice(batch.find(entry)))
 			_results_mutex.unlock()
 			break
 
 		var cp: Vector2i = entry["pos"]
-		var flat: PackedByteArray = entry["flat"]
-		var surfaces: Dictionary = entry["surfaces"]
-		var collision_faces: PackedVector3Array = entry["collision_faces"]
-		var concave_shape = entry.get("collision_shape", null)
 		var result_generation: int = entry.get("generation", 0)
 		last_worker_gen_time_ms = entry.get("worker_time_ms", 0.0)
 
@@ -492,61 +512,83 @@ func _consume_ready_results(frame_start_usec: int) -> void:
 			var dist_z := absi(cp.y - _last_player_chunk.y)
 			if dist_x > view_distance_chunks or dist_z > view_distance_chunks:
 				cancelled_tasks_count += 1
-				processed += 1
 				continue
 
-		# Discard stale results: if the chunk was edited after this worker was dispatched,
-		# the result contains outdated voxel data. The pending remesh queue will rebuild it.
+		# Discard stale results: chunk was edited after this worker was dispatched.
 		var current_gen: int = _chunk_generation.get(cp, 0)
 		if result_generation < current_gen:
 			stale_results_discarded += 1
-			processed += 1
 			continue
 
-		if _chunks.has(cp):
-			processed += 1
+		if _chunks.has(cp) or _chunks_to_instantiate.any(func(e): return e["pos"] == cp):
 			continue
 
-		var t_start := Time.get_ticks_usec()
+		# Push to strict instantiation queue — add_child() happens at most 1 per frame.
+		_chunks_to_instantiate.append(entry)
 
-		var chunk := VoxelChunk.new()
-		chunk.name = "Chunk_%d_%d" % [cp.x, cp.y]
-		chunk.chunk_pos = cp
-		chunk.voxel_world = self
+## Main thread: pops STRICTLY 1 chunk per frame from the instantiation queue.
+## Enforces a hard 2 ms budget guard in addition to the 1-per-frame limit.
+func _process_instantiation_queue(frame_start_usec: int) -> void:
+	if _chunks_to_instantiate.is_empty():
+		return
 
-		var t_copy0 := Time.get_ticks_usec()
-		chunk.load_from_flat(flat)
-		last_main_voxel_copy_time_ms = float(Time.get_ticks_usec() - t_copy0) / 1000.0
+	const INSTANTIATION_BUDGET_MS: float = 2.0
+	var elapsed_ms := float(Time.get_ticks_usec() - frame_start_usec) / 1000.0
+	if elapsed_ms >= INSTANTIATION_BUDGET_MS:
+		return
 
-		add_child(chunk)
-		# Visual mesh renders first
-		last_main_mesh_upload_time_ms = chunk.apply_mesh_data(surfaces)
+	var entry: Dictionary = _chunks_to_instantiate.pop_front()
+	var cp: Vector2i = entry["pos"]
 
-		# Defer geometric collision assignment to budget-regulated queue
-		var shape_data = entry.get("collision_shape", null)
-		if shape_data == null:
-			shape_data = collision_faces
-		_pending_collision_queue.append({
-			"chunk": chunk,
-			"data": shape_data
-		})
+	# Re-validate: chunk may have been requested while this entry sat in queue.
+	if _chunks.has(cp):
+		return
+	if _last_player_chunk != Vector2i(99999, 99999):
+		var dist_x := absi(cp.x - _last_player_chunk.x)
+		var dist_z := absi(cp.y - _last_player_chunk.y)
+		if dist_x > view_distance_chunks or dist_z > view_distance_chunks:
+			cancelled_tasks_count += 1
+			return
 
-		_chunks[cp] = chunk
+	var flat: PackedByteArray = entry["flat"]
+	var surfaces: Dictionary = entry["surfaces"]
+	var collision_shape = entry.get("collision_shape", null)  # Already a ConcavePolygonShape3D
 
-		last_chunk_build_time_ms = float(Time.get_ticks_usec() - t_start) / 1000.0
-		total_chunks_generated += 1
-		chunk_loaded.emit(cp)
+	var t_start := Time.get_ticks_usec()
 
-		# Selectively schedule only neighbors sharing solid blocks for seam cleanup
-		_queue_neighbor_remesh(chunk)
-		processed += 1
+	var chunk := VoxelChunk.new()
+	chunk.name = "Chunk_%d_%d" % [cp.x, cp.y]
+	chunk.chunk_pos = cp
+	chunk.voxel_world = self
 
-		# Check if this chunk satisfies a pending async spawn wait
-		if _spawn_waiting and _spawn_pending_positions.has(cp):
-			_spawn_pending_positions.erase(cp)
-			if _spawn_pending_positions.is_empty():
-				_spawn_waiting = false
-				spawn_chunks_ready.emit()
+	var t_copy0 := Time.get_ticks_usec()
+	chunk.load_from_flat(flat)
+	last_main_voxel_copy_time_ms = float(Time.get_ticks_usec() - t_copy0) / 1000.0
+
+	# Single add_child per frame — the most expensive SceneTree operation.
+	add_child(chunk)
+	last_main_mesh_upload_time_ms = chunk.apply_mesh_data(surfaces)
+
+	# The collision shape was built on the worker thread; assign it O(1) here.
+	_pending_collision_queue.append({
+		"chunk": chunk,
+		"data": collision_shape
+	})
+
+	_chunks[cp] = chunk
+
+	last_chunk_build_time_ms = float(Time.get_ticks_usec() - t_start) / 1000.0
+	total_chunks_generated += 1
+	chunk_loaded.emit(cp)
+
+	_queue_neighbor_remesh(chunk)
+
+	# Check if this chunk satisfies a pending async spawn wait
+	if _spawn_waiting and _spawn_pending_positions.has(cp):
+		_spawn_pending_positions.erase(cp)
+		if _spawn_pending_positions.is_empty():
+			_spawn_waiting = false
+			spawn_chunks_ready.emit()
 
 ## Applies deferred collision shapes within frame budget
 func _process_pending_collisions(frame_start_usec: int) -> void:
@@ -1010,6 +1052,7 @@ func get_spawn_position(x: int = 0, z: int = 0) -> Vector3:
 func clear_world() -> void:
 	_pending_queue.clear()
 	_pending_set.clear()
+	_chunks_to_instantiate.clear()
 	_remesh_queue.clear()
 	_remesh_set.clear()
 	_pending_collision_queue.clear()
