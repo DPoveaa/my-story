@@ -537,11 +537,6 @@ func _physics_process(delta: float) -> void:
 		_update_raycast()
 		return
 
-	# Stream 3D Voxel World terrain chunks around player
-	var vox := _get_voxel_world()
-	if vox != null and vox.has_method("update_loaded_chunks"):
-		vox.update_loaded_chunks(global_position)
-
 	match current_state:
 		State.BODY_CONTROL:
 			_process_body_movement(delta)

@@ -46,7 +46,11 @@ signal spawn_chunks_ready
 		seed_value = val
 		_apply_generator_params()
 
-@export var view_distance_chunks: int = 4
+@export var view_distance_chunks: int = 4:
+	set(val):
+		view_distance_chunks = clampi(val, 2, 8)
+		if _viewer != null:
+			_viewer.view_distance = clampi(view_distance_chunks * 16, 64, 128)
 
 @export var noise_frequency_2d: float = 0.025
 @export var noise_frequency_3d: float = 0.045
@@ -59,12 +63,6 @@ var _viewer:  VoxelViewer        = null
 var _library: VoxelBlockyLibrary = null
 var _voxel_tool: VoxelTool       = null
 var _chunks: Dictionary          = {}
-var _chunk_cache: Dictionary      = {}
-var _chunk_generation: Dictionary = {}
-var max_chunk_cache_size: int    = 16
-var stale_results_discarded: int = 0
-var _results_mutex: Mutex        = Mutex.new()
-var _results_ready: Array        = []
 
 # Fallback noise for get_voxel_at() on unloaded voxels (procedural query only).
 var _noise_2d:  FastNoiseLite = null
@@ -148,7 +146,17 @@ func _build_terrain() -> void:
 	_terrain.generator = gen
 
 	# Max view distance in voxels supported by terrain (viewer distance is configured on _viewer)
-	_terrain.max_view_distance = maxi(128, view_distance_chunks * 16)
+	_terrain.max_view_distance = clampi(maxi(128, view_distance_chunks * 16), 128, 256)
+	_terrain.generate_collisions = true
+
+	# Ensure collisions are only generated close to player (LOD 0/1)
+	if "collision_lod_count" in _terrain:
+		_terrain.collision_lod_count = 1
+	elif _terrain.has_method("set_collision_lod_count"):
+		_terrain.call("set_collision_lod_count", 1)
+
+	_terrain.collision_layer = 1
+	_terrain.collision_mask = 1
 	_terrain.block_enter_notification_enabled = true
 	_terrain.mesh_block_entered.connect(_on_mesh_block_entered)
 
@@ -168,7 +176,7 @@ func _on_mesh_block_entered(_block_pos: Vector3i) -> void:
 func _build_viewer() -> void:
 	_viewer = VoxelViewer.new()
 	_viewer.name               = "VoxelViewer"
-	_viewer.view_distance      = view_distance_chunks * 16
+	_viewer.view_distance      = clampi(view_distance_chunks * 16, 64, 128)
 	_viewer.requires_collisions = true
 	add_child(_viewer)
 
@@ -182,6 +190,8 @@ func attach_viewer_to_player(player_node: Node3D) -> void:
 		_viewer.get_parent().remove_child(_viewer)
 	player_node.add_child(_viewer)
 	_viewer.position = Vector3.ZERO
+	_viewer.view_distance = clampi(view_distance_chunks * 16, 64, 128)
+	_viewer.requires_collisions = true
 
 # ---------------------------------------------------------------------------
 # Generator parameter sync
@@ -230,16 +240,6 @@ func is_chunk_ready(world_pos: Vector3) -> bool:
 	if not _terrain.has_data_block(block_pos):
 		return false
 
-	if _terrain.has_method("is_area_meshed"):
-		var aabb := AABB(Vector3(world_pos.x - 1.0, maxf(0.0, world_pos.y - 4.0), world_pos.z - 1.0), Vector3(2.0, 8.0, 2.0))
-		if not _terrain.is_area_meshed(aabb):
-			return false
-
-	if _voxel_tool != null and _voxel_tool.has_method("is_area_editable"):
-		var aabb_tool := AABB(Vector3(world_pos.x - 1.0, maxf(0.0, world_pos.y - 4.0), world_pos.z - 1.0), Vector3(2.0, 8.0, 2.0))
-		if not _voxel_tool.is_area_editable(aabb_tool):
-			return false
-
 	# Ensure solid terrain exists in this column
 	var solid_y := get_highest_solid_y(int(floor(world_pos.x)), int(floor(world_pos.z)))
 	return solid_y >= 0
@@ -250,18 +250,18 @@ func wait_for_terrain_at(world_pos: Vector3) -> void:
 		return
 
 	if is_chunk_ready(world_pos):
-		await get_tree().physics_frame
+		await get_tree().process_frame
 		return
 
-	var max_wait_cycles := 300
+	var max_wait_cycles := 120
 	var cycles := 0
 	while not is_chunk_ready(world_pos) and cycles < max_wait_cycles:
 		cycles += 1
-		await get_tree().physics_frame
+		await get_tree().process_frame
 
-	# Wait two physics frames so PhysicsServer3D synchronizes collision shapes with Jolt
-	for _i in range(2):
-		await get_tree().physics_frame
+	# Ensure physics server synchronizes collision shapes with Jolt
+	await get_tree().physics_frame
+	await get_tree().process_frame
 
 ## Async: waits for the terrain to generate the spawn chunks, then waits for
 ## collision shapes to be committed to PhysicsServer3D.
@@ -400,11 +400,6 @@ func mine_voxel(world_cell: Vector3i) -> StringName:
 		_mined_deltas[cp].append(lc)
 		_mined_deltas_set[cp][lc] = true
 
-	if _chunks.has(cp):
-		_chunks[cp].set_voxel_local(lc.x, lc.y, lc.z, &"")
-	if _chunk_cache.has(cp):
-		_chunk_cache[cp].set_voxel_local(lc.x, lc.y, lc.z, &"")
-
 	save_terrain_deltas()
 	voxel_mined.emit(world_cell, b_type)
 	return b_type
@@ -413,76 +408,20 @@ func mine_voxel(world_cell: Vector3i) -> StringName:
 # Stub: update_loaded_chunks — no-op; streaming is handled by VoxelViewer.
 # Kept so GameWorld / PlayerController callers need no changes.
 # ---------------------------------------------------------------------------
-func update_loaded_chunks(player_world_pos: Vector3, _force_sync: bool = false) -> void:
-	var cx := floori(player_world_pos.x / 16.0)
-	var cz := floori(player_world_pos.z / 16.0)
-	var needed: Dictionary = {}
-	for dx in range(-view_distance_chunks, view_distance_chunks + 1):
-		for dz in range(-view_distance_chunks, view_distance_chunks + 1):
-			var cp := Vector2i(cx + dx, cz + dz)
-			needed[cp] = true
-			if not _chunks.has(cp):
-				_load_or_generate_chunk_sync(cp)
-
-	var to_remove: Array = []
-	for cp in _chunks.keys():
-		if not needed.has(cp):
-			to_remove.append(cp)
-	for cp in to_remove:
-		_unload_chunk(cp)
+func update_loaded_chunks(_player_world_pos: Vector3, _force_sync: bool = false) -> void:
+	pass
 
 func is_chunk_loaded(cp: Vector2i) -> bool:
-	return _chunks.has(cp)
-
-func _rebuild_chunk_and_neighbors(cp: Vector2i) -> void:
-	if _chunks.has(cp):
-		_chunks[cp].rebuild()
-	for offset in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
-		var n_cp: Vector2i = cp + offset
-		if _chunks.has(n_cp):
-			_chunks[n_cp].rebuild()
-
-func _unload_chunk(cp: Vector2i) -> void:
-	if _chunks.has(cp):
-		var chunk: VoxelChunk = _chunks[cp]
-		_chunks.erase(cp)
-		chunk.visible = false
-		chunk.collision_layer = 0
-		if _chunk_cache.size() >= max_chunk_cache_size:
-			var oldest_key: Vector2i = _chunk_cache.keys()[0]
-			var evicted: VoxelChunk = _chunk_cache[oldest_key]
-			_chunk_cache.erase(oldest_key)
-			if is_instance_valid(evicted):
-				evicted.queue_free()
-		_chunk_cache[cp] = chunk
-		_rebuild_chunk_and_neighbors(cp)
-
-func _restore_chunk_from_cache(cp: Vector2i, _immediate: bool = true) -> VoxelChunk:
-	if _chunk_cache.has(cp):
-		var chunk: VoxelChunk = _chunk_cache[cp]
-		_chunk_cache.erase(cp)
-		chunk.visible = true
-		chunk.collision_layer = 1
-		_chunks[cp] = chunk
-		_rebuild_chunk_and_neighbors(cp)
-		return chunk
-	return null
+	if _terrain != null:
+		var block_pos := Vector3i(cp.x, 0, cp.y)
+		return _terrain.has_data_block(block_pos)
+	return true
 
 func clear_world() -> void:
-	for c in _chunks.values():
-		if is_instance_valid(c):
-			c.queue_free()
 	_chunks.clear()
-	for c in _chunk_cache.values():
-		if is_instance_valid(c):
-			c.queue_free()
-	_chunk_cache.clear()
 
 func verify_spawn_physics(_pos: Vector3) -> bool:
 	return true
-
-func _consume_ready_results(_frame_usec: int) -> void:
-	stale_results_discarded += 1
 
 # ---------------------------------------------------------------------------
 # Diagnostics stub
@@ -502,28 +441,6 @@ func _setup_noise() -> void:
 
 func _evaluate_procedural_voxel(gx: int, gy: int, gz: int, cp: Vector2i, local_cell: Vector3i) -> StringName:
 	return _procedural_voxel(gx, gy, gz, cp, local_cell)
-
-func _load_or_generate_chunk_sync(cp: Vector2i) -> VoxelChunk:
-	if _chunks.has(cp):
-		return _chunks[cp]
-	if _chunk_cache.has(cp):
-		return _restore_chunk_from_cache(cp, true)
-	_setup_fallback_noise()
-	var chunk := VoxelChunk.new()
-	chunk.chunk_pos = cp
-	chunk.voxel_world = self
-	var start_x := cp.x * 16
-	var start_z := cp.y * 16
-	for lx in range(16):
-		for lz in range(16):
-			var gx := start_x + lx
-			var gz := start_z + lz
-			for ly in range(WORLD_HEIGHT):
-				var b_name := _evaluate_procedural_voxel(gx, ly, gz, cp, Vector3i(lx, ly, lz))
-				chunk.set_voxel_local(lx, ly, lz, b_name)
-	_chunks[cp] = chunk
-	_rebuild_chunk_and_neighbors(cp)
-	return chunk
 
 func _id_to_name(id: int) -> StringName:
 	match id:
