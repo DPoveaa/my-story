@@ -307,10 +307,11 @@ func get_spawn_position_raycast(x: float = 0.5, z: float = 0.5) -> Vector3:
 			)
 			query.collide_with_areas = false
 			query.collide_with_bodies = true
+			query.collision_mask = 1 # Only collide with terrain, not characters
 			var hit := space_state.intersect_ray(query)
 			if not hit.is_empty() and hit.has("position"):
-				# Feet positioned safely 0.1m above collision mesh face
-				return Vector3(x, hit.position.y + 0.1, z)
+				# Feet positioned safely 0.5m above collision mesh face to prevent capsule penetration
+				return Vector3(x, hit.position.y + 0.5, z)
 	return get_spawn_position(int(floor(x)), int(floor(z)))
 
 ## Returns a safe above-surface world position for the player to spawn at.
@@ -320,7 +321,7 @@ func get_spawn_position(x: int = 0, z: int = 0) -> Vector3:
 		var a1 := Vector3i(x, top_y + 1, z)
 		var a2 := Vector3i(x, top_y + 2, z)
 		if not is_solid_block(a1) and not is_solid_block(a2):
-			return Vector3(float(x) + 0.5, float(top_y) + 1.1, float(z) + 0.5)
+			return Vector3(float(x) + 0.5, float(top_y) + 1.5, float(z) + 0.5)
 
 	# Spiral fallback
 	for radius in range(1, 8):
@@ -332,7 +333,7 @@ func get_spawn_position(x: int = 0, z: int = 0) -> Vector3:
 				if sy >= 0:
 					if not is_solid_block(Vector3i(x + dx, sy + 1, z + dz)) \
 					and not is_solid_block(Vector3i(x + dx, sy + 2, z + dz)):
-						return Vector3(float(x + dx) + 0.5, float(sy) + 1.1, float(z + dz) + 0.5)
+						return Vector3(float(x + dx) + 0.5, float(sy) + 1.5, float(z + dz) + 0.5)
 
 	return Vector3(0.5, SURF_MAX + 2.0, 0.5)
 

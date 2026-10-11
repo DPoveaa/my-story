@@ -92,22 +92,15 @@ func _ready() -> void:
 		build_hud.set_player_mode("Survival" if current_game_mode == GameMode.SURVIVAL else "Creative")
 		build_hud.set_cement(player.get_cement_count(), player.max_cement)
 
-		# Suspend player physics immediately so player does not fall into void
-		if player.has_method("suspend_physics"):
-			player.suspend_physics()
-		elif player.has_method("set_physics_process"):
-			player.set_physics_process(false)
-
-		# Initial position above spawn surface
-		var initial_spawn := voxel_world.get_spawn_position(0, 0)
-		player.global_position = initial_spawn
-
 		# Attach viewer to player so Zylann VoxelTerrain streams around player location
 		if voxel_world.has_method("attach_viewer_to_player"):
 			voxel_world.attach_viewer_to_player(player)
 
-		# Deferred async spawn: awaits terrain generation and verifies chunk readiness
-		_spawn_player_on_terrain.call_deferred()
+		# Fallback legacy deferred async spawn: only used if player doesn't manage its own raycast spawn
+		if not ("_is_spawned" in player):
+			var initial_spawn := voxel_world.get_spawn_position(0, 0)
+			player.global_position = initial_spawn
+			_spawn_player_on_terrain.call_deferred()
 
 	# Wire BuildCamera as secondary/debug tool
 	if build_camera != null:
@@ -124,7 +117,7 @@ func _ready() -> void:
 ## Async coroutine: waits for VoxelTerrain to finish generating and meshing the chunk
 ## directly under the player before querying the safe surface Y and re-enabling physics.
 func _spawn_player_on_terrain() -> void:
-	if player == null or voxel_world == null:
+	if player == null or voxel_world == null or "_is_spawned" in player:
 		return
 
 	# Wait for VoxelTerrain to finish generating and meshing the chunk directly under the player

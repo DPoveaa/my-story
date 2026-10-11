@@ -114,6 +114,9 @@ var _last_mined_cell: Vector3i = Vector3i(99999, 99999, 99999)
 ## Dictionary[StringName, int] — block_type -> amount
 var raw_materials: Dictionary = {}
 
+## Spawn state machine — RayCast polling waits for VoxelTerrain collision to generate
+var _is_spawned: bool = false
+
 func _ensure_nodes() -> void:
 	if collision_shape == null:
 		collision_shape = get_node_or_null("CollisionShape3D")
@@ -166,8 +169,11 @@ func _ready() -> void:
 	# Auto-capture mouse when game starts so first-person look works immediately
 	set_mouse_capture(true)
 
-	# Suspend physics immediately on spawn until terrain chunk is generated and ready
-	suspend_physics()
+	# Spawn state: start in the air above world height (WORLD_HEIGHT=32) and await terrain collision via raycast polling.
+	# Starting at Y=40.0 ensures the player is safely above all terrain while remaining well within VoxelViewer distance (64m).
+	global_position.y = 40.0
+	_is_spawned = false
+	velocity = Vector3.ZERO
 
 	set_state(State.BODY_CONTROL)
 	block_type_changed.emit(get_selected_type())
@@ -179,7 +185,6 @@ var is_physics_suspended: bool = false
 func suspend_physics() -> void:
 	is_physics_suspended = true
 	velocity = Vector3.ZERO
-	set_physics_process(false)
 
 func resume_physics() -> void:
 	is_physics_suspended = false
@@ -188,11 +193,6 @@ func resume_physics() -> void:
 
 ## Waits for terrain directly under player to finish generating, then safely resumes physics.
 func await_terrain_and_resume() -> void:
-	var vox := _get_voxel_world()
-	if vox != null and vox.has_method("wait_for_terrain_at"):
-		await vox.wait_for_terrain_at(global_position)
-		if vox.has_method("get_spawn_position_raycast"):
-			global_position = vox.get_spawn_position_raycast(global_position.x, global_position.z)
 	resume_physics()
 
 func get_cement_count() -> int:
@@ -527,6 +527,24 @@ func _select_type_by_index(idx: int) -> void:
 		block_type_changed.emit(get_selected_type())
 
 func _physics_process(delta: float) -> void:
+	if not _is_spawned:
+		velocity = Vector3.ZERO
+		var space_state := get_world_3d().direct_space_state
+		if space_state != null:
+			var ray_from := Vector3(global_position.x, maxf(global_position.y, 40.0), global_position.z)
+			var ray_to := Vector3(global_position.x, -10.0, global_position.z)
+			var query := PhysicsRayQueryParameters3D.create(ray_from, ray_to)
+			query.exclude = [get_rid()]
+			var hit_result := space_state.intersect_ray(query)
+			if hit_result.is_empty():
+				return
+			# Teleport safely 0.5m above ground so the capsule (bottom at Y=0) does not penetrate the voxel surface
+			global_position = Vector3(global_position.x, hit_result.position.y + 0.5, global_position.z)
+			_is_spawned = true
+			is_physics_suspended = false
+		else:
+			return
+
 	if is_physics_suspended:
 		velocity = Vector3.ZERO
 		return
@@ -578,7 +596,7 @@ func _complete_mining_action() -> void:
 	_last_mined_cell = Vector3i(99999, 99999, 99999)
 
 func _process_body_movement(delta: float) -> void:
-	if is_physics_suspended:
+	if not _is_spawned or is_physics_suspended:
 		velocity = Vector3.ZERO
 		return
 
