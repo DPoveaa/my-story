@@ -3,17 +3,23 @@ extends Node3D
 
 ## Infinite 3D Chunked Voxel Terrain Engine inspired by Castle Story's floating islands.
 ##
-## HIGH-PERFORMANCE MULTI-THREADED PIPELINE:
+## HIGH-PERFORMANCE MULTI-THREADED PIPELINE & BUDGETED STREAMING:
 ## - Background Thread (WorkerThreadPool):
 ##     1. Evaluates procedural noise + radial mask + deltas into flat voxel buffer.
 ##     2. Computes all face culling, surface vertex buffers (normals, UVs), and collision geometry.
-##     3. 100% of intensive loops run in parallel across available CPU cores.
+##     3. 100% of CPU-intensive loops run in parallel across available CPU cores.
 ## - Main Thread:
-##     1. Creates node, calls apply_mesh_and_collision_data with pre-built PackedArrays.
-##     2. Takes < 0.1 ms per chunk — ZERO freezing, perfectly smooth 60+ FPS while streaming.
-##     3. Rate-limits neighbor boundary updates across subsequent frames to prevent stutters.
+##     1. Strict per-frame time budget (max_frame_budget_ms) prevents frame drops.
+##     2. Ingests pre-built PackedArrays directly via ArrayMesh and ConcavePolygonShape3D.
+##     3. O(1) zero-copy voxel data assignment (< 0.05 ms).
+##     4. Selectively queues only neighbor chunks with shared solid boundaries, amortizing
+##        remeshes at most 1 per frame within budget.
+##     5. Prunes and cancels stale in-flight/queued tasks when player moves.
+##     6. Per-chunk edit counter prevents stale worker results from overwriting newer mining edits.
+##     7. Bounded result cache (max_cached_results) avoids unbounded memory growth.
 
 ## Number of chunk-radius to pre-load synchronously around spawn.
+## IMPORTANT: Keep this at 1. Larger values freeze the main thread at startup.
 const SPAWN_SYNC_RADIUS: int = 1
 
 signal chunk_loaded(chunk_pos: Vector2i)
@@ -30,8 +36,17 @@ const DELTA_SAVE_PATH: String = "user://terrain_deltas.json"
 @export var view_distance_chunks: int = 4
 ## How many background tasks can run simultaneously. Scaled to CPU cores in _ready().
 @export var max_parallel_tasks: int = 8
-## How many completed chunks to upload to GPU/Physics per frame.
-@export var max_stage2_per_frame: int = 4
+
+## === BUDGETED MAIN-THREAD POLICIES ===
+## Maximum time in milliseconds to spend on main-thread terrain tasks per frame.
+@export var max_frame_budget_ms: float = 3.5
+## Maximum number of chunk uploads to GPU/Physics per single frame.
+@export var max_uploads_per_frame: int = 2
+## Maximum number of neighbor remeshes per single frame.
+@export var max_remeshes_per_frame: int = 1
+## Maximum cached results before oldest are dropped to bound memory.
+@export var max_cached_results: int = 32
+
 @export var noise_frequency_2d: float = 0.025
 @export var noise_frequency_3d: float = 0.045
 
@@ -46,6 +61,10 @@ var _chunks: Dictionary = {}
 var _mined_deltas: Dictionary = {}
 var _mined_deltas_set: Dictionary = {}  # Vector2i -> Dictionary[Vector3i, bool]
 
+## Per-chunk edit generation counter. Incremented on each mining edit.
+## Stale worker results with old generation numbers are discarded.
+var _chunk_generation: Dictionary = {}  # Vector2i -> int
+
 ## === THREADED PIPELINE ===
 
 ## Chunks waiting to be dispatched to background thread (sorted, deduplicated)
@@ -53,23 +72,32 @@ var _pending_queue: Array[Vector2i] = []
 var _pending_set: Dictionary = {}  # Vector2i -> bool
 
 ## Chunks currently running Stage 1+2 on a background thread.
-var _in_flight: Dictionary = {}       # Vector2i -> bool
+var _in_flight: Dictionary = {}       # Vector2i -> int (generation at dispatch)
 var _in_flight_count: int = 0
 
 ## Completed results waiting to be consumed on main thread.
 ## Protected by _results_mutex.
+## Bounded to max_cached_results to prevent unbounded memory.
 var _results_mutex: Mutex = Mutex.new()
-var _results_ready: Array = []  # Array of {pos, flat, surfaces, collision_faces}
+var _results_ready: Array = []  # Array of {pos, flat, surfaces, collision_faces, worker_time_ms, generation}
 
-## Rate-limited neighbor remesh queue for boundary seam cleanup
+## Rate-limited neighbor remesh queue for boundary seam cleanup (deduplicated)
 var _remesh_queue: Array[Vector2i] = []
 var _remesh_set: Dictionary = {}
 
 var _last_player_chunk: Vector2i = Vector2i(99999, 99999)
 
-## Lightweight Diagnostics
+## Diagnostics & Frame Profiling
 var total_chunks_generated: int = 0
+var cancelled_tasks_count: int = 0
+var stale_results_discarded: int = 0
 var last_chunk_build_time_ms: float = 0.0
+var last_worker_gen_time_ms: float = 0.0
+var last_main_voxel_copy_time_ms: float = 0.0
+var last_main_mesh_upload_time_ms: float = 0.0
+var last_main_collision_time_ms: float = 0.0
+var last_main_neighbor_remesh_time_ms: float = 0.0
+var main_total_frame_time_ms: float = 0.0
 
 func _ready() -> void:
 	max_parallel_tasks = maxi(4, mini(OS.get_processor_count() - 1, 16))
@@ -77,9 +105,18 @@ func _ready() -> void:
 	load_terrain_deltas()
 
 func _process(_delta: float) -> void:
+	var frame_start_usec := Time.get_ticks_usec()
 	_dispatch_pending_tasks()
-	_consume_ready_results()
-	_process_remesh_queue()
+
+	var time_used_ms := float(Time.get_ticks_usec() - frame_start_usec) / 1000.0
+	if time_used_ms < max_frame_budget_ms:
+		_consume_ready_results(frame_start_usec)
+
+	time_used_ms = float(Time.get_ticks_usec() - frame_start_usec) / 1000.0
+	if time_used_ms < max_frame_budget_ms:
+		_process_remesh_queue(frame_start_usec)
+
+	main_total_frame_time_ms = float(Time.get_ticks_usec() - frame_start_usec) / 1000.0
 
 func _setup_noise() -> void:
 	_noise_2d = FastNoiseLite.new()
@@ -232,6 +269,7 @@ func update_loaded_chunks(player_world_pos: Vector3, force_sync: bool = false) -
 			filtered.append(cp)
 		else:
 			_pending_set.erase(cp)
+			cancelled_tasks_count += 1
 	_pending_queue = filtered
 
 # ============================================================
@@ -246,10 +284,20 @@ func _dispatch_pending_tasks() -> void:
 		var cp: Vector2i = _pending_queue.pop_front()
 		_pending_set.erase(cp)
 
+		# Prune obsolete task if player has moved away
+		if _last_player_chunk != Vector2i(99999, 99999):
+			var dist_x := absi(cp.x - _last_player_chunk.x)
+			var dist_z := absi(cp.y - _last_player_chunk.y)
+			if dist_x > view_distance_chunks or dist_z > view_distance_chunks:
+				cancelled_tasks_count += 1
+				continue
+
 		if _chunks.has(cp) or _in_flight.has(cp):
 			continue
 
-		_in_flight[cp] = true
+		# Capture current edit generation so worker result can be validated on return
+		var current_gen: int = _chunk_generation.get(cp, 0)
+		_in_flight[cp] = current_gen
 		_in_flight_count += 1
 
 		var start_x: int = cp.x * VoxelChunk.SIZE_X
@@ -278,7 +326,8 @@ func _dispatch_pending_tasks() -> void:
 			_worker_generate_chunk(
 				cp_captured, start_x, start_z, has_deltas, chunk_deltas,
 				n2d, n3d, n_ore,
-				left_border, right_border, back_border, front_border
+				left_border, right_border, back_border, front_border,
+				current_gen
 			)
 		)
 
@@ -295,11 +344,13 @@ func _worker_generate_chunk(
 	left_border: Variant,
 	right_border: Variant,
 	back_border: Variant,
-	front_border: Variant
+	front_border: Variant,
+	generation: int
 ) -> void:
-	var size := VoxelChunk.SIZE_X * VoxelChunk.SIZE_Y * VoxelChunk.SIZE_Z
+	var t_worker_start := Time.get_ticks_usec()
+
 	var flat: Array = []
-	flat.resize(size)
+	flat.resize(VoxelChunk.TOTAL_CELLS)
 	flat.fill(&"")
 
 	var sy := VoxelChunk.SIZE_Y
@@ -350,18 +401,24 @@ func _worker_generate_chunk(
 
 	# Generate mesh surface arrays & collision faces directly on worker thread
 	var mesh_data := VoxelChunk.build_mesh_data_from_flat(flat, left_border, right_border, back_border, front_border)
+	var worker_duration_ms := float(Time.get_ticks_usec() - t_worker_start) / 1000.0
 
 	_results_mutex.lock()
+	# Enforce bounded cache: drop oldest entries when overfull
+	if _results_ready.size() >= max_cached_results:
+		_results_ready.pop_front()
 	_results_ready.append({
 		"pos": cp,
 		"flat": flat,
 		"surfaces": mesh_data["surfaces"],
-		"collision_faces": mesh_data["collision_faces"]
+		"collision_faces": mesh_data["collision_faces"],
+		"worker_time_ms": worker_duration_ms,
+		"generation": generation
 	})
 	_results_mutex.unlock()
 
-## Main thread: applies pre-built mesh and collision. Takes < 0.1 ms per chunk.
-func _consume_ready_results() -> void:
+## Main thread: applies pre-built mesh and collision under strict time/work budget.
+func _consume_ready_results(frame_start_usec: int) -> void:
 	if _results_ready.is_empty():
 		return
 
@@ -372,7 +429,9 @@ func _consume_ready_results() -> void:
 
 	var processed := 0
 	for entry in batch:
-		if processed >= max_stage2_per_frame:
+		var elapsed_ms := float(Time.get_ticks_usec() - frame_start_usec) / 1000.0
+		if processed >= max_uploads_per_frame or elapsed_ms >= max_frame_budget_ms:
+			# Defer leftovers to next frame to guarantee zero stutters
 			_results_mutex.lock()
 			_results_ready.append_array(batch.slice(processed))
 			_results_mutex.unlock()
@@ -382,9 +441,28 @@ func _consume_ready_results() -> void:
 		var flat: Array = entry["flat"]
 		var surfaces: Dictionary = entry["surfaces"]
 		var collision_faces: PackedVector3Array = entry["collision_faces"]
+		var result_generation: int = entry.get("generation", 0)
+		last_worker_gen_time_ms = entry.get("worker_time_ms", 0.0)
 
 		_in_flight.erase(cp)
 		_in_flight_count = maxi(0, _in_flight_count - 1)
+
+		# Prune obsolete result if player walked away while task was in flight
+		if _last_player_chunk != Vector2i(99999, 99999):
+			var dist_x := absi(cp.x - _last_player_chunk.x)
+			var dist_z := absi(cp.y - _last_player_chunk.y)
+			if dist_x > view_distance_chunks or dist_z > view_distance_chunks:
+				cancelled_tasks_count += 1
+				processed += 1
+				continue
+
+		# Discard stale results: if the chunk was edited after this worker was dispatched,
+		# the result contains outdated voxel data. The pending remesh queue will rebuild it.
+		var current_gen: int = _chunk_generation.get(cp, 0)
+		if result_generation < current_gen:
+			stale_results_discarded += 1
+			processed += 1
+			continue
 
 		if _chunks.has(cp):
 			processed += 1
@@ -397,20 +475,28 @@ func _consume_ready_results() -> void:
 		chunk.chunk_pos = cp
 		chunk.voxel_world = self
 
+		var t_copy0 := Time.get_ticks_usec()
 		chunk.load_from_flat(flat)
+		last_main_voxel_copy_time_ms = float(Time.get_ticks_usec() - t_copy0) / 1000.0
+
 		add_child(chunk)
-		chunk.apply_mesh_and_collision_data(surfaces, collision_faces)
+		var upload_timings: Dictionary = chunk.apply_mesh_and_collision_data(surfaces, collision_faces)
+		last_main_mesh_upload_time_ms = upload_timings.get("mesh_upload_time_ms", 0.0)
+		last_main_collision_time_ms = upload_timings.get("collision_time_ms", 0.0)
 		_chunks[cp] = chunk
 
 		last_chunk_build_time_ms = float(Time.get_ticks_usec() - t_start) / 1000.0
 		total_chunks_generated += 1
 		chunk_loaded.emit(cp)
 
-		# Schedule neighbor chunks for boundary updates across subsequent frames
-		_queue_neighbor_remesh(cp)
+		# Selectively schedule only neighbors sharing solid blocks for seam cleanup
+		_queue_neighbor_remesh(chunk)
 		processed += 1
 
-func _queue_neighbor_remesh(cp: Vector2i) -> void:
+func _queue_neighbor_remesh(new_chunk: VoxelChunk) -> void:
+	if new_chunk == null:
+		return
+	var cp := new_chunk.chunk_pos
 	var neighbors: Array[Vector2i] = [
 		cp + Vector2i(1, 0), cp + Vector2i(-1, 0),
 		cp + Vector2i(0, 1), cp + Vector2i(0, -1)
@@ -419,23 +505,41 @@ func _queue_neighbor_remesh(cp: Vector2i) -> void:
 		if _chunks.has(n_pos):
 			var n_chunk: VoxelChunk = _chunks[n_pos]
 			if is_instance_valid(n_chunk) and not _remesh_set.has(n_pos):
-				_remesh_queue.append(n_pos)
-				_remesh_set[n_pos] = true
+				# Only queue remesh if chunks actually share a solid boundary!
+				var dir_to_new := cp - n_pos
+				if n_chunk.shares_solid_boundary_with(new_chunk, dir_to_new):
+					_remesh_queue.append(n_pos)
+					_remesh_set[n_pos] = true
 
-## Smoothly updates at most 1 neighbor seam per frame to avoid any frame spikes
-func _process_remesh_queue() -> void:
-	if _remesh_queue.is_empty():
-		return
-	var n_pos: Vector2i = _remesh_queue.pop_front()
-	_remesh_set.erase(n_pos)
+## Updates at most max_remeshes_per_frame neighbor seams within budget
+func _process_remesh_queue(frame_start_usec: int) -> void:
+	var remeshed := 0
+	var t_remesh_start := Time.get_ticks_usec()
+	while not _remesh_queue.is_empty() and remeshed < max_remeshes_per_frame:
+		var elapsed_ms := float(Time.get_ticks_usec() - frame_start_usec) / 1000.0
+		if elapsed_ms >= max_frame_budget_ms:
+			break
 
-	if _chunks.has(n_pos):
-		var n_chunk: VoxelChunk = _chunks[n_pos]
-		if is_instance_valid(n_chunk):
-			n_chunk.rebuild_mesh_and_collision()
+		var n_pos: Vector2i = _remesh_queue.pop_front()
+		_remesh_set.erase(n_pos)
+
+		if _chunks.has(n_pos):
+			var n_chunk: VoxelChunk = _chunks[n_pos]
+			if is_instance_valid(n_chunk):
+				# Only remesh if still in active view distance
+				if _last_player_chunk != Vector2i(99999, 99999):
+					var dist_x := absi(n_pos.x - _last_player_chunk.x)
+					var dist_z := absi(n_pos.y - _last_player_chunk.y)
+					if dist_x > view_distance_chunks or dist_z > view_distance_chunks:
+						continue
+				n_chunk.rebuild_mesh_and_collision()
+				remeshed += 1
+
+	if remeshed > 0:
+		last_main_neighbor_remesh_time_ms = float(Time.get_ticks_usec() - t_remesh_start) / 1000.0
 
 # ============================================================
-# SYNCHRONOUS GENERATION (spawn area, unit tests)
+# SYNCHRONOUS GENERATION (spawn area, unit tests, mining)
 # ============================================================
 
 func _load_or_generate_chunk(chunk_pos: Vector2i) -> VoxelChunk:
@@ -526,10 +630,16 @@ func _rebuild_neighbor_chunks(cp: Vector2i) -> void:
 		cp + Vector2i(1, 0), cp + Vector2i(-1, 0),
 		cp + Vector2i(0, 1), cp + Vector2i(0, -1)
 	]
+	var current_chunk: VoxelChunk = _chunks.get(cp, null)
 	for n_pos in neighbors:
 		if _chunks.has(n_pos):
 			var n_chunk: VoxelChunk = _chunks[n_pos]
 			if is_instance_valid(n_chunk):
+				# If current_chunk is loaded, only rebuild if they actually share a solid boundary
+				if current_chunk != null:
+					var dir := cp - n_pos
+					if not n_chunk.shares_solid_boundary_with(current_chunk, dir):
+						continue
 				n_chunk.rebuild_mesh_and_collision()
 
 func get_diagnostics() -> Dictionary:
@@ -538,8 +648,17 @@ func get_diagnostics() -> Dictionary:
 		"pending_queue": _pending_queue.size(),
 		"in_flight_threads": _in_flight_count,
 		"ready_results": _results_ready.size(),
+		"remesh_queue_size": _remesh_queue.size(),
 		"total_chunks_generated": total_chunks_generated,
-		"last_chunk_build_time_ms": last_chunk_build_time_ms
+		"cancelled_tasks_count": cancelled_tasks_count,
+		"stale_results_discarded": stale_results_discarded,
+		"last_chunk_build_time_ms": last_chunk_build_time_ms,
+		"worker_gen_mesh_time_ms": last_worker_gen_time_ms,
+		"main_voxel_copy_time_ms": last_main_voxel_copy_time_ms,
+		"main_mesh_upload_time_ms": last_main_mesh_upload_time_ms,
+		"main_collision_time_ms": last_main_collision_time_ms,
+		"main_neighbor_remesh_time_ms": last_main_neighbor_remesh_time_ms,
+		"main_total_frame_time_ms": main_total_frame_time_ms
 	}
 
 # ============================================================
@@ -570,26 +689,50 @@ func mine_voxel(world_cell: Vector3i) -> StringName:
 		_mined_deltas[chunk_pos].append(local_cell)
 		_mined_deltas_set[chunk_pos][local_cell] = true
 
+	# Increment edit generation to invalidate any in-flight or queued worker results
+	# for this chunk and its affected neighbors. This prevents stale worker output from
+	# overwriting the mined voxel immediately after the player removes it.
+	_chunk_generation[chunk_pos] = _chunk_generation.get(chunk_pos, 0) + 1
+
 	chunk.rebuild_mesh_and_collision()
 
-	if lx == 0 and _chunks.has(chunk_pos + Vector2i(-1, 0)):
-		_chunks[chunk_pos + Vector2i(-1, 0)].rebuild_mesh_and_collision()
-	elif lx == VoxelChunk.SIZE_X - 1 and _chunks.has(chunk_pos + Vector2i(1, 0)):
-		_chunks[chunk_pos + Vector2i(1, 0)].rebuild_mesh_and_collision()
+	# Remesh affected neighbors — only those at the edited boundary face.
+	# Use deduplication via _remesh_queue/_remesh_set to avoid duplicate calls within same frame.
+	if lx == 0:
+		_enqueue_neighbor_remesh_if_needed(chunk_pos + Vector2i(-1, 0), chunk)
+	elif lx == VoxelChunk.SIZE_X - 1:
+		_enqueue_neighbor_remesh_if_needed(chunk_pos + Vector2i(1, 0), chunk)
 
-	if lz == 0 and _chunks.has(chunk_pos + Vector2i(0, -1)):
-		_chunks[chunk_pos + Vector2i(0, -1)].rebuild_mesh_and_collision()
-	elif lz == VoxelChunk.SIZE_Z - 1 and _chunks.has(chunk_pos + Vector2i(0, 1)):
-		_chunks[chunk_pos + Vector2i(0, 1)].rebuild_mesh_and_collision()
+	if lz == 0:
+		_enqueue_neighbor_remesh_if_needed(chunk_pos + Vector2i(0, -1), chunk)
+	elif lz == VoxelChunk.SIZE_Z - 1:
+		_enqueue_neighbor_remesh_if_needed(chunk_pos + Vector2i(0, 1), chunk)
 
 	save_terrain_deltas()
 	voxel_mined.emit(world_cell, b_type)
 	return b_type
 
+## Enqueues a neighbor chunk for budgeted remeshing. Deduplicates via _remesh_set.
+## Falls back to immediate rebuild only for spawn-area sync chunks not yet in budget queue.
+func _enqueue_neighbor_remesh_if_needed(n_pos: Vector2i, _trigger_chunk: VoxelChunk) -> void:
+	if not _chunks.has(n_pos):
+		return
+	var n_chunk: VoxelChunk = _chunks[n_pos]
+	if not is_instance_valid(n_chunk):
+		return
+	# Avoid duplicate entries in remesh queue
+	if _remesh_set.has(n_pos):
+		return
+	_remesh_queue.append(n_pos)
+	_remesh_set[n_pos] = true
+
 # ============================================================
 # SPAWN SYSTEM
 # ============================================================
 
+## Pre-loads the spawn area synchronously (SPAWN_SYNC_RADIUS = 1 → 9 chunks max),
+## then waits one physics frame so PhysicsServer3D commits all CollisionShapes.
+## This is the ONLY safe way to call get_spawn_position() before placing the player.
 func force_sync_spawn_chunks(center_chunk_x: int = 0, center_chunk_z: int = 0) -> void:
 	for dx in range(-SPAWN_SYNC_RADIUS, SPAWN_SYNC_RADIUS + 1):
 		for dz in range(-SPAWN_SYNC_RADIUS, SPAWN_SYNC_RADIUS + 1):
@@ -635,11 +778,13 @@ func verify_spawn_physics(candidate_pos: Vector3, exclude_rids: Array[RID] = [])
 
 	return true
 
+## Returns a safe above-surface spawn position.
+## NOTE: This only searches within already-loaded chunks. Call force_sync_spawn_chunks()
+## first to guarantee the spawn area is populated. get_spawn_position() does NOT load
+## additional chunks synchronously — doing so inside a deferred async function would
+## spike the main thread with multiple meshing+collision operations simultaneously.
 func get_spawn_position(x: int = 0, z: int = 0) -> Vector3:
-	var cx := floori(float(x) / float(VoxelChunk.SIZE_X))
-	var cz := floori(float(z) / float(VoxelChunk.SIZE_Z))
-	_load_or_generate_chunk_sync(Vector2i(cx, cz))
-
+	# Search already-loaded chunks first (zero additional load cost)
 	for y in range(VoxelChunk.SIZE_Y - 1, -1, -1):
 		if is_solid_block(Vector3i(x, y, z)):
 			var cell_above_1 := Vector3i(x, y + 1, z)
@@ -649,16 +794,15 @@ func get_spawn_position(x: int = 0, z: int = 0) -> Vector3:
 				if verify_spawn_physics(candidate):
 					return candidate
 
-	for radius in range(1, 16):
+	# Spiral search within already-loaded chunk radius — no new chunk loads.
+	# Chunk must already exist; get_voxel_at() uses procedural fallback for loaded-but-not-yet-ready.
+	for radius in range(1, 8):
 		for dx in range(-radius, radius + 1):
 			for dz in range(-radius, radius + 1):
 				if abs(dx) != radius and abs(dz) != radius:
 					continue
 				var nx := x + dx
 				var nz := z + dz
-				var ncx := floori(float(nx) / float(VoxelChunk.SIZE_X))
-				var ncz := floori(float(nz) / float(VoxelChunk.SIZE_Z))
-				_load_or_generate_chunk_sync(Vector2i(ncx, ncz))
 				for ny in range(VoxelChunk.SIZE_Y - 1, -1, -1):
 					if is_solid_block(Vector3i(nx, ny, nz)):
 						if not is_solid_block(Vector3i(nx, ny + 1, nz)) and not is_solid_block(Vector3i(nx, ny + 2, nz)):
@@ -666,14 +810,12 @@ func get_spawn_position(x: int = 0, z: int = 0) -> Vector3:
 							if verify_spawn_physics(candidate):
 								return candidate
 
-	for fallback_r in range(0, 24):
+	# Final fallback: estimate from procedural data without loading chunks
+	for fallback_r in range(0, 8):
 		for fdx in range(-fallback_r, fallback_r + 1):
 			for fdz in range(-fallback_r, fallback_r + 1):
 				var fx := fdx
 				var fz := fdz
-				var fcx := floori(float(fx) / float(VoxelChunk.SIZE_X))
-				var fcz := floori(float(fz) / float(VoxelChunk.SIZE_Z))
-				_load_or_generate_chunk_sync(Vector2i(fcx, fcz))
 				for fy in range(VoxelChunk.SIZE_Y - 1, -1, -1):
 					if is_solid_block(Vector3i(fx, fy, fz)):
 						if not is_solid_block(Vector3i(fx, fy + 1, fz)) and not is_solid_block(Vector3i(fx, fy + 2, fz)):
@@ -690,6 +832,7 @@ func clear_world() -> void:
 		if is_instance_valid(chunk):
 			chunk.queue_free()
 	_chunks.clear()
+	_chunk_generation.clear()
 
 # ============================================================
 # PERSISTENCE

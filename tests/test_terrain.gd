@@ -41,6 +41,8 @@ func run_all() -> bool:
 	_run_test("test_chunk_collision_faces_outward_winding")
 	_run_test("test_concave_polygon_shape_backface_collision")
 	_run_test("test_physics_spawn_verification_ground_and_clearance")
+	_run_test("test_stale_job_generation_versioning")
+	_run_test("test_greedy_y_meshing_reduces_vertex_count")
 
 	print("\n--------------------------------------------------")
 	print("TERRAIN TESTS SUMMARY: %d Passed, %d Failed" % [_passed, _failed])
@@ -106,8 +108,10 @@ func test_chunk_adjacent_blocks_cull_internal_faces() -> void:
 	if col_shape != null and col_shape.shape is ConcavePolygonShape3D:
 		var concave: ConcavePolygonShape3D = col_shape.shape
 		var faces: PackedVector3Array = concave.get_faces()
-		# 2 blocks = 12 total faces - 2 shared internal faces = 10 exposed faces = 60 vertices
-		_assert(faces.size() == 60, "Adjacent solid blocks cull internal shared faces (60 vertices vs 72)")
+		# 2 blocks: X/Z per-voxel (4 side faces each, minus 2 shared X faces = 6 X/Z faces) * 6 verts = 36 verts.
+		# Greedy Y-merging: top+bottom each merge 2 adjacent same-material quads into 1 rect = 2 * 6 = 12 verts.
+		# Total: 36 + 12 = 48 verts (vs old per-voxel 60 verts — greedy Y reduces Y-face count).
+		_assert(faces.size() == 48, "Adjacent solid blocks cull shared X faces and greedy-merge Y faces (48 verts — less than old 60)")
 
 ## SPAWN GEOMETRY INVARIANT:
 ## CharacterBody3D.global_position.y == bottom of capsule == FEET position.
@@ -395,3 +399,59 @@ func test_physics_spawn_verification_ground_and_clearance() -> void:
 	var dummy_pos := Vector3(0.5, 16.1, 0.5)
 	var passes_no_tree := world.verify_spawn_physics(dummy_pos)
 	_assert(passes_no_tree, "verify_spawn_physics safely passes in unit-test/offline mode without tree")
+
+## Regression: _chunk_generation counter incremented on mine_voxel discards stale async results.
+## Ensures worker results dispatched before a mining edit cannot overwrite the mined-out voxel.
+func test_stale_job_generation_versioning() -> void:
+	var world: VoxelWorld = VoxelWorldScript.new()
+	world.seed_value = 1337
+
+	# Mark generation for a chunk as if a mining edit just happened
+	var cp := Vector2i(3, 3)
+	world._chunk_generation[cp] = 1
+
+	# Inject a stale result (generation=0) for that chunk into the ready queue
+	var stale_before := world.stale_results_discarded
+	world._results_mutex.lock()
+	world._results_ready.append({
+		"pos": cp,
+		"flat": [],
+		"surfaces": {},
+		"collision_faces": PackedVector3Array(),
+		"worker_time_ms": 0.0,
+		"generation": 0   # Older than current generation=1
+	})
+	world._results_mutex.unlock()
+
+	# Simulate main-thread consumption within budget
+	var frame_usec := Time.get_ticks_usec()
+	world._consume_ready_results(frame_usec)
+
+	var stale_after := world.stale_results_discarded
+	_assert(stale_after > stale_before, "Stale worker result (gen=0 < current gen=1) is detected and discarded without creating chunk")
+	_assert(not world._chunks.has(cp), "Stale result does not create chunk in loaded world")
+
+## Regression: greedy Y-plane meshing reduces vertex count vs naive per-voxel for flat terrain.
+## A 4x4 flat solid layer should produce fewer Y-face vertices than 4*4=16 separate quads.
+func test_greedy_y_meshing_reduces_vertex_count() -> void:
+	# Build a flat 4x4 layer of same-material blocks at y=10
+	var flat: Array = []
+	flat.resize(VoxelChunk.TOTAL_CELLS)
+	flat.fill(&"")
+	for lx in range(4):
+		for lz in range(4):
+			flat[lx * 512 + 10 * 16 + lz] = &"stone"
+
+	var mesh_data := VoxelChunk.build_mesh_data_from_flat(flat, null, null, null, null)
+	var total_verts := 0
+	for mat_key in mesh_data["surfaces"].keys():
+		var buf: Dictionary = mesh_data["surfaces"][mat_key]
+		total_verts += (buf["verts"] as PackedVector3Array).size()
+
+	# Naive: 4x4=16 top faces + 16 bottom faces = 32 separate quads * 6 verts = 192 Y-verts.
+	# Greedy: 1 merged 4x4 top rect + 1 merged 4x4 bottom rect = 2 * 6 = 12 Y-verts.
+	# Side faces (X/Z borders): 4 sides * 4 per side * 6 verts = 96 verts.
+	# Total greedy = 12 + 96 = 108 verts; naive = 192 + 96 = 288 verts.
+	# So greedy must produce fewer verts than naive would.
+	_assert(total_verts < 288, "Greedy Y-meshing reduces vertex count vs naive per-voxel for flat 4x4 slab (got %d, naive would be 288)" % total_verts)
+	_assert(total_verts > 0, "Greedy mesh still produces vertices for the solid slab")
