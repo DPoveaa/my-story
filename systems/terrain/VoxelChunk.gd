@@ -706,38 +706,47 @@ static func build_mesh_data_from_flat(
 		"collision_faces": col_faces
 	}
 
-## Applies pre-built surface buffers to mesh instance.
+## Compiles surface buffers into a finalized ArrayMesh with shared materials.
+## Thread-safe: can run on WorkerThreadPool background threads.
+static func build_array_mesh_from_surfaces(surfaces: Dictionary) -> ArrayMesh:
+	_init_materials()
+	if surfaces.is_empty():
+		return null
+	var combined_mesh := ArrayMesh.new()
+	for mat_key in surfaces.keys():
+		var buf: Dictionary = surfaces[mat_key]
+		var verts: PackedVector3Array = buf["verts"]
+		if verts.is_empty():
+			continue
+
+		var arrays := []
+		arrays.resize(Mesh.ARRAY_MAX)
+		arrays[Mesh.ARRAY_VERTEX] = verts
+		arrays[Mesh.ARRAY_NORMAL] = buf["norms"]
+		arrays[Mesh.ARRAY_TEX_UV] = buf["uvs"]
+
+		combined_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+		var mat: Material = _materials.get(mat_key, null)
+		if mat != null:
+			combined_mesh.surface_set_material(combined_mesh.get_surface_count() - 1, mat)
+
+	if combined_mesh.get_surface_count() > 0:
+		return combined_mesh
+	return null
+
+## Applies pre-built surface buffers or pre-compiled ArrayMesh to mesh instance.
 ## Must be called on main thread. Returns mesh upload time in ms.
-func apply_mesh_data(surfaces: Dictionary) -> float:
+func apply_mesh_data(mesh_or_surfaces: Variant) -> float:
 	setup_nodes()
 	position = Vector3(float(chunk_pos.x * SIZE_X), 0.0, float(chunk_pos.y * SIZE_Z))
 
 	var t_m0 := Time.get_ticks_usec()
-	if surfaces.is_empty():
+	if mesh_or_surfaces is ArrayMesh:
+		_mesh_inst.mesh = mesh_or_surfaces
+	elif mesh_or_surfaces is Dictionary:
+		_mesh_inst.mesh = build_array_mesh_from_surfaces(mesh_or_surfaces)
+	elif mesh_or_surfaces == null:
 		_mesh_inst.mesh = null
-	else:
-		var combined_mesh := ArrayMesh.new()
-		for mat_key in surfaces.keys():
-			var buf: Dictionary = surfaces[mat_key]
-			var verts: PackedVector3Array = buf["verts"]
-			if verts.is_empty():
-				continue
-
-			var arrays := []
-			arrays.resize(Mesh.ARRAY_MAX)
-			arrays[Mesh.ARRAY_VERTEX] = verts
-			arrays[Mesh.ARRAY_NORMAL] = buf["norms"]
-			arrays[Mesh.ARRAY_TEX_UV] = buf["uvs"]
-
-			combined_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
-			var mat: Material = _materials.get(mat_key, null)
-			if mat != null:
-				combined_mesh.surface_set_material(combined_mesh.get_surface_count() - 1, mat)
-
-		if combined_mesh.get_surface_count() > 0:
-			_mesh_inst.mesh = combined_mesh
-		else:
-			_mesh_inst.mesh = null
 	return float(Time.get_ticks_usec() - t_m0) / 1000.0
 
 ## Applies collision shape or faces to collision node.

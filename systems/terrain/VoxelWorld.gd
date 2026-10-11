@@ -189,7 +189,9 @@ func _process(_delta: float) -> void:
 			_queue_neighbor_remesh(cached_chunk)
 		else:
 			var flat: PackedByteArray = chunk_entry["flat"]
-			var surfaces: Dictionary = chunk_entry["surfaces"]
+			var compiled_mesh: ArrayMesh = chunk_entry.get("mesh", null)
+			if compiled_mesh == null and chunk_entry.has("surfaces"):
+				compiled_mesh = VoxelChunk.build_array_mesh_from_surfaces(chunk_entry["surfaces"])
 			var collision_shape: ConcavePolygonShape3D = chunk_entry.get("collision_shape", null)
 			last_worker_gen_time_ms = chunk_entry.get("worker_time_ms", 0.0)
 
@@ -199,14 +201,16 @@ func _process(_delta: float) -> void:
 			chunk.name = "Chunk_%d_%d" % [cp.x, cp.y]
 			chunk.chunk_pos = cp
 			chunk.voxel_world = self
+			chunk.position = Vector3(float(cp.x * VoxelChunk.SIZE_X), 0.0, float(cp.y * VoxelChunk.SIZE_Z))
 			chunk.load_from_flat(flat)
 			chunk.setup_nodes()
 			var time_node_creation := Time.get_ticks_usec() - t_nc_start
 
 			# 2. Time_MeshAssign: Time to execute mesh_instance.mesh = ...
 			var t_ma_start := Time.get_ticks_usec()
-			last_main_mesh_upload_time_ms = chunk.apply_mesh_data(surfaces)
+			chunk._mesh_inst.mesh = compiled_mesh
 			var time_mesh_assign := Time.get_ticks_usec() - t_ma_start
+			last_main_mesh_upload_time_ms = float(time_mesh_assign) / 1000.0
 
 			# 3. Time_CollisionAssign: Time to execute collision.shape = ...
 			var t_ca_start := Time.get_ticks_usec()
@@ -577,6 +581,9 @@ func _worker_generate_chunk(
 	var mesh_data := VoxelChunk.build_mesh_data_from_flat(flat, left_border, right_border, back_border, front_border)
 	var col_faces: PackedVector3Array = mesh_data["collision_faces"]
 
+	# Compile ArrayMesh 100% on background thread with shared materials
+	var array_mesh := VoxelChunk.build_array_mesh_from_surfaces(mesh_data["surfaces"])
+
 	# Build ConcavePolygonShape3D HERE on the worker thread — this is the expensive
 	# set_faces() BVH construction that must NEVER run on the main thread.
 	var collision_shape: ConcavePolygonShape3D = null
@@ -594,6 +601,7 @@ func _worker_generate_chunk(
 	chunks_ready.append({
 		"pos": cp,
 		"flat": flat,
+		"mesh": array_mesh,
 		"surfaces": mesh_data["surfaces"],
 		"collision_shape": collision_shape,
 		"worker_time_ms": worker_duration_ms,
