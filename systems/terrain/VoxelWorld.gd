@@ -47,6 +47,16 @@ const DELTA_SAVE_PATH: String = "user://terrain_deltas.json"
 ## Maximum cached results before oldest are dropped to bound memory.
 @export var max_cached_results: int = 32
 
+## === CHUNK CACHE (SOFT UNLOAD / OBJECT POOLING) ===
+## When chunks are unloaded, they are cached and removed from the active tree.
+## Moving back to those coordinates restores them directly with zero worker regeneration.
+var _chunk_cache: Dictionary = {}  # Vector2i -> VoxelChunk
+var _chunk_cache_order: Array[Vector2i] = []
+@export var max_chunk_cache_size: int = 100
+
+## Queue for deferred geometric collision assignment to guarantee frame budget
+var _pending_collision_queue: Array[Dictionary] = []
+
 @export var noise_frequency_2d: float = 0.025
 @export var noise_frequency_3d: float = 0.045
 
@@ -114,6 +124,10 @@ func _process(_delta: float) -> void:
 
 	time_used_ms = float(Time.get_ticks_usec() - frame_start_usec) / 1000.0
 	if time_used_ms < max_frame_budget_ms:
+		_process_pending_collisions(frame_start_usec)
+
+	time_used_ms = float(Time.get_ticks_usec() - frame_start_usec) / 1000.0
+	if time_used_ms < max_frame_budget_ms:
 		_process_remesh_queue(frame_start_usec)
 
 	main_total_frame_time_ms = float(Time.get_ticks_usec() - frame_start_usec) / 1000.0
@@ -169,6 +183,10 @@ func get_voxel_at(world_cell: Vector3i) -> StringName:
 		var chunk: VoxelChunk = _chunks[chunk_pos]
 		if is_instance_valid(chunk):
 			return chunk.get_voxel_local(lx, ly, lz)
+	elif _chunk_cache.has(chunk_pos):
+		var cached_chunk: VoxelChunk = _chunk_cache[chunk_pos]
+		if is_instance_valid(cached_chunk):
+			return cached_chunk.get_voxel_local(lx, ly, lz)
 
 	# Deterministic fallback (for queries against unloaded / in-flight chunks)
 	return _evaluate_procedural_voxel(world_cell.x, world_cell.y, world_cell.z, chunk_pos, Vector3i(lx, ly, lz))
@@ -243,7 +261,9 @@ func update_loaded_chunks(player_world_pos: Vector3, force_sync: bool = false) -
 			required_chunks[cp] = true
 
 			if not _chunks.has(cp) and not _in_flight.has(cp):
-				if not is_inside_tree() or force_sync:
+				if _chunk_cache.has(cp):
+					_restore_chunk_from_cache(cp, force_sync)
+				elif not is_inside_tree() or force_sync:
 					_load_or_generate_chunk_sync(cp)
 				elif not _pending_set.has(cp):
 					_pending_queue.append(cp)
@@ -293,6 +313,10 @@ func _dispatch_pending_tasks() -> void:
 				continue
 
 		if _chunks.has(cp) or _in_flight.has(cp):
+			continue
+
+		if _chunk_cache.has(cp):
+			_restore_chunk_from_cache(cp, false)
 			continue
 
 		# Capture current edit generation so worker result can be validated on return
@@ -349,9 +373,10 @@ func _worker_generate_chunk(
 ) -> void:
 	var t_worker_start := Time.get_ticks_usec()
 
-	var flat: Array = []
+	# PackedByteArray: 8 KB per chunk vs ~196 KB for Array[StringName], zero GC overhead.
+	var flat := PackedByteArray()
 	flat.resize(VoxelChunk.TOTAL_CELLS)
-	flat.fill(&"")
+	# Zero-initialized = VoxelChunk.BLOCK_AIR (0) everywhere.
 
 	var sy := VoxelChunk.SIZE_Y
 	var sz := VoxelChunk.SIZE_Z
@@ -381,26 +406,27 @@ func _worker_generate_chunk(
 				if has_deltas and chunk_deltas.has(local_cell):
 					continue
 
-				var block_type: StringName
+				var block_id: int
 				if ly == surf_h:
-					block_type = &"grass"
+					block_id = VoxelChunk.BLOCK_GRASS
 				elif ly >= surf_h - 2:
-					block_type = &"dirt"
+					block_id = VoxelChunk.BLOCK_DIRT
 				else:
 					var ore_n: float = n_ore.get_noise_3d(float(gx), float(ly), float(gz))
 					if ly <= 8 and ore_n > 0.45:
-						block_type = &"gold"
+						block_id = VoxelChunk.BLOCK_GOLD
 					elif ly <= 12 and ore_n > 0.35:
-						block_type = &"iron"
+						block_id = VoxelChunk.BLOCK_IRON
 					elif ly <= 15 and ore_n > 0.25:
-						block_type = &"coal"
+						block_id = VoxelChunk.BLOCK_COAL
 					else:
-						block_type = &"stone"
+						block_id = VoxelChunk.BLOCK_STONE
 
-				flat[lx * sy * sz + ly * sz + lz] = block_type
+				flat[lx * sy * sz + ly * sz + lz] = block_id
 
 	# Generate mesh surface arrays & collision faces directly on worker thread
 	var mesh_data := VoxelChunk.build_mesh_data_from_flat(flat, left_border, right_border, back_border, front_border)
+	var col_faces: PackedVector3Array = mesh_data["collision_faces"]
 	var worker_duration_ms := float(Time.get_ticks_usec() - t_worker_start) / 1000.0
 
 	_results_mutex.lock()
@@ -411,7 +437,7 @@ func _worker_generate_chunk(
 		"pos": cp,
 		"flat": flat,
 		"surfaces": mesh_data["surfaces"],
-		"collision_faces": mesh_data["collision_faces"],
+		"collision_faces": col_faces,
 		"worker_time_ms": worker_duration_ms,
 		"generation": generation
 	})
@@ -438,9 +464,10 @@ func _consume_ready_results(frame_start_usec: int) -> void:
 			break
 
 		var cp: Vector2i = entry["pos"]
-		var flat: Array = entry["flat"]
+		var flat: PackedByteArray = entry["flat"]
 		var surfaces: Dictionary = entry["surfaces"]
 		var collision_faces: PackedVector3Array = entry["collision_faces"]
+		var concave_shape = entry.get("collision_shape", null)
 		var result_generation: int = entry.get("generation", 0)
 		last_worker_gen_time_ms = entry.get("worker_time_ms", 0.0)
 
@@ -480,9 +507,18 @@ func _consume_ready_results(frame_start_usec: int) -> void:
 		last_main_voxel_copy_time_ms = float(Time.get_ticks_usec() - t_copy0) / 1000.0
 
 		add_child(chunk)
-		var upload_timings: Dictionary = chunk.apply_mesh_and_collision_data(surfaces, collision_faces)
-		last_main_mesh_upload_time_ms = upload_timings.get("mesh_upload_time_ms", 0.0)
-		last_main_collision_time_ms = upload_timings.get("collision_time_ms", 0.0)
+		# Visual mesh renders first
+		last_main_mesh_upload_time_ms = chunk.apply_mesh_data(surfaces)
+
+		# Defer geometric collision assignment to budget-regulated queue
+		var shape_data = entry.get("collision_shape", null)
+		if shape_data == null:
+			shape_data = collision_faces
+		_pending_collision_queue.append({
+			"chunk": chunk,
+			"data": shape_data
+		})
+
 		_chunks[cp] = chunk
 
 		last_chunk_build_time_ms = float(Time.get_ticks_usec() - t_start) / 1000.0
@@ -492,6 +528,26 @@ func _consume_ready_results(frame_start_usec: int) -> void:
 		# Selectively schedule only neighbors sharing solid blocks for seam cleanup
 		_queue_neighbor_remesh(chunk)
 		processed += 1
+
+## Applies deferred collision shapes within frame budget
+func _process_pending_collisions(frame_start_usec: int) -> void:
+	if _pending_collision_queue.is_empty():
+		return
+
+	var t_col_start := Time.get_ticks_usec()
+	while not _pending_collision_queue.is_empty():
+		var elapsed_ms := float(Time.get_ticks_usec() - frame_start_usec) / 1000.0
+		if elapsed_ms >= max_frame_budget_ms:
+			break
+
+		var item: Dictionary = _pending_collision_queue.pop_front()
+		var chunk: VoxelChunk = item.get("chunk", null)
+		var shape_data = item.get("data", null)
+
+		if is_instance_valid(chunk):
+			chunk.apply_collision_data(shape_data)
+
+	last_main_collision_time_ms = float(Time.get_ticks_usec() - t_col_start) / 1000.0
 
 func _queue_neighbor_remesh(new_chunk: VoxelChunk) -> void:
 	if new_chunk == null:
@@ -548,6 +604,11 @@ func _load_or_generate_chunk(chunk_pos: Vector2i) -> VoxelChunk:
 func _load_or_generate_chunk_sync(chunk_pos: Vector2i) -> VoxelChunk:
 	if _chunks.has(chunk_pos):
 		return _chunks[chunk_pos]
+
+	if _chunk_cache.has(chunk_pos):
+		var cached_chunk := _restore_chunk_from_cache(chunk_pos, true)
+		if cached_chunk != null:
+			return cached_chunk
 
 	_in_flight.erase(chunk_pos)
 	_in_flight_count = maxi(0, _in_flight_count - 1)
@@ -619,11 +680,65 @@ func _load_or_generate_chunk_sync(chunk_pos: Vector2i) -> VoxelChunk:
 func _unload_chunk(chunk_pos: Vector2i) -> void:
 	if _chunks.has(chunk_pos):
 		var chunk: VoxelChunk = _chunks[chunk_pos]
-		if is_instance_valid(chunk):
-			chunk.queue_free()
 		_chunks.erase(chunk_pos)
+
+		if is_instance_valid(chunk):
+			if chunk.get_parent() == self:
+				remove_child(chunk)
+			chunk.visible = false
+			chunk.collision_layer = 0
+			chunk.collision_mask = 0
+
+			# Evict stale instance if already present in cache
+			if _chunk_cache.has(chunk_pos):
+				var old_chunk: VoxelChunk = _chunk_cache[chunk_pos]
+				if is_instance_valid(old_chunk) and old_chunk != chunk:
+					old_chunk.queue_free()
+				_chunk_cache_order.erase(chunk_pos)
+
+			_chunk_cache[chunk_pos] = chunk
+			_chunk_cache_order.append(chunk_pos)
+
+			# Enforce maximum cache capacity limit (FIFO eviction)
+			while _chunk_cache_order.size() > max_chunk_cache_size:
+				var oldest_pos: Vector2i = _chunk_cache_order.pop_front()
+				if _chunk_cache.has(oldest_pos):
+					var oldest_chunk: VoxelChunk = _chunk_cache[oldest_pos]
+					_chunk_cache.erase(oldest_pos)
+					if is_instance_valid(oldest_chunk):
+						oldest_chunk.queue_free()
+
 		_rebuild_neighbor_chunks(chunk_pos)
 		chunk_unloaded.emit(chunk_pos)
+
+## Restores a previously cached chunk back into the active world.
+func _restore_chunk_from_cache(chunk_pos: Vector2i, sync_rebuild: bool = false) -> VoxelChunk:
+	if not _chunk_cache.has(chunk_pos):
+		return null
+
+	var chunk: VoxelChunk = _chunk_cache[chunk_pos]
+	_chunk_cache.erase(chunk_pos)
+	_chunk_cache_order.erase(chunk_pos)
+
+	if not is_instance_valid(chunk):
+		return null
+
+	chunk.collision_layer = 1
+	chunk.collision_mask = 7
+	chunk.visible = true
+
+	if is_inside_tree() and chunk.get_parent() == null:
+		add_child(chunk)
+
+	_chunks[chunk_pos] = chunk
+	chunk_loaded.emit(chunk_pos)
+
+	if sync_rebuild:
+		_rebuild_neighbor_chunks(chunk_pos)
+	else:
+		_queue_neighbor_remesh(chunk)
+
+	return chunk
 
 func _rebuild_neighbor_chunks(cp: Vector2i) -> void:
 	var neighbors: Array[Vector2i] = [
@@ -645,9 +760,11 @@ func _rebuild_neighbor_chunks(cp: Vector2i) -> void:
 func get_diagnostics() -> Dictionary:
 	return {
 		"loaded_chunks": _chunks.size(),
+		"cached_chunks": _chunk_cache.size(),
 		"pending_queue": _pending_queue.size(),
 		"in_flight_threads": _in_flight_count,
 		"ready_results": _results_ready.size(),
+		"pending_collisions": _pending_collision_queue.size(),
 		"remesh_queue_size": _remesh_queue.size(),
 		"total_chunks_generated": total_chunks_generated,
 		"cancelled_tasks_count": cancelled_tasks_count,
@@ -828,10 +945,16 @@ func clear_world() -> void:
 	_pending_set.clear()
 	_remesh_queue.clear()
 	_remesh_set.clear()
+	_pending_collision_queue.clear()
 	for chunk in _chunks.values():
 		if is_instance_valid(chunk):
 			chunk.queue_free()
 	_chunks.clear()
+	for chunk in _chunk_cache.values():
+		if is_instance_valid(chunk):
+			chunk.queue_free()
+	_chunk_cache.clear()
+	_chunk_cache_order.clear()
 	_chunk_generation.clear()
 
 # ============================================================

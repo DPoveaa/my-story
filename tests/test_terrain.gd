@@ -43,6 +43,10 @@ func run_all() -> bool:
 	_run_test("test_physics_spawn_verification_ground_and_clearance")
 	_run_test("test_stale_job_generation_versioning")
 	_run_test("test_greedy_y_meshing_reduces_vertex_count")
+	_run_test("test_greedy_xz_meshing_wall_reduces_vertex_count")
+	_run_test("test_chunk_cache_soft_unload_and_pooling")
+	_run_test("test_chunk_cache_capacity_eviction")
+	_run_test("test_physics_bake_async_and_deferred_split")
 
 	print("\n--------------------------------------------------")
 	print("TERRAIN TESTS SUMMARY: %d Passed, %d Failed" % [_passed, _failed])
@@ -108,10 +112,13 @@ func test_chunk_adjacent_blocks_cull_internal_faces() -> void:
 	if col_shape != null and col_shape.shape is ConcavePolygonShape3D:
 		var concave: ConcavePolygonShape3D = col_shape.shape
 		var faces: PackedVector3Array = concave.get_faces()
-		# 2 blocks: X/Z per-voxel (4 side faces each, minus 2 shared X faces = 6 X/Z faces) * 6 verts = 36 verts.
-		# Greedy Y-merging: top+bottom each merge 2 adjacent same-material quads into 1 rect = 2 * 6 = 12 verts.
-		# Total: 36 + 12 = 48 verts (vs old per-voxel 60 verts — greedy Y reduces Y-face count).
-		_assert(faces.size() == 48, "Adjacent solid blocks cull shared X faces and greedy-merge Y faces (48 verts — less than old 60)")
+		# 2 adjacent blocks with full 3-axis greedy meshing:
+		# - Internal shared X face is culled (0 internal faces)
+		# - Exposed X faces (-X left, +X right): 1 quad each = 12 verts
+		# - Exposed Y faces (+Y top, -Y bottom): 1 merged quad each = 12 verts
+		# - Exposed Z faces (+Z front, -Z back): 1 merged quad each = 12 verts
+		# Total: 6 quads = 36 verts (reduced from 48 in Y-only greedy and 60 in naive per-voxel)
+		_assert(faces.size() == 36, "Adjacent solid blocks cull shared internal faces and greedy-merge all faces (36 verts — reduced from old 48/60)")
 
 ## SPAWN GEOMETRY INVARIANT:
 ## CharacterBody3D.global_position.y == bottom of capsule == FEET position.
@@ -455,3 +462,103 @@ func test_greedy_y_meshing_reduces_vertex_count() -> void:
 	# So greedy must produce fewer verts than naive would.
 	_assert(total_verts < 288, "Greedy Y-meshing reduces vertex count vs naive per-voxel for flat 4x4 slab (got %d, naive would be 288)" % total_verts)
 	_assert(total_verts > 0, "Greedy mesh still produces vertices for the solid slab")
+
+## Regression: 3-axis greedy meshing merges X/Z side faces into larger quads for planar walls.
+func test_greedy_xz_meshing_wall_reduces_vertex_count() -> void:
+	# Build a vertical 4x4 wall along the X axis at z=5, y=10..13
+	var flat: Array = []
+	flat.resize(VoxelChunk.TOTAL_CELLS)
+	flat.fill(&"")
+	for lx in range(4):
+		for ly in range(10, 14):
+			flat[lx * 512 + ly * 16 + 5] = &"stone"
+
+	var mesh_data := VoxelChunk.build_mesh_data_from_flat(flat, null, null, null, null)
+	var col_faces: PackedVector3Array = mesh_data["collision_faces"]
+	# A 4x4 wall with naive meshing would emit:
+	# Front (+Z): 16 quads * 6 = 96 verts
+	# Back (-Z): 16 quads * 6 = 96 verts
+	# Top (+Y): 4 quads * 6 = 24 verts
+	# Bottom (-Y): 4 quads * 6 = 24 verts
+	# Left (-X): 4 quads * 6 = 24 verts
+	# Right (+X): 4 quads * 6 = 24 verts
+	# Naive total = 288 vertices.
+	# With 3-axis greedy meshing:
+	# Front (+Z): 1 merged 4x4 quad = 6 verts
+	# Back (-Z): 1 merged 4x4 quad = 6 verts
+	# Top (+Y): 1 merged 4x1 quad = 6 verts
+	# Bottom (-Y): 1 merged 4x1 quad = 6 verts
+	# Left (-X): 1 merged 1x4 quad = 6 verts
+	# Right (+X): 1 merged 1x4 quad = 6 verts
+	# Greedy total = 6 * 6 = 36 vertices!
+	_assert(col_faces.size() == 36, "3-axis greedy meshing merges 4x4 vertical wall into exactly 6 faces (36 verts vs naive 288)")
+
+## Architectural requirement 1: Chunk caching (soft unload / object pooling)
+func test_chunk_cache_soft_unload_and_pooling() -> void:
+	var world: VoxelWorld = VoxelWorldScript.new()
+	world.seed_value = 1337
+	var cp := Vector2i(2, 3)
+	var chunk: VoxelChunk = world._load_or_generate_chunk_sync(cp)
+	_assert(world.is_chunk_loaded(cp), "Chunk is initially loaded")
+
+	# Unloading soft-unloads chunk into cache instead of freeing
+	world._unload_chunk(cp)
+	_assert(not world.is_chunk_loaded(cp), "Chunk is no longer in active chunks dictionary")
+	_assert(world._chunk_cache.has(cp), "Chunk is stored in _chunk_cache dictionary")
+	_assert(chunk.visible == false, "Cached chunk has visible = false")
+	_assert(chunk.collision_layer == 0, "Cached chunk has collision disabled")
+
+	# Restoring chunk from cache
+	var restored: VoxelChunk = world._restore_chunk_from_cache(cp, true)
+	_assert(restored == chunk, "Restored chunk is the identical pooled object instance")
+	_assert(world.is_chunk_loaded(cp), "Restored chunk is back in active _chunks")
+	_assert(not world._chunk_cache.has(cp), "Restored chunk is removed from _chunk_cache")
+	_assert(restored.visible == true, "Restored chunk visibility is re-enabled")
+	_assert(restored.collision_layer == 1, "Restored chunk collision is re-enabled")
+	world.clear_world()
+
+## Architectural requirement 1: Maximum capacity limit on chunk cache
+func test_chunk_cache_capacity_eviction() -> void:
+	var world: VoxelWorld = VoxelWorldScript.new()
+	world.seed_value = 1337
+	world.max_chunk_cache_size = 2
+
+	var c1 := world._load_or_generate_chunk_sync(Vector2i(0, 0))
+	var c2 := world._load_or_generate_chunk_sync(Vector2i(1, 0))
+	var c3 := world._load_or_generate_chunk_sync(Vector2i(2, 0))
+
+	world._unload_chunk(Vector2i(0, 0))
+	world._unload_chunk(Vector2i(1, 0))
+	_assert(world._chunk_cache.size() == 2, "Cache size is at capacity (2 chunks)")
+
+	# Unloading third chunk should evict oldest chunk (0, 0)
+	world._unload_chunk(Vector2i(2, 0))
+	_assert(world._chunk_cache.size() == 2, "Cache size remains bounded at max capacity (2 chunks)")
+	_assert(not world._chunk_cache.has(Vector2i(0, 0)), "Oldest chunk (0,0) was evicted from cache")
+	_assert(world._chunk_cache.has(Vector2i(1, 0)), "Chunk (1,0) remains in cache")
+	_assert(world._chunk_cache.has(Vector2i(2, 0)), "Chunk (2,0) remains in cache")
+	world.clear_world()
+
+## Architectural requirement 3: Asynchronous physics shape creation and deferred assignment
+func test_physics_bake_async_and_deferred_split() -> void:
+	var chunk := VoxelChunkScript.new()
+	chunk.chunk_pos = Vector2i(0, 0)
+	chunk.set_voxel_local(2, 2, 2, &"stone")
+
+	var mesh_data := VoxelChunk.build_mesh_data_from_flat(chunk.voxels, null, null, null, null)
+	var col_faces: PackedVector3Array = mesh_data["collision_faces"]
+	_assert(not col_faces.is_empty(), "Collision faces generated")
+
+	# Test split: apply_mesh_data renders first without applying collision
+	var mesh_time := chunk.apply_mesh_data(mesh_data["surfaces"])
+	_assert(chunk._mesh_inst != null and chunk._mesh_inst.mesh != null, "Visual mesh created via apply_mesh_data")
+	_assert(chunk._col_shape == null or chunk._col_shape.shape == null, "Collision shape is initially unset after mesh upload")
+
+	# Test apply_collision_data applies pre-baked ConcavePolygonShape3D resource
+	var pre_baked := ConcavePolygonShape3D.new()
+	pre_baked.set_faces(col_faces)
+	pre_baked.backface_collision = true
+	var col_time := chunk.apply_collision_data(pre_baked)
+	_assert(chunk._col_shape.shape == pre_baked, "Pre-baked ConcavePolygonShape3D successfully assigned")
+
+	chunk.queue_free()

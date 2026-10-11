@@ -24,9 +24,9 @@ func _init() -> void:
 	var start_x := test_cp.x * VoxelChunk.SIZE_X
 	var start_z := test_cp.y * VoxelChunk.SIZE_Z
 	var size := VoxelChunk.SIZE_X * VoxelChunk.SIZE_Y * VoxelChunk.SIZE_Z
-	var flat: Array = []
+	var flat := PackedByteArray()
 	flat.resize(size)
-	flat.fill(&"")
+	# PackedByteArray is zero-initialized (BLOCK_AIR). Assign BLOCK_STONE (3) for filled cells.
 
 	var sy := VoxelChunk.SIZE_Y
 	var sz := VoxelChunk.SIZE_Z
@@ -46,7 +46,7 @@ func _init() -> void:
 			var min_y: int = maxi(0, bot_h)
 			var max_y: int = mini(VoxelChunk.SIZE_Y - 1, surf_h)
 			for ly in range(min_y, max_y + 1):
-				flat[lx * sy * sz + ly * sz + lz] = &"stone"
+				flat[lx * sy * sz + ly * sz + lz] = VoxelChunk.BLOCK_STONE
 	var t_worker_noise := float(Time.get_ticks_usec() - t_worker_start) / 1000.0
 
 	var t_mesh_start := Time.get_ticks_usec()
@@ -90,7 +90,7 @@ func _init() -> void:
 	world._results_mutex.lock()
 	world._results_ready.append({
 		"pos": cp,
-		"flat": [],
+		"flat": PackedByteArray(),
 		"surfaces": {},
 		"collision_faces": PackedVector3Array(),
 		"worker_time_ms": 0.0,

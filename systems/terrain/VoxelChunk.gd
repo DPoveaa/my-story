@@ -18,11 +18,27 @@ const SIZE_Y: int = 32
 const SIZE_Z: int = 16
 const TOTAL_CELLS: int = SIZE_X * SIZE_Y * SIZE_Z  # 8192
 
+## Block type byte IDs stored in the PackedByteArray voxels buffer.
+## 0 = air (empty), 1 = grass, 2 = dirt, 3 = stone, 4 = coal, 5 = iron, 6 = gold
+const BLOCK_AIR:   int = 0
+const BLOCK_GRASS: int = 1
+const BLOCK_DIRT:  int = 2
+const BLOCK_STONE: int = 3
+const BLOCK_COAL:  int = 4
+const BLOCK_IRON:  int = 5
+const BLOCK_GOLD:  int = 6
+
+## Reverse lookup: block byte ID → StringName (preserves external API compatibility).
+const BLOCK_NAMES: Array[StringName] = [&"", &"grass", &"dirt", &"stone", &"coal", &"iron", &"gold"]
+## Forward lookup: StringName → block byte ID.
+const BLOCK_IDS: Dictionary = {&"": 0, &"grass": 1, &"dirt": 2, &"stone": 3, &"coal": 4, &"iron": 5, &"gold": 6}
+
 var chunk_pos: Vector2i = Vector2i.ZERO
 var voxel_world: Node = null # Back reference to VoxelWorld for neighbor chunk lookups
 
-## Flat 1D Voxel block array of size 8192: [lx * 512 + ly * 16 + lz] = StringName
-var voxels: Array = []
+## Flat 1D Voxel block PackedByteArray of size 8192: [lx * 512 + ly * 16 + lz] = byte block ID
+## 8 KB per chunk vs ~196 KB for Array[StringName] — zero GC overhead, CPU cache-friendly.
+var voxels: PackedByteArray
 var _mesh_inst: MeshInstance3D = null
 var _col_shape: CollisionShape3D = null
 
@@ -115,7 +131,7 @@ const QUAD_UVS: Array[Vector2] = [
 func _init() -> void:
 	VoxelChunk._init_materials()
 	voxels.resize(TOTAL_CELLS)
-	voxels.fill(&"")
+	# PackedByteArray is zero-initialized → BLOCK_AIR (0) everywhere; no fill() needed.
 
 func setup_nodes() -> void:
 	collision_layer = 1
@@ -133,23 +149,23 @@ func setup_nodes() -> void:
 
 func set_voxel_local(lx: int, ly: int, lz: int, type_id: StringName) -> void:
 	if lx >= 0 and lx < SIZE_X and ly >= 0 and ly < SIZE_Y and lz >= 0 and lz < SIZE_Z:
-		voxels[lx * 512 + ly * 16 + lz] = type_id
+		voxels[lx * 512 + ly * 16 + lz] = BLOCK_IDS.get(type_id, BLOCK_AIR)
 
 func get_voxel_local(lx: int, ly: int, lz: int) -> StringName:
 	if lx >= 0 and lx < SIZE_X and ly >= 0 and ly < SIZE_Y and lz >= 0 and lz < SIZE_Z:
-		return StringName(voxels[lx * 512 + ly * 16 + lz])
+		return BLOCK_NAMES[voxels[lx * 512 + ly * 16 + lz]]
 	return &""
 
 ## O(1) Zero-copy assignment of flat voxel data into this chunk.
-func load_from_flat(flat: Array) -> void:
+func load_from_flat(flat: PackedByteArray) -> void:
 	voxels = flat
 
-func to_flat() -> Array:
+func to_flat() -> PackedByteArray:
 	return voxels
 
 func is_solid_local(lx: int, ly: int, lz: int) -> bool:
 	if lx >= 0 and lx < SIZE_X and ly >= 0 and ly < SIZE_Y and lz >= 0 and lz < SIZE_Z:
-		return not voxels[lx * 512 + ly * 16 + lz].is_empty()
+		return voxels[lx * 512 + ly * 16 + lz] != BLOCK_AIR
 	return false
 
 ## Returns true if this chunk and neighbor share at least one solid block across their border.
@@ -161,25 +177,25 @@ func shares_solid_boundary_with(neighbor: VoxelChunk, dir_to_neighbor: Vector2i)
 		for ly in range(SIZE_Y):
 			var y_base := base + ly * 16
 			for lz in range(SIZE_Z):
-				if not voxels[y_base + lz].is_empty() and neighbor.is_solid_local(0, ly, lz):
+				if voxels[y_base + lz] != 0 and neighbor.is_solid_local(0, ly, lz):
 					return true
 	elif dir_to_neighbor == Vector2i(-1, 0): # Neighbor is -X (Left)
 		for ly in range(SIZE_Y):
 			var y_base := ly * 16
 			for lz in range(SIZE_Z):
-				if not voxels[y_base + lz].is_empty() and neighbor.is_solid_local(SIZE_X - 1, ly, lz):
+				if voxels[y_base + lz] != 0 and neighbor.is_solid_local(SIZE_X - 1, ly, lz):
 					return true
 	elif dir_to_neighbor == Vector2i(0, 1): # Neighbor is +Z (Front)
 		for lx in range(SIZE_X):
 			var x_base := lx * 512 + (SIZE_Z - 1)
 			for ly in range(SIZE_Y):
-				if not voxels[x_base + ly * 16].is_empty() and neighbor.is_solid_local(lx, ly, 0):
+				if voxels[x_base + ly * 16] != 0 and neighbor.is_solid_local(lx, ly, 0):
 					return true
 	elif dir_to_neighbor == Vector2i(0, -1): # Neighbor is -Z (Back)
 		for lx in range(SIZE_X):
 			var x_base := lx * 512
 			for ly in range(SIZE_Y):
-				if not voxels[x_base + ly * 16].is_empty() and neighbor.is_solid_local(lx, ly, SIZE_Z - 1):
+				if voxels[x_base + ly * 16] != 0 and neighbor.is_solid_local(lx, ly, SIZE_Z - 1):
 					return true
 	return false
 
@@ -246,6 +262,84 @@ static func _append_face(
 	col_faces.append(v4)
 	col_faces.append(v5)
 
+## Appends a greedy-merged rectangle face for +X (right) or -X (left) surfaces.
+## origin: (lx, ly, lz) corner, dz: depth in Z, dy: height in Y.
+static func _append_greedy_x_face(
+	verts: PackedVector3Array, norms: PackedVector3Array, uvs: PackedVector2Array,
+	col_faces: PackedVector3Array,
+	lx: int, ly: int, lz: int, dz: int, dy: int, is_right: bool
+) -> void:
+	var norm: Vector3 = Vector3(1, 0, 0) if is_right else Vector3(-1, 0, 0)
+	var x: float = float(lx + 1) if is_right else float(lx)
+	var y0 := float(ly)
+	var y1 := float(ly + dy)
+	var z0 := float(lz)
+	var z1 := float(lz + dz)
+
+	var v0: Vector3
+	var v1: Vector3
+	var v2: Vector3
+	var v3: Vector3
+
+	if is_right:
+		v0 = Vector3(x, y0, z1)
+		v1 = Vector3(x, y1, z0)
+		v2 = Vector3(x, y0, z0)
+		v3 = Vector3(x, y1, z1)
+	else:
+		v0 = Vector3(x, y0, z0)
+		v1 = Vector3(x, y1, z1)
+		v2 = Vector3(x, y0, z1)
+		v3 = Vector3(x, y1, z0)
+
+	verts.append(v0); verts.append(v1); verts.append(v2)
+	verts.append(v0); verts.append(v3); verts.append(v1)
+	norms.append(norm); norms.append(norm); norms.append(norm)
+	norms.append(norm); norms.append(norm); norms.append(norm)
+	uvs.append(QUAD_UVS[0]); uvs.append(QUAD_UVS[1]); uvs.append(QUAD_UVS[2])
+	uvs.append(QUAD_UVS[3]); uvs.append(QUAD_UVS[4]); uvs.append(QUAD_UVS[5])
+	col_faces.append(v0); col_faces.append(v1); col_faces.append(v2)
+	col_faces.append(v0); col_faces.append(v3); col_faces.append(v1)
+
+## Appends a greedy-merged rectangle face for +Z (front) or -Z (back) surfaces.
+## origin: (lx, ly, lz) corner, dx: width in X, dy: height in Y.
+static func _append_greedy_z_face(
+	verts: PackedVector3Array, norms: PackedVector3Array, uvs: PackedVector2Array,
+	col_faces: PackedVector3Array,
+	lx: int, ly: int, lz: int, dx: int, dy: int, is_front: bool
+) -> void:
+	var norm: Vector3 = Vector3(0, 0, 1) if is_front else Vector3(0, 0, -1)
+	var z: float = float(lz + 1) if is_front else float(lz)
+	var x0 := float(lx)
+	var x1 := float(lx + dx)
+	var y0 := float(ly)
+	var y1 := float(ly + dy)
+
+	var v0: Vector3
+	var v1: Vector3
+	var v2: Vector3
+	var v3: Vector3
+
+	if is_front:
+		v0 = Vector3(x0, y0, z)
+		v1 = Vector3(x1, y1, z)
+		v2 = Vector3(x1, y0, z)
+		v3 = Vector3(x0, y1, z)
+	else:
+		v0 = Vector3(x1, y0, z)
+		v1 = Vector3(x0, y1, z)
+		v2 = Vector3(x0, y0, z)
+		v3 = Vector3(x1, y1, z)
+
+	verts.append(v0); verts.append(v1); verts.append(v2)
+	verts.append(v0); verts.append(v3); verts.append(v1)
+	norms.append(norm); norms.append(norm); norms.append(norm)
+	norms.append(norm); norms.append(norm); norms.append(norm)
+	uvs.append(QUAD_UVS[0]); uvs.append(QUAD_UVS[1]); uvs.append(QUAD_UVS[2])
+	uvs.append(QUAD_UVS[3]); uvs.append(QUAD_UVS[4]); uvs.append(QUAD_UVS[5])
+	col_faces.append(v0); col_faces.append(v1); col_faces.append(v2)
+	col_faces.append(v0); col_faces.append(v3); col_faces.append(v1)
+
 ## Appends a greedy-merged rectangle face for +Y (top) or -Y (bottom) surfaces.
 ## origin: (lx, lz) corner, w: width in X, d: depth in Z, ly: Y layer.
 ## Produces 2 triangles covering a w×d rectangle. Reduces vertex count for flat surfaces.
@@ -293,14 +387,14 @@ static func _append_greedy_y_face(
 ## Generates mesh surface arrays and collision faces using direct PackedVector3Arrays.
 ## Can be called on ANY thread (WorkerThreadPool background thread or main thread).
 ##
-## GREEDY MESHING on Y planes (+Y top, -Y bottom):
-##   For each Y layer, sweeps in XZ order, merging adjacent same-material exposed faces
-##   into axis-aligned rectangles. Reduces face count from O(N²) to O(N) for solid flat
-##   terrain, giving 4-10x fewer vertices on typical island surfaces.
-##
-## X/Z faces use simple per-voxel quad emission (1 quad per exposed face).
+## FULL 3-AXIS GREEDY MESHING:
+## - Pass 1: X-planes (+X right, -X left) merged greedily across Z and Y.
+## - Pass 2: Z-planes (+Z front, -Z back) merged greedily across X and Y.
+## - Pass 3: Y-planes (+Y top, -Y bottom) merged greedily across X and Z.
+## Reduces face and vertex counts drastically for planar geometry and contiguous terrain.
+## Masks are PackedByteArray (int IDs) instead of Array[StringName], eliminating GC overhead.
 static func build_mesh_data_from_flat(
-	flat: Array,
+	flat: PackedByteArray,
 	left_border: Variant,   # Array of bool: [ly * 16 + lz]
 	right_border: Variant,  # Array of bool: [ly * 16 + lz]
 	back_border: Variant,   # Array of bool: [lx * 32 + ly]
@@ -309,160 +403,302 @@ static func build_mesh_data_from_flat(
 	var mat_buffers: Dictionary = {}
 	var col_faces: PackedVector3Array = PackedVector3Array()
 
-	# ---- Pass 1: X/Z faces (per-voxel quad emission) ----
+	# ---- Pass 1: Greedy X-faces (+X Right and -X Left) ----
+	# PackedByteArray masks: 0 = no face, 1-6 = block type ID.
+	var mask_right: PackedByteArray
+	var mask_left:  PackedByteArray
+	var visited_x:  Array = []
+	mask_right.resize(SIZE_Z * SIZE_Y)
+	mask_left.resize(SIZE_Z * SIZE_Y)
+	visited_x.resize(SIZE_Z * SIZE_Y)
+
 	for lx in range(SIZE_X):
+		mask_right.fill(0)
+		mask_left.fill(0)
 		var base_x := lx * 512
+
 		for ly in range(SIZE_Y):
 			var base_xy := base_x + ly * 16
 			for lz in range(SIZE_Z):
-				var b_type: StringName = flat[base_xy + lz]
-				if b_type.is_empty():
+				var b_id: int = flat[base_xy + lz]
+				if b_id == 0:
 					continue
 
-				var buf := _get_or_create_buf(mat_buffers, b_type)
-				var verts: PackedVector3Array = buf["verts"]
-				var norms: PackedVector3Array = buf["norms"]
-				var uvs: PackedVector2Array = buf["uvs"]
-				var block_min := Vector3(float(lx), float(ly), float(lz))
+				var mask_idx := lz * SIZE_Y + ly
 
 				# +X Right
-				var neighbor_solid: bool
+				var right_solid: bool
 				if lx + 1 < SIZE_X:
-					neighbor_solid = not flat[base_xy + 512 + lz].is_empty()
+					right_solid = flat[base_xy + 512 + lz] != 0
 				elif right_border != null:
-					neighbor_solid = bool(right_border[ly * 16 + lz])
+					right_solid = bool(right_border[ly * 16 + lz])
 				else:
-					neighbor_solid = false
-				if not neighbor_solid:
-					_append_face(verts, norms, uvs, col_faces, block_min, 0)
+					right_solid = false
+				if not right_solid:
+					mask_right[mask_idx] = b_id
 
 				# -X Left
+				var left_solid: bool
 				if lx > 0:
-					neighbor_solid = not flat[base_xy - 512 + lz].is_empty()
+					left_solid = flat[base_xy - 512 + lz] != 0
 				elif left_border != null:
-					neighbor_solid = bool(left_border[ly * 16 + lz])
+					left_solid = bool(left_border[ly * 16 + lz])
 				else:
-					neighbor_solid = false
-				if not neighbor_solid:
-					_append_face(verts, norms, uvs, col_faces, block_min, 1)
+					left_solid = false
+				if not left_solid:
+					mask_left[mask_idx] = b_id
+
+		# Greedy merge +X Right
+		visited_x.fill(false)
+		for lz in range(SIZE_Z):
+			for ly in range(SIZE_Y):
+				var idx := lz * SIZE_Y + ly
+				if visited_x[idx]:
+					continue
+				var b_id: int = mask_right[idx]
+				if b_id == 0:
+					continue
+				var w := 1
+				while lz + w < SIZE_Z and mask_right[(lz + w) * SIZE_Y + ly] == b_id and not visited_x[(lz + w) * SIZE_Y + ly]:
+					w += 1
+				var h := 1
+				var can_extend := true
+				while ly + h < SIZE_Y and can_extend:
+					for dz in range(w):
+						var chk := (lz + dz) * SIZE_Y + ly + h
+						if mask_right[chk] != b_id or visited_x[chk]:
+							can_extend = false
+							break
+					if can_extend:
+						h += 1
+				for dz in range(w):
+					for dy in range(h):
+						visited_x[(lz + dz) * SIZE_Y + ly + dy] = true
+				var buf := _get_or_create_buf(mat_buffers, BLOCK_NAMES[b_id])
+				_append_greedy_x_face(buf["verts"], buf["norms"], buf["uvs"], col_faces, lx, ly, lz, w, h, true)
+
+		# Greedy merge -X Left
+		visited_x.fill(false)
+		for lz in range(SIZE_Z):
+			for ly in range(SIZE_Y):
+				var idx := lz * SIZE_Y + ly
+				if visited_x[idx]:
+					continue
+				var b_id: int = mask_left[idx]
+				if b_id == 0:
+					continue
+				var w := 1
+				while lz + w < SIZE_Z and mask_left[(lz + w) * SIZE_Y + ly] == b_id and not visited_x[(lz + w) * SIZE_Y + ly]:
+					w += 1
+				var h := 1
+				var can_extend := true
+				while ly + h < SIZE_Y and can_extend:
+					for dz in range(w):
+						var chk := (lz + dz) * SIZE_Y + ly + h
+						if mask_left[chk] != b_id or visited_x[chk]:
+							can_extend = false
+							break
+					if can_extend:
+						h += 1
+				for dz in range(w):
+					for dy in range(h):
+						visited_x[(lz + dz) * SIZE_Y + ly + dy] = true
+				var buf := _get_or_create_buf(mat_buffers, BLOCK_NAMES[b_id])
+				_append_greedy_x_face(buf["verts"], buf["norms"], buf["uvs"], col_faces, lx, ly, lz, w, h, false)
+
+	# ---- Pass 2: Greedy Z-faces (+Z Front and -Z Back) ----
+	var mask_front: PackedByteArray
+	var mask_back:  PackedByteArray
+	var visited_z:  Array = []
+	mask_front.resize(SIZE_X * SIZE_Y)
+	mask_back.resize(SIZE_X * SIZE_Y)
+	visited_z.resize(SIZE_X * SIZE_Y)
+
+	for lz in range(SIZE_Z):
+		mask_front.fill(0)
+		mask_back.fill(0)
+
+		for lx in range(SIZE_X):
+			var base_x := lx * 512
+			for ly in range(SIZE_Y):
+				var base_xy := base_x + ly * 16
+				var b_id: int = flat[base_xy + lz]
+				if b_id == 0:
+					continue
+
+				var mask_idx := lx * SIZE_Y + ly
 
 				# +Z Front
+				var front_solid: bool
 				if lz + 1 < SIZE_Z:
-					neighbor_solid = not flat[base_xy + lz + 1].is_empty()
+					front_solid = flat[base_xy + lz + 1] != 0
 				elif front_border != null:
-					neighbor_solid = bool(front_border[lx * 32 + ly])
+					front_solid = bool(front_border[lx * 32 + ly])
 				else:
-					neighbor_solid = false
-				if not neighbor_solid:
-					_append_face(verts, norms, uvs, col_faces, block_min, 4)
+					front_solid = false
+				if not front_solid:
+					mask_front[mask_idx] = b_id
 
 				# -Z Back
+				var back_solid: bool
 				if lz > 0:
-					neighbor_solid = not flat[base_xy + lz - 1].is_empty()
+					back_solid = flat[base_xy + lz - 1] != 0
 				elif back_border != null:
-					neighbor_solid = bool(back_border[lx * 32 + ly])
+					back_solid = bool(back_border[lx * 32 + ly])
 				else:
-					neighbor_solid = false
-				if not neighbor_solid:
-					_append_face(verts, norms, uvs, col_faces, block_min, 5)
+					back_solid = false
+				if not back_solid:
+					mask_back[mask_idx] = b_id
 
-	# ---- Pass 2: Greedy Y-faces (top +Y and bottom -Y) per layer ----
-	# For each Y layer, build a 2D mask of exposed top/bottom faces per material.
-	# Then sweep X→Z, greedily extending rectangles in X then Z.
+		# Greedy merge +Z Front
+		visited_z.fill(false)
+		for lx in range(SIZE_X):
+			for ly in range(SIZE_Y):
+				var idx := lx * SIZE_Y + ly
+				if visited_z[idx]:
+					continue
+				var b_id: int = mask_front[idx]
+				if b_id == 0:
+					continue
+				var w := 1
+				while lx + w < SIZE_X and mask_front[(lx + w) * SIZE_Y + ly] == b_id and not visited_z[(lx + w) * SIZE_Y + ly]:
+					w += 1
+				var h := 1
+				var can_extend := true
+				while ly + h < SIZE_Y and can_extend:
+					for dx in range(w):
+						var chk := (lx + dx) * SIZE_Y + ly + h
+						if mask_front[chk] != b_id or visited_z[chk]:
+							can_extend = false
+							break
+					if can_extend:
+						h += 1
+				for dx in range(w):
+					for dy in range(h):
+						visited_z[(lx + dx) * SIZE_Y + ly + dy] = true
+				var buf := _get_or_create_buf(mat_buffers, BLOCK_NAMES[b_id])
+				_append_greedy_z_face(buf["verts"], buf["norms"], buf["uvs"], col_faces, lx, ly, lz, w, h, true)
+
+		# Greedy merge -Z Back
+		visited_z.fill(false)
+		for lx in range(SIZE_X):
+			for ly in range(SIZE_Y):
+				var idx := lx * SIZE_Y + ly
+				if visited_z[idx]:
+					continue
+				var b_id: int = mask_back[idx]
+				if b_id == 0:
+					continue
+				var w := 1
+				while lx + w < SIZE_X and mask_back[(lx + w) * SIZE_Y + ly] == b_id and not visited_z[(lx + w) * SIZE_Y + ly]:
+					w += 1
+				var h := 1
+				var can_extend := true
+				while ly + h < SIZE_Y and can_extend:
+					for dx in range(w):
+						var chk := (lx + dx) * SIZE_Y + ly + h
+						if mask_back[chk] != b_id or visited_z[chk]:
+							can_extend = false
+							break
+					if can_extend:
+						h += 1
+				for dx in range(w):
+					for dy in range(h):
+						visited_z[(lx + dx) * SIZE_Y + ly + dy] = true
+				var buf := _get_or_create_buf(mat_buffers, BLOCK_NAMES[b_id])
+				_append_greedy_z_face(buf["verts"], buf["norms"], buf["uvs"], col_faces, lx, ly, lz, w, h, false)
+
+	# ---- Pass 3: Greedy Y-faces (top +Y and bottom -Y) per layer ----
+	var top_mask: PackedByteArray
+	var bot_mask: PackedByteArray
+	var visited_y: Array = []
+	top_mask.resize(SIZE_X * SIZE_Z)
+	bot_mask.resize(SIZE_X * SIZE_Z)
+	visited_y.resize(SIZE_X * SIZE_Z)
+
 	for ly in range(SIZE_Y):
-		# top_mask[lx][lz] = material StringName or &"" if no exposed face
-		# We work in a flat array: mask[lx * SIZE_Z + lz]
-		var top_mask: Array = []
-		var bot_mask: Array = []
-		top_mask.resize(SIZE_X * SIZE_Z)
-		bot_mask.resize(SIZE_X * SIZE_Z)
-		top_mask.fill(&"")
-		bot_mask.fill(&"")
+		top_mask.fill(0)
+		bot_mask.fill(0)
 
 		var base_ly := ly * 16
 		for lx in range(SIZE_X):
 			var base_x := lx * 512
 			var base_xy := base_x + base_ly
 			for lz in range(SIZE_Z):
-				var b_type: StringName = flat[base_xy + lz]
-				if b_type.is_empty():
+				var b_id: int = flat[base_xy + lz]
+				if b_id == 0:
 					continue
 				# +Y Top: exposed if cell above is air
 				if ly + 1 < SIZE_Y:
-					if flat[base_xy + 16 + lz].is_empty():
-						top_mask[lx * SIZE_Z + lz] = b_type
+					if flat[base_xy + 16 + lz] == 0:
+						top_mask[lx * SIZE_Z + lz] = b_id
 				else:
-					top_mask[lx * SIZE_Z + lz] = b_type
+					top_mask[lx * SIZE_Z + lz] = b_id
 				# -Y Bottom: exposed if cell below is air
 				if ly > 0:
-					if flat[base_xy - 16 + lz].is_empty():
-						bot_mask[lx * SIZE_Z + lz] = b_type
+					if flat[base_xy - 16 + lz] == 0:
+						bot_mask[lx * SIZE_Z + lz] = b_id
 				else:
-					bot_mask[lx * SIZE_Z + lz] = b_type
+					bot_mask[lx * SIZE_Z + lz] = b_id
 
 		# Greedy merge on top_mask
-		var visited: Array = []
-		visited.resize(SIZE_X * SIZE_Z)
-		visited.fill(false)
-
+		visited_y.fill(false)
 		for lx in range(SIZE_X):
 			for lz in range(SIZE_Z):
 				var idx := lx * SIZE_Z + lz
-				if visited[idx]:
+				if visited_y[idx]:
 					continue
-				var b_type: StringName = top_mask[idx]
-				if b_type.is_empty():
+				var b_id: int = top_mask[idx]
+				if b_id == 0:
 					continue
 				# Extend in +Z
 				var w := 1
-				while lz + w < SIZE_Z and top_mask[lx * SIZE_Z + lz + w] == b_type and not visited[lx * SIZE_Z + lz + w]:
+				while lz + w < SIZE_Z and top_mask[lx * SIZE_Z + lz + w] == b_id and not visited_y[lx * SIZE_Z + lz + w]:
 					w += 1
-				# Extend in +X (all lz in [lz, lz+w) must match)
+				# Extend in +X
 				var d := 1
 				var can_extend := true
 				while lx + d < SIZE_X and can_extend:
 					for dz in range(w):
 						var chk := (lx + d) * SIZE_Z + lz + dz
-						if top_mask[chk] != b_type or visited[chk]:
+						if top_mask[chk] != b_id or visited_y[chk]:
 							can_extend = false
 							break
 					if can_extend:
 						d += 1
-				# Mark visited
 				for dx in range(d):
 					for dz in range(w):
-						visited[(lx + dx) * SIZE_Z + lz + dz] = true
-				# Emit merged face
-				var buf := _get_or_create_buf(mat_buffers, b_type)
+						visited_y[(lx + dx) * SIZE_Z + lz + dz] = true
+				var buf := _get_or_create_buf(mat_buffers, BLOCK_NAMES[b_id])
 				_append_greedy_y_face(buf["verts"], buf["norms"], buf["uvs"], col_faces, lx, ly, lz, d, w, true)
 
 		# Greedy merge on bot_mask
-		visited.fill(false)
+		visited_y.fill(false)
 		for lx in range(SIZE_X):
 			for lz in range(SIZE_Z):
 				var idx := lx * SIZE_Z + lz
-				if visited[idx]:
+				if visited_y[idx]:
 					continue
-				var b_type: StringName = bot_mask[idx]
-				if b_type.is_empty():
+				var b_id: int = bot_mask[idx]
+				if b_id == 0:
 					continue
 				var w := 1
-				while lz + w < SIZE_Z and bot_mask[lx * SIZE_Z + lz + w] == b_type and not visited[lx * SIZE_Z + lz + w]:
+				while lz + w < SIZE_Z and bot_mask[lx * SIZE_Z + lz + w] == b_id and not visited_y[lx * SIZE_Z + lz + w]:
 					w += 1
 				var d := 1
 				var can_extend := true
 				while lx + d < SIZE_X and can_extend:
 					for dz in range(w):
 						var chk := (lx + d) * SIZE_Z + lz + dz
-						if bot_mask[chk] != b_type or visited[chk]:
+						if bot_mask[chk] != b_id or visited_y[chk]:
 							can_extend = false
 							break
 					if can_extend:
 						d += 1
 				for dx in range(d):
 					for dz in range(w):
-						visited[(lx + dx) * SIZE_Z + lz + dz] = true
-				var buf := _get_or_create_buf(mat_buffers, b_type)
+						visited_y[(lx + dx) * SIZE_Z + lz + dz] = true
+				var buf := _get_or_create_buf(mat_buffers, BLOCK_NAMES[b_id])
 				_append_greedy_y_face(buf["verts"], buf["norms"], buf["uvs"], col_faces, lx, ly, lz, d, w, false)
 
 	return {
@@ -470,9 +706,9 @@ static func build_mesh_data_from_flat(
 		"collision_faces": col_faces
 	}
 
-## Applies pre-built surface buffers and collision faces to node.
-## Must be called on main thread. Returns dictionary with separate mesh and collision timings.
-func apply_mesh_and_collision_data(surfaces: Dictionary, collision_faces: PackedVector3Array) -> Dictionary:
+## Applies pre-built surface buffers to mesh instance.
+## Must be called on main thread. Returns mesh upload time in ms.
+func apply_mesh_data(surfaces: Dictionary) -> float:
 	setup_nodes()
 	position = Vector3(float(chunk_pos.x * SIZE_X), 0.0, float(chunk_pos.y * SIZE_Z))
 
@@ -502,17 +738,36 @@ func apply_mesh_and_collision_data(surfaces: Dictionary, collision_faces: Packed
 			_mesh_inst.mesh = combined_mesh
 		else:
 			_mesh_inst.mesh = null
-	var t_mesh_ms := float(Time.get_ticks_usec() - t_m0) / 1000.0
+	return float(Time.get_ticks_usec() - t_m0) / 1000.0
+
+## Applies collision shape or faces to collision node.
+## Can take either a pre-built ConcavePolygonShape3D or PackedVector3Array faces.
+## Returns collision assignment time in ms.
+func apply_collision_data(collision_data: Variant) -> float:
+	setup_nodes()
+	position = Vector3(float(chunk_pos.x * SIZE_X), 0.0, float(chunk_pos.y * SIZE_Z))
 
 	var t_c0 := Time.get_ticks_usec()
-	if not collision_faces.is_empty():
-		var concave := ConcavePolygonShape3D.new()
-		concave.set_faces(collision_faces)
-		concave.backface_collision = true
-		_col_shape.shape = concave
-	else:
+	if collision_data is ConcavePolygonShape3D:
+		_col_shape.shape = collision_data
+	elif collision_data is PackedVector3Array:
+		var p_faces: PackedVector3Array = collision_data
+		if not p_faces.is_empty():
+			var concave := ConcavePolygonShape3D.new()
+			concave.set_faces(p_faces)
+			concave.backface_collision = true
+			_col_shape.shape = concave
+		else:
+			_col_shape.shape = null
+	elif collision_data == null:
 		_col_shape.shape = null
-	var t_col_ms := float(Time.get_ticks_usec() - t_c0) / 1000.0
+	return float(Time.get_ticks_usec() - t_c0) / 1000.0
+
+## Applies pre-built surface buffers and collision faces to node.
+## Must be called on main thread. Returns dictionary with separate mesh and collision timings.
+func apply_mesh_and_collision_data(surfaces: Dictionary, collision_data: Variant) -> Dictionary:
+	var t_mesh_ms := apply_mesh_data(surfaces)
+	var t_col_ms := apply_collision_data(collision_data)
 
 	return {
 		"mesh_upload_time_ms": t_mesh_ms,
@@ -527,7 +782,7 @@ func get_x_border_slice(lx: int) -> Array:
 	for ly in range(SIZE_Y):
 		var y_base := base + ly * 16
 		for lz in range(SIZE_Z):
-			slice[ly * 16 + lz] = not voxels[y_base + lz].is_empty()
+			slice[ly * 16 + lz] = voxels[y_base + lz] != BLOCK_AIR
 	return slice
 
 ## Extracts 1D border slice (size 16x32 = 512) for a given Z coordinate.
@@ -537,7 +792,7 @@ func get_z_border_slice(lz: int) -> Array:
 	for lx in range(SIZE_X):
 		var base := lx * 512 + lz
 		for ly in range(SIZE_Y):
-			slice[lx * 32 + ly] = not voxels[base + ly * 16].is_empty()
+			slice[lx * 32 + ly] = voxels[base + ly * 16] != BLOCK_AIR
 	return slice
 
 ## Rebuilds chunk mesh and ConcavePolygonShape3D collision geometry in chunk-local coordinates.
