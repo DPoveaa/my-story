@@ -6,8 +6,8 @@ extends Camera3D
 
 signal block_type_changed(type_id: StringName)
 
-@export var move_speed: float = 12.0
-@export var fast_speed_multiplier: float = 2.5
+@export var move_speed: float = 18.0
+@export var fast_speed_multiplier: float = 4.0
 @export var mouse_sensitivity: float = 0.003
 @export var max_ray_distance: float = 80.0
 

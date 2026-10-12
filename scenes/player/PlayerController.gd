@@ -40,9 +40,16 @@ signal load_blueprint_requested(anchor: Vector3i)
 ## Impulse force applied when colliding horizontally with dynamic debris rigid bodies
 @export var push_force: float = 120.0
 
+@export_group("Flight Mode")
+## Enable free 3D flying mode (toggled via F or double-tapping Space).
+@export var is_flying: bool = false
+@export var fly_speed: float = 18.0
+@export var fly_fast_multiplier: float = 4.0
+@export var fly_vertical_speed: float = 14.0
+
 @export_group("Soul Projection")
-@export var projection_speed: float = 12.0
-@export var projection_fast_multiplier: float = 2.5
+@export var projection_speed: float = 18.0
+@export var projection_fast_multiplier: float = 4.0
 @export var projection_mouse_sensitivity: float = 0.003
 
 @export_group("Building Interaction")
@@ -78,6 +85,8 @@ enum GameMode { SURVIVAL, CREATIVE }
 # State
 var current_state: State = State.BODY_CONTROL
 var _mouse_captured: bool = false
+var _last_space_press_time: float = -1.0
+const DOUBLE_TAP_TIME: float = 0.35
 
 # First-person view angles
 var _yaw: float = 0.0
@@ -292,6 +301,18 @@ func toggle_soul_projection() -> void:
 	elif current_state == State.SOUL_PROJECTION:
 		set_state(State.BODY_CONTROL)
 
+func toggle_flight() -> void:
+	if current_state != State.BODY_CONTROL:
+		return
+	is_flying = not is_flying
+	velocity = Vector3.ZERO
+	var hud := _get_build_hud()
+	if hud != null and hud.has_method("set_player_mode"):
+		if is_flying:
+			hud.set_player_mode("Flying (Shift: Fast, F/Space 2x: Land)")
+		else:
+			hud.set_player_mode("Survival" if game_mode == GameMode.SURVIVAL else "Creative")
+
 func get_active_camera() -> Camera3D:
 	_ensure_nodes()
 	if current_state == State.SOUL_PROJECTION:
@@ -383,6 +404,15 @@ func _unhandled_input(event: InputEvent) -> void:
 
 	# Keyboard hotkeys
 	if event is InputEventKey and event.pressed and not event.echo:
+		if event.is_action_pressed(&"jump") or event.keycode == KEY_SPACE:
+			var now: float = Time.get_ticks_msec() / 1000.0
+			if _last_space_press_time > 0.0 and (now - _last_space_press_time) <= DOUBLE_TAP_TIME:
+				toggle_flight()
+				_last_space_press_time = -1.0
+				return
+			else:
+				_last_space_press_time = now
+
 		if event.keycode == KEY_TAB or event.is_action_pressed(&"toggle_mouse_capture"):
 			toggle_mouse_capture()
 			return
@@ -393,7 +423,10 @@ func _unhandled_input(event: InputEvent) -> void:
 			_handle_recover_action()
 			return
 		elif event.is_action_pressed(&"throw_debris") or event.keycode == KEY_F:
-			_handle_throw_action()
+			if debris_grabber != null and debris_grabber.is_grabbing:
+				_handle_throw_action()
+			else:
+				toggle_flight()
 			return
 		elif event.is_action_pressed(&"apply_cement") or event.keycode == KEY_G:
 			_handle_cement_action()
@@ -674,6 +707,10 @@ func _process_body_movement(delta: float) -> void:
 		velocity = Vector3.ZERO
 		return
 
+	if is_flying:
+		_process_flying_movement(delta)
+		return
+
 	# Gravity simulation
 	if not is_on_floor():
 		velocity.y -= gravity * delta
@@ -740,6 +777,38 @@ func _process_body_movement(delta: float) -> void:
 	# Step-up mechanic for voxel terrain: climb ledges up to step_up_height
 	if is_on_wall() and direction.length_squared() > 0.001:
 		_try_step_up(direction, delta)
+
+func _process_flying_movement(delta: float) -> void:
+	var cam := get_active_camera()
+	var basis_cam: Basis = cam.global_transform.basis if cam != null else transform.basis
+
+	var fly_vec := Vector3.ZERO
+	if Input.is_action_pressed(&"move_forward") or Input.is_key_pressed(KEY_W):
+		fly_vec -= basis_cam.z
+	if Input.is_action_pressed(&"move_backward") or Input.is_key_pressed(KEY_S):
+		fly_vec += basis_cam.z
+	if Input.is_action_pressed(&"move_left") or Input.is_key_pressed(KEY_A):
+		fly_vec -= basis_cam.x
+	if Input.is_action_pressed(&"move_right") or Input.is_key_pressed(KEY_D):
+		fly_vec += basis_cam.x
+
+	# Vertical: Space to ascend, Ctrl or Q to descend
+	if Input.is_action_pressed(&"fly_up") or Input.is_key_pressed(KEY_SPACE):
+		fly_vec += Vector3.UP
+	if Input.is_action_pressed(&"fly_down") or Input.is_key_pressed(KEY_CTRL) or Input.is_key_pressed(KEY_Q):
+		fly_vec -= Vector3.UP
+
+	var speed := fly_speed
+	var is_sprinting: bool = Input.is_action_pressed(&"sprint") or Input.is_key_pressed(KEY_SHIFT)
+	if is_sprinting:
+		speed *= fly_fast_multiplier
+
+	if fly_vec.length_squared() > 0.001:
+		velocity = fly_vec.normalized() * speed
+	else:
+		velocity = velocity.move_toward(Vector3.ZERO, speed * 8.0 * delta)
+
+	move_and_slide()
 
 func _try_step_up(move_dir: Vector3, _delta: float) -> void:
 	if not is_inside_tree():
