@@ -108,7 +108,9 @@ var target_is_terrain: bool = false
 var target_terrain_cell: Vector3i = Vector3i.ZERO
 var target_terrain_type: StringName = &""
 var mining_progress: float = 0.0
+var target_voxel_pos: Vector3i = Vector3i(99999, 99999, 99999)
 var _last_mined_cell: Vector3i = Vector3i(99999, 99999, 99999)
+const MINE_TIME: float = 1.0
 
 ## Accumulated raw materials recovered from low-durability debris.
 ## Dictionary[StringName, int] — block_type -> amount
@@ -116,6 +118,15 @@ var raw_materials: Dictionary = {}
 
 ## Spawn state machine — RayCast polling waits for VoxelTerrain collision to generate
 var _is_spawned: bool = false
+
+## Spiral-search state — used while waiting for a valid island surface below spawn.
+## Each frame the search position advances outward in a polar spiral until a
+## downward raycast hits something, preventing an infinite void-lock.
+var _spiral_angle:  float = 0.0   # current angle in radians
+var _spiral_radius: float = 0.0   # current search radius in world units
+const _SPIRAL_ANGLE_STEP:  float = 0.35   # radians per frame
+const _SPIRAL_RADIUS_STEP: float = 0.40   # units added per full rotation
+const _SPIRAL_MAX_RADIUS:  float = 128.0  # give up radius (fallback teleport)
 
 func _ensure_nodes() -> void:
 	if collision_shape == null:
@@ -530,20 +541,44 @@ func _physics_process(delta: float) -> void:
 	if not _is_spawned:
 		velocity = Vector3.ZERO
 		var space_state := get_world_3d().direct_space_state
-		if space_state != null:
-			var ray_from := Vector3(global_position.x, maxf(global_position.y, 40.0), global_position.z)
-			var ray_to := Vector3(global_position.x, -10.0, global_position.z)
-			var query := PhysicsRayQueryParameters3D.create(ray_from, ray_to)
-			query.exclude = [get_rid()]
-			var hit_result := space_state.intersect_ray(query)
-			if hit_result.is_empty():
-				return
-			# Teleport safely 0.5m above ground so the capsule (bottom at Y=0) does not penetrate the voxel surface
+		if space_state == null:
+			return
+
+		# Build a downward ray from the current (possibly spiral-offset) XZ column.
+		var ray_from := Vector3(global_position.x, maxf(global_position.y, 90.0), global_position.z)
+		var ray_to   := Vector3(global_position.x, -20.0, global_position.z)
+		var query    := PhysicsRayQueryParameters3D.create(ray_from, ray_to)
+		query.exclude = [get_rid()]
+		var hit_result := space_state.intersect_ray(query)
+
+		if not hit_result.is_empty():
+			# Found a surface — teleport player 0.5 m above it and enable physics.
 			global_position = Vector3(global_position.x, hit_result.position.y + 0.5, global_position.z)
 			_is_spawned = true
 			is_physics_suspended = false
-		else:
+			_spiral_radius = 0.0
+			_spiral_angle  = 0.0
 			return
+
+		# ---- Void below: advance the expanding spiral and retry next frame ----
+		# Increase angle; wrap every full turn and grow the radius by one step.
+		_spiral_angle += _SPIRAL_ANGLE_STEP
+		if _spiral_angle >= TAU:
+			_spiral_angle  -= TAU
+			_spiral_radius += _SPIRAL_RADIUS_STEP
+
+		if _spiral_radius >= _SPIRAL_MAX_RADIUS:
+			# Last-resort fallback: reset to origin at a Y known to be inside the
+			# island band so the player lands as soon as a chunk generates.
+			global_position = Vector3(0.5, 90.0, 0.5)
+			_spiral_radius = 0.0
+			_spiral_angle  = 0.0
+		else:
+			# Move XZ to the next spiral candidate (Archimedean spiral around origin).
+			var sx: float = cos(_spiral_angle) * _spiral_radius
+			var sz: float = sin(_spiral_angle) * _spiral_radius
+			global_position = Vector3(sx, maxf(global_position.y, 90.0), sz)
+		return
 
 	if is_physics_suspended:
 		velocity = Vector3.ZERO
@@ -565,17 +600,54 @@ func _physics_process(delta: float) -> void:
 
 	_update_raycast()
 
-	# Process hold-to-mine interaction when targeting natural terrain and holding RMB
-	if target_is_terrain and Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) and _mouse_captured and current_state != State.DEBUG_FLIGHT:
-		if target_terrain_cell != _last_mined_cell:
-			_last_mined_cell = target_terrain_cell
-			mining_progress = 0.0
+	# Process hold-to-mine interaction (continuous mining on RMB)
+	var is_rmb_pressed := Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) or (InputMap.has_action("right_click") and Input.is_action_pressed("right_click"))
+	if is_rmb_pressed and _mouse_captured and current_state != State.DEBUG_FLIGHT:
+		var vox_world := _get_voxel_world()
+		var hit_voxel := false
+		var hit_pos := Vector3i.ZERO
 
-		mining_progress += delta / mine_duration_seconds
-		if mining_progress >= 1.0:
-			_complete_mining_action()
+		if vox_world != null:
+			var terrain: Node = vox_world.get_node_or_null("VoxelTerrain")
+			if terrain != null and terrain.has_method("get_voxel_tool"):
+				var vt: VoxelTool = terrain.get_voxel_tool()
+				if vt != null:
+					vt.channel = VoxelBuffer.CHANNEL_TYPE
+					var cam := get_active_camera()
+					if cam != null:
+						var hit = vt.raycast(cam.global_position, -cam.global_transform.basis.z, max_ray_distance)
+						if hit != null:
+							hit_voxel = true
+							hit_pos = hit.position
+
+		if not hit_voxel and target_is_terrain:
+			hit_voxel = true
+			hit_pos = target_terrain_cell
+
+		if hit_voxel:
+			if hit_pos == target_voxel_pos:
+				mining_progress += delta
+			else:
+				mining_progress = 0.0
+				target_voxel_pos = hit_pos
+				_last_mined_cell = hit_pos
+
+			if mining_progress >= MINE_TIME:
+				if vox_world != null:
+					var terrain: Node = vox_world.get_node_or_null("VoxelTerrain")
+					if terrain != null and terrain.has_method("get_voxel_tool"):
+						var vt: VoxelTool = terrain.get_voxel_tool()
+						if vt != null:
+							vt.channel = VoxelBuffer.CHANNEL_TYPE
+							vt.set_voxel(target_voxel_pos, 0)
+				_complete_mining_action()
+		else:
+			mining_progress = 0.0
+			target_voxel_pos = Vector3i(99999, 99999, 99999)
+			_last_mined_cell = Vector3i(99999, 99999, 99999)
 	else:
 		mining_progress = 0.0
+		target_voxel_pos = Vector3i(99999, 99999, 99999)
 		_last_mined_cell = Vector3i(99999, 99999, 99999)
 
 	if (Input.is_action_pressed(&"apply_cement") or Input.is_key_pressed(KEY_G)) and current_state != State.DEBUG_FLIGHT:
@@ -584,8 +656,9 @@ func _physics_process(delta: float) -> void:
 
 func _complete_mining_action() -> void:
 	var vox_world := _get_voxel_world()
+	var mine_target := target_voxel_pos if target_voxel_pos != Vector3i(99999, 99999, 99999) else target_terrain_cell
 	if vox_world != null and vox_world.has_method("mine_voxel"):
-		var mined_type: StringName = vox_world.mine_voxel(target_terrain_cell)
+		var mined_type: StringName = vox_world.mine_voxel(mine_target)
 		if not mined_type.is_empty():
 			var inv_mgr := _get_inventory_manager()
 			if inv_mgr != null:
@@ -594,6 +667,7 @@ func _complete_mining_action() -> void:
 			target_face_changed.emit(has_target, target_remove_cell, target_face_dir, target_face_status)
 	mining_progress = 0.0
 	_last_mined_cell = Vector3i(99999, 99999, 99999)
+	target_voxel_pos = Vector3i(99999, 99999, 99999)
 
 func _process_body_movement(delta: float) -> void:
 	if not _is_spawned or is_physics_suspended:
@@ -846,7 +920,7 @@ func _update_raycast() -> void:
 		if target_is_terrain:
 			var mat_disp := BlockTypeCatalog.get_display_name(target_terrain_type)
 			if mining_progress > 0.0:
-				target_face_status = "Mining %s [%d%%]" % [mat_disp, int(mining_progress * 100.0)]
+				target_face_status = "Mining %s [%d%%]" % [mat_disp, int((mining_progress / MINE_TIME) * 100.0)]
 			else:
 				target_face_status = "Natural %s (Hold RMB: Mine)" % mat_disp
 		else:

@@ -50,20 +50,25 @@ signal spawn_chunks_ready
 		seed_value = val
 		_apply_generator_params()
 
+
 @export var view_distance_chunks: int = 4:
 	set(val):
-		view_distance_chunks = clampi(val, 2, 8)
+		view_distance_chunks = clampi(val, 2, 64)
 		if _viewer != null:
-			_viewer.view_distance = clampi(view_distance_chunks * 16, 64, 128)
+			_viewer.view_distance = clampi(view_distance_chunks * 16, 64, 2048)
 
-@export var noise_frequency_2d: float = 0.025   # kept for fallback ore noise
-@export var noise_frequency_3d: float = 0.045   # primary 3D island density noise
+## Low-frequency 2D noise for island cluster layout (XZ mask).
+@export var noise_frequency_2d: float = 0.012
+## Mid-frequency 3D noise for surface detail / overhangs.
+@export var noise_frequency_3d: float = 0.045
+## High-frequency ore-vein noise.
+@export var noise_frequency_ore: float = 0.12
 
-## Density threshold: voxels with 3D noise > this value become solid.
-## Lower = thinner, more sky-punching islands; raise for massive landmasses.
-@export var island_density_threshold: float = 0.18
+## Solid if Castle Story combined density > this value.
+## 0.0 = large solid masses; raise toward 0.4 to thin them.
+@export var island_density_threshold: float = 0.0
 
-## Vertical scale factor for the island shape bias (squishes islands flat-ish).
+## Legacy field kept for compatibility — not used by the Castle Story formula.
 @export var island_vertical_scale: float = 3.5
 
 # ---------------------------------------------------------------------------
@@ -75,10 +80,10 @@ var _library: VoxelBlockyLibrary = null
 var _voxel_tool: VoxelTool       = null
 var _chunks: Dictionary          = {}
 
-# Fallback noise for get_voxel_at() on unloaded voxels (procedural query only).
-var _noise_2d:  FastNoiseLite = null
-var _noise_3d:  FastNoiseLite = null
-var _noise_ore: FastNoiseLite = null
+# Noise instances — shared between the live generator and the procedural fallback.
+var _noise_2d:  FastNoiseLite = null   ## 2D cluster mask (low frequency)
+var _noise_3d:  FastNoiseLite = null   ## 3D detail noise (mid frequency)
+var _noise_ore: FastNoiseLite = null   ## ore vein noise (high frequency)
 
 ## Reference to the active IslandGenerator instance so we can re-inject noise on seed changes.
 var _island_gen = null
@@ -98,7 +103,31 @@ func _ready() -> void:
 	load_terrain_deltas()
 	_build_library()
 	_build_terrain()
+	var custom_generator = load("res://data/gerador_ilhas.tres")
+	if custom_generator != null:
+		_terrain.generator = custom_generator
 	_build_viewer()
+
+# ---------------------------------------------------------------------------
+# Dynamic view distance — [ decreases, ] increases by 64 voxels each press.
+# ---------------------------------------------------------------------------
+var _bracket_left_prev: bool = false
+var _bracket_right_prev: bool = false
+
+func _process(_delta: float) -> void:
+	if _viewer == null:
+		return
+	var left_pressed := Input.is_key_pressed(KEY_BRACKETLEFT)
+	if left_pressed and not _bracket_left_prev:
+		_viewer.view_distance = maxi(64, _viewer.view_distance - 64)
+		print("[VoxelWorld] view_distance = ", _viewer.view_distance)
+	_bracket_left_prev = left_pressed
+
+	var right_pressed := Input.is_key_pressed(KEY_BRACKETRIGHT)
+	if right_pressed and not _bracket_right_prev:
+		_viewer.view_distance = mini(2048, _viewer.view_distance + 64)
+		print("[VoxelWorld] view_distance = ", _viewer.view_distance)
+	_bracket_right_prev = right_pressed
 
 # ---------------------------------------------------------------------------
 # Library — maps block IDs to coloured StandardMaterial3D models.
@@ -153,12 +182,13 @@ func _build_terrain() -> void:
 	_terrain.mesher = mesher
 
 	# Generator — IslandGenerator extends VoxelGeneratorScript to create
-	# Castle Story-style floating islands using a 3D density field.
+	# Castle Story-style floating islands using the 2D mask + Y-gradient + 3D detail formula.
 	_island_gen = _IslandGeneratorScript.new()
-	_island_gen.noise_island       = _noise_3d
-	_island_gen.noise_ore          = _noise_ore
-	_island_gen.density_threshold  = island_density_threshold
-	_island_gen.vertical_scale     = island_vertical_scale
+	_island_gen.noise_island      = _noise_3d   # 3D detail noise
+	_island_gen.noise_island_2d   = _noise_2d   # 2D cluster mask
+	_island_gen.noise_ore         = _noise_ore
+	_island_gen.density_threshold = island_density_threshold
+	_island_gen.vertical_scale    = island_vertical_scale
 	_terrain.generator = _island_gen
 
 	# Max view distance in voxels supported by terrain
@@ -192,7 +222,7 @@ func _on_mesh_block_entered(_block_pos: Vector3i) -> void:
 func _build_viewer() -> void:
 	_viewer = VoxelViewer.new()
 	_viewer.name               = "VoxelViewer"
-	_viewer.view_distance      = clampi(view_distance_chunks * 16, 64, 128)
+	_viewer.view_distance      = 512
 	_viewer.requires_collisions = true
 	add_child(_viewer)
 
@@ -206,7 +236,7 @@ func attach_viewer_to_player(player_node: Node3D) -> void:
 		_viewer.get_parent().remove_child(_viewer)
 	player_node.add_child(_viewer)
 	_viewer.position = Vector3.ZERO
-	_viewer.view_distance = clampi(view_distance_chunks * 16, 64, 128)
+	_viewer.view_distance = 512
 	_viewer.requires_collisions = true
 
 # ---------------------------------------------------------------------------
@@ -216,24 +246,29 @@ func _apply_generator_params() -> void:
 	_setup_fallback_noise()
 	# Re-inject updated noise into the live generator so seed changes take effect.
 	if _island_gen != null:
-		_island_gen.noise_island = _noise_3d
-		_island_gen.noise_ore    = _noise_ore
+		_island_gen.noise_island      = _noise_3d
+		_island_gen.noise_island_2d   = _noise_2d
+		_island_gen.noise_ore         = _noise_ore
+		_island_gen.density_threshold = island_density_threshold
 
 func _setup_fallback_noise() -> void:
+	# 2D cluster-mask noise — very low frequency so islands are wide and sparse.
 	_noise_2d = FastNoiseLite.new()
 	_noise_2d.seed       = seed_value
 	_noise_2d.noise_type = FastNoiseLite.TYPE_PERLIN
 	_noise_2d.frequency  = noise_frequency_2d
 
+	# 3D detail noise — adds overhangs, caves, and natural surface variation.
 	_noise_3d = FastNoiseLite.new()
 	_noise_3d.seed       = seed_value + 100
 	_noise_3d.noise_type = FastNoiseLite.TYPE_PERLIN
 	_noise_3d.frequency  = noise_frequency_3d
 
+	# Ore-vein noise — high-frequency, used only in island cores.
 	_noise_ore = FastNoiseLite.new()
 	_noise_ore.seed       = seed_value + 200
 	_noise_ore.noise_type = FastNoiseLite.TYPE_PERLIN
-	_noise_ore.frequency  = 0.12
+	_noise_ore.frequency  = noise_frequency_ore
 
 # ---------------------------------------------------------------------------
 # Spawn helpers
@@ -500,51 +535,76 @@ func _procedural_voxel(gx: int, gy: int, gz: int, cp: Vector2i, local_cell: Vect
 		return &""
 	return _id_to_name(block_id)
 
-## Shared density → block-ID logic used by both the procedural fallback and _IslandGenerator.
+## Shared density → block-ID logic (Castle Story formula).
+## Used as a fallback when a chunk is not yet streamed by VoxelTerrain.
+## Must stay numerically identical to IslandGenerator._eval_voxel().
 func _island_density_to_id(gx: int, gy: int, gz: int) -> int:
-	# Voxels entirely outside the island band are always air.
-	if float(gy) < ISLAND_Y_MIN - 12.0 or float(gy) > ISLAND_Y_MAX + 12.0:
+	const MASK_STRENGTH:   float = 1.20
+	const TOP_FALLOFF:     float = 0.055
+	const BELLY_FALLOFF:   float = 0.110
+	const FLAT_TOP_VOXELS: float = 6.0
+	const DETAIL_WEIGHT:   float = 0.35
+
+	var fy:          float = float(gy)
+	var plateau_top: float = ISLAND_Y_MAX + FLAT_TOP_VOXELS
+	var island_mid:  float = (ISLAND_Y_MIN + ISLAND_Y_MAX) * 0.5
+
+	if fy > plateau_top + 4.0 or fy < ISLAND_Y_MIN - 24.0:
 		return BLOCK_AIR
 
-	# 3D density noise — the primary island shape.
-	var fy: float = float(gy) * island_vertical_scale
-	var density: float = _noise_3d.get_noise_3d(float(gx), fy, float(gz))
+	# 2D cluster mask.
+	var mask2d: float
+	if _noise_2d != null:
+		mask2d = (_noise_2d.get_noise_2d(float(gx), float(gz)) + 1.0) * 0.5
+	else:
+		mask2d = 0.75
 
-	# Vertical bias: carve air above ISLAND_Y_MAX and below ISLAND_Y_MIN.
-	var band_center: float = (ISLAND_Y_MIN + ISLAND_Y_MAX) * 0.5
-	var band_half:   float = (ISLAND_Y_MAX - ISLAND_Y_MIN) * 0.5
-	var dist_from_center: float = abs(float(gy) - band_center)
-	var bias: float = clampf((dist_from_center - band_half * 0.3) / (band_half * 0.7), 0.0, 1.0)
-	density -= bias * 0.55
+	# Asymmetric Y-gradient.
+	var y_gradient: float
+	if fy >= plateau_top:
+		y_gradient = (fy - plateau_top) * TOP_FALLOFF * 8.0
+	elif fy >= island_mid:
+		y_gradient = (fy - island_mid) * TOP_FALLOFF
+	else:
+		y_gradient = (island_mid - fy) * BELLY_FALLOFF
 
+	# 3D detail noise.
+	var detail3d: float = _noise_3d.get_noise_3d(float(gx), fy, float(gz)) * DETAIL_WEIGHT if _noise_3d != null else 0.0
+
+	var density: float = mask2d * MASK_STRENGTH - y_gradient + detail3d
 	if density < island_density_threshold:
 		return BLOCK_AIR
 
-	# Classify solid voxel: grass cap, dirt sub-cap, then stone / ores.
-	# Check whether the voxel directly above is air → grass surface.
-	var fy_above: float = float(gy + 1) * island_vertical_scale
-	var density_above: float = _noise_3d.get_noise_3d(float(gx), fy_above, float(gz))
-	var dist_above: float = abs(float(gy + 1) - band_center)
-	var bias_above: float = clampf((dist_above - band_half * 0.3) / (band_half * 0.7), 0.0, 1.0)
-	density_above -= bias_above * 0.55
-	var is_surface: bool = density_above < island_density_threshold
-
-	if is_surface:
+	# Grass cap check.
+	var fy_a: float  = fy + 1.0
+	var d3d_a: float = _noise_3d.get_noise_3d(float(gx), fy_a, float(gz)) * DETAIL_WEIGHT if _noise_3d != null else 0.0
+	var yg_a: float
+	if fy_a >= plateau_top:
+		yg_a = (fy_a - plateau_top) * TOP_FALLOFF * 8.0
+	elif fy_a >= island_mid:
+		yg_a = (fy_a - island_mid) * TOP_FALLOFF
+	else:
+		yg_a = (island_mid - fy_a) * BELLY_FALLOFF
+	if mask2d * MASK_STRENGTH - yg_a + d3d_a < island_density_threshold:
 		return BLOCK_GRASS
 
-	# Check 2 voxels above for dirt.
-	var fy2: float = float(gy + 2) * island_vertical_scale
-	var density2: float = _noise_3d.get_noise_3d(float(gx), fy2, float(gz))
-	var dist2: float = abs(float(gy + 2) - band_center)
-	var bias2: float = clampf((dist2 - band_half * 0.3) / (band_half * 0.7), 0.0, 1.0)
-	density2 -= bias2 * 0.55
-	if density2 < island_density_threshold:
+	# Dirt check.
+	var fy_b: float  = fy + 2.0
+	var d3d_b: float = _noise_3d.get_noise_3d(float(gx), fy_b, float(gz)) * DETAIL_WEIGHT if _noise_3d != null else 0.0
+	var yg_b: float
+	if fy_b >= plateau_top:
+		yg_b = (fy_b - plateau_top) * TOP_FALLOFF * 8.0
+	elif fy_b >= island_mid:
+		yg_b = (fy_b - island_mid) * TOP_FALLOFF
+	else:
+		yg_b = (island_mid - fy_b) * BELLY_FALLOFF
+	if mask2d * MASK_STRENGTH - yg_b + d3d_b < island_density_threshold:
 		return BLOCK_DIRT
 
 	# Ore veins inside the island core.
 	if _noise_ore != null:
-		var ore_n: float = _noise_ore.get_noise_3d(float(gx), float(gy), float(gz))
-		var core_y: float = (ISLAND_Y_MIN + ISLAND_Y_MAX) * 0.5
+		var ore_n: float  = _noise_ore.get_noise_3d(float(gx), fy, float(gz))
+		var core_y: float = island_mid
 		if gy < int(core_y) - 8  and ore_n > 0.45: return BLOCK_GOLD
 		if gy < int(core_y) - 4  and ore_n > 0.35: return BLOCK_IRON
 		if gy < int(core_y)      and ore_n > 0.25: return BLOCK_COAL
