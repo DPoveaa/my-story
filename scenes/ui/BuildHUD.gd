@@ -21,11 +21,31 @@ var _visualizer: Node = null
 var grid_system: Node
 var orchestrator: CollapseOrchestrator
 var player: CharacterBody3D = null
+var voxel_world: Node = null
 @export var blueprint_manager: Node = null
 
 ## Dynamically created label for raw material counts (no .tscn edit required).
 var _raw_mats_label: Label = null
 var _objective_label: Label = null
+
+## View-distance controls (− / label / +).
+var _view_panel: PanelContainer = null
+var _view_label: Label = null
+var _view_minus_btn: Button = null
+var _view_plus_btn: Button = null
+
+## Mining feedback + progress.
+var _mine_panel: PanelContainer = null
+var _mine_label: Label = null
+var _mine_bar: ProgressBar = null
+var _mine_feedback_label: Label = null
+var _mine_feedback_timer: float = 0.0
+
+## Collapsible controls reference panel.
+var _controls_panel: PanelContainer = null
+var _controls_body: VBoxContainer = null
+var _controls_toggle: Button = null
+var _controls_expanded: bool = true
 
 ## Blueprint Save Modal Nodes
 var _save_modal: PanelContainer = null
@@ -100,6 +120,12 @@ func _ready() -> void:
 			obj.cycle_completed.connect(_on_objective_cycle_completed)
 		_on_objective_updated(int(obj.current_stage), obj.current_progress, obj.get_target_for_stage(obj.current_stage), obj.get_objective_display_text())
 
+	_create_view_distance_controls()
+	_create_mining_hud()
+	_create_controls_panel()
+	if voxel_world != null:
+		bind_voxel_world(voxel_world)
+
 func _on_objective_updated(_stage: int, _cur: int, _target: int, desc: String) -> void:
 	if _objective_label == null:
 		return
@@ -124,6 +150,81 @@ func _on_inventory_changed(materials: Dictionary) -> void:
 		parts.append("%s: %d" % [BlockTypeCatalog.get_display_name(StringName(mat)), count])
 	_raw_mats_label.text = "Inv: " + " | ".join(parts)
 	_raw_mats_label.visible = true
+
+func bind_voxel_world(world: Node) -> void:
+	voxel_world = world
+	if voxel_world == null:
+		return
+	if voxel_world.has_signal("view_distance_changed"):
+		if not voxel_world.view_distance_changed.is_connected(_on_view_distance_changed):
+			voxel_world.view_distance_changed.connect(_on_view_distance_changed)
+	_refresh_view_distance_label()
+
+func _create_view_distance_controls() -> void:
+	if _view_panel != null:
+		return
+	_view_panel = PanelContainer.new()
+	_view_panel.name = "ViewDistancePanel"
+	_view_panel.anchor_left = 1.0
+	_view_panel.anchor_right = 1.0
+	_view_panel.anchor_top = 0.0
+	_view_panel.anchor_bottom = 0.0
+	_view_panel.offset_left = -220.0
+	_view_panel.offset_top = 52.0
+	_view_panel.offset_right = -12.0
+	_view_panel.offset_bottom = 96.0
+	_view_panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(_view_panel)
+
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 8)
+	_view_panel.add_child(row)
+
+	_view_minus_btn = Button.new()
+	_view_minus_btn.text = "−"
+	_view_minus_btn.custom_minimum_size = Vector2(36, 28)
+	_view_minus_btn.tooltip_text = "Decrease view distance (− / [)"
+	_view_minus_btn.pressed.connect(_on_view_minus_pressed)
+	row.add_child(_view_minus_btn)
+
+	_view_label = Label.new()
+	_view_label.text = "View: --"
+	_view_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_view_label.custom_minimum_size = Vector2(120, 0)
+	_view_label.add_theme_font_size_override("font_size", 14)
+	row.add_child(_view_label)
+
+	_view_plus_btn = Button.new()
+	_view_plus_btn.text = "+"
+	_view_plus_btn.custom_minimum_size = Vector2(36, 28)
+	_view_plus_btn.tooltip_text = "Increase view distance (+ / ])"
+	_view_plus_btn.pressed.connect(_on_view_plus_pressed)
+	row.add_child(_view_plus_btn)
+
+func _on_view_minus_pressed() -> void:
+	if voxel_world != null and voxel_world.has_method("adjust_view_distance_chunks"):
+		voxel_world.adjust_view_distance_chunks(-1)
+
+func _on_view_plus_pressed() -> void:
+	if voxel_world != null and voxel_world.has_method("adjust_view_distance_chunks"):
+		voxel_world.adjust_view_distance_chunks(1)
+
+func _on_view_distance_changed(voxels: int, chunks: int) -> void:
+	if _view_label == null:
+		return
+	_view_label.text = "View: %d (%dc)" % [voxels, chunks]
+
+func _refresh_view_distance_label() -> void:
+	if _view_label == null or voxel_world == null:
+		return
+	var voxels := 0
+	var chunks := 0
+	if voxel_world.has_method("get_view_distance_voxels"):
+		voxels = int(voxel_world.get_view_distance_voxels())
+	if voxel_world.has_method("get_view_distance_chunks"):
+		chunks = int(voxel_world.get_view_distance_chunks())
+	_view_label.text = "View: %d (%dc)" % [voxels, chunks]
 
 func set_cement(current: int, max_val: int) -> void:
 	if cement_label == null:
@@ -179,12 +280,197 @@ func set_carried_block(is_carrying: bool, block_type: StringName) -> void:
 		else:
 			prompt_label.visible = false
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	if grid_system != null and block_count_label != null:
 		block_count_label.text = "Grid Blocks: %d" % grid_system.get_block_count()
 
 	if orchestrator != null and debris_count_label != null:
 		debris_count_label.text = "Active Debris: %d" % orchestrator.get_active_debris_count()
+
+	if _mine_feedback_timer > 0.0:
+		_mine_feedback_timer -= delta
+		if _mine_feedback_timer <= 0.0 and _mine_feedback_label != null:
+			_mine_feedback_label.visible = false
+
+func _create_mining_hud() -> void:
+	if _mine_panel != null:
+		return
+	_mine_panel = PanelContainer.new()
+	_mine_panel.name = "MiningHudPanel"
+	_mine_panel.anchor_left = 0.5
+	_mine_panel.anchor_right = 0.5
+	_mine_panel.anchor_top = 1.0
+	_mine_panel.anchor_bottom = 1.0
+	_mine_panel.offset_left = -160.0
+	_mine_panel.offset_right = 160.0
+	_mine_panel.offset_top = -110.0
+	_mine_panel.offset_bottom = -52.0
+	_mine_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_mine_panel.visible = false
+	add_child(_mine_panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 4)
+	_mine_panel.add_child(vbox)
+
+	_mine_label = Label.new()
+	_mine_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_mine_label.add_theme_font_size_override("font_size", 15)
+	_mine_label.add_theme_color_override("font_color", Color(0.95, 0.95, 0.9))
+	_mine_label.text = "Target: —"
+	vbox.add_child(_mine_label)
+
+	_mine_bar = ProgressBar.new()
+	_mine_bar.min_value = 0.0
+	_mine_bar.max_value = 100.0
+	_mine_bar.value = 0.0
+	_mine_bar.show_percentage = true
+	_mine_bar.custom_minimum_size = Vector2(280, 18)
+	vbox.add_child(_mine_bar)
+
+	_mine_feedback_label = Label.new()
+	_mine_feedback_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_mine_feedback_label.add_theme_font_size_override("font_size", 14)
+	_mine_feedback_label.add_theme_color_override("font_color", Color(0.45, 1.0, 0.55))
+	_mine_feedback_label.visible = false
+	_mine_feedback_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_mine_feedback_label.anchor_left = 0.5
+	_mine_feedback_label.anchor_right = 0.5
+	_mine_feedback_label.anchor_top = 1.0
+	_mine_feedback_label.anchor_bottom = 1.0
+	_mine_feedback_label.offset_left = -180.0
+	_mine_feedback_label.offset_right = 180.0
+	_mine_feedback_label.offset_top = -140.0
+	_mine_feedback_label.offset_bottom = -118.0
+	add_child(_mine_feedback_label)
+
+func set_mining_progress(active: bool, block_name: String, percent: int) -> void:
+	if _mine_panel == null:
+		return
+	if not active:
+		_mine_panel.visible = false
+		if _mine_bar != null:
+			_mine_bar.value = 0.0
+		return
+	_mine_panel.visible = true
+	var pct: int = clampi(percent, 0, 100)
+	if _mine_label != null:
+		if pct > 0:
+			_mine_label.text = "Mining %s [%d%%]" % [block_name, pct]
+		else:
+			_mine_label.text = "Target: %s" % block_name
+	if _mine_bar != null:
+		_mine_bar.value = float(pct)
+
+func show_mine_feedback(block_type: StringName, amount: int = 1) -> void:
+	if _mine_feedback_label == null:
+		return
+	var disp := BlockTypeCatalog.get_display_name(block_type)
+	_mine_feedback_label.text = "+%d %s" % [amount, disp]
+	_mine_feedback_label.visible = true
+	_mine_feedback_timer = 1.6
+
+func _create_controls_panel() -> void:
+	if _controls_panel != null:
+		return
+	_controls_panel = PanelContainer.new()
+	_controls_panel.name = "ControlsPanel"
+	_controls_panel.anchor_left = 0.0
+	_controls_panel.anchor_right = 0.0
+	_controls_panel.anchor_top = 0.0
+	_controls_panel.anchor_bottom = 0.0
+	_controls_panel.offset_left = 12.0
+	_controls_panel.offset_top = 52.0
+	_controls_panel.offset_right = 292.0
+	_controls_panel.offset_bottom = 420.0
+	_controls_panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(_controls_panel)
+
+	var root := VBoxContainer.new()
+	root.add_theme_constant_override("separation", 4)
+	_controls_panel.add_child(root)
+
+	_controls_toggle = Button.new()
+	_controls_toggle.text = "Controls ▾"
+	_controls_toggle.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	_controls_toggle.pressed.connect(_toggle_controls_panel)
+	root.add_child(_controls_toggle)
+
+	_controls_body = VBoxContainer.new()
+	_controls_body.add_theme_constant_override("separation", 2)
+	root.add_child(_controls_body)
+
+	for line in _build_controls_lines():
+		var lbl := Label.new()
+		lbl.text = line
+		lbl.add_theme_font_size_override("font_size", 12)
+		lbl.add_theme_color_override("font_color", Color(0.88, 0.9, 0.92))
+		_controls_body.add_child(lbl)
+
+func _toggle_controls_panel() -> void:
+	_controls_expanded = not _controls_expanded
+	if _controls_body != null:
+		_controls_body.visible = _controls_expanded
+	if _controls_toggle != null:
+		_controls_toggle.text = "Controls ▾" if _controls_expanded else "Controls ▸"
+	if _controls_panel != null:
+		_controls_panel.offset_bottom = 420.0 if _controls_expanded else 88.0
+
+func _build_controls_lines() -> PackedStringArray:
+	var lines: PackedStringArray = PackedStringArray()
+	lines.append("Move: %s" % _action_keys("move_forward", "move_left", "move_backward", "move_right"))
+	lines.append("Jump / Sprint: %s / %s" % [_action_keys("jump"), _action_keys("sprint")])
+	lines.append("Toggle fly: F / double-Space")
+	lines.append("Fly up/down: %s / %s" % [_action_keys("fly_up"), _action_keys("fly_down")])
+	lines.append("Soul Projection: %s" % _action_keys("soul_projection"))
+	lines.append("Mouse capture: %s" % _action_keys("toggle_mouse_capture"))
+	lines.append("Mine (hold): %s" % _action_keys("remove_block"))
+	lines.append("Place / Remove block: %s / %s" % [_action_keys("place_block"), _action_keys("remove_block")])
+	lines.append("Materials: %s" % _action_keys("select_slot_1", "select_slot_2", "select_slot_3", "select_slot_4"))
+	lines.append("Mortar brush: %s" % _action_keys("apply_cement"))
+	lines.append("Debris grab/drop: %s" % _action_keys("interact"))
+	lines.append("Throw / Recover: %s / %s" % [_action_keys("throw_debris"), _action_keys("recover_block")])
+	lines.append("Blueprints: %s / %s" % [_action_keys("save_blueprint"), _action_keys("load_blueprint")])
+	lines.append("Debug camera: %s" % _action_keys("debug_camera"))
+	lines.append("View distance: + / −  (or [ / ])")
+	return lines
+
+func _action_keys(action1: StringName, action2: StringName = &"", action3: StringName = &"", action4: StringName = &"") -> String:
+	var parts: PackedStringArray = PackedStringArray()
+	for action in [action1, action2, action3, action4]:
+		if action == &"":
+			continue
+		var label := _format_action_events(action)
+		if not label.is_empty():
+			parts.append(label)
+	if parts.is_empty():
+		return "—"
+	if action1 == &"move_forward" and parts.size() >= 4:
+		return "%s%s%s%s" % [parts[0], parts[1], parts[2], parts[3]]
+	return " / ".join(parts)
+
+func _format_action_events(action: StringName) -> String:
+	if not InputMap.has_action(action):
+		return String(action)
+	var uniq: PackedStringArray = PackedStringArray()
+	for ev in InputMap.action_get_events(action):
+		var label := ""
+		if ev is InputEventKey:
+			var key_ev := ev as InputEventKey
+			var code: Key = key_ev.physical_keycode if key_ev.physical_keycode != KEY_NONE else key_ev.keycode
+			label = OS.get_keycode_string(code)
+		elif ev is InputEventMouseButton:
+			var btn := (ev as InputEventMouseButton).button_index
+			match btn:
+				MOUSE_BUTTON_LEFT: label = "LMB"
+				MOUSE_BUTTON_RIGHT: label = "RMB"
+				MOUSE_BUTTON_MIDDLE: label = "MMB"
+				_: label = "Mouse%d" % int(btn)
+		if not label.is_empty() and not uniq.has(label):
+			uniq.append(label)
+	if uniq.is_empty():
+		return String(action)
+	return "/".join(uniq)
 
 ## Updates the raw materials HUD label.
 ## Called via signal raw_materials_changed(materials: Dictionary).

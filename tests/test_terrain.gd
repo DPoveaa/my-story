@@ -418,7 +418,7 @@ func test_stale_job_generation_versioning() -> void:
 	world._chunk_generation[cp] = 1
 
 	# Inject a stale result (generation=0) for that chunk into the ready queue
-	var stale_before := world.stale_results_discarded
+	var stale_before: int = world.stale_results_discarded
 	world._results_mutex.lock()
 	world._results_ready.append({
 		"pos": cp,
@@ -431,10 +431,10 @@ func test_stale_job_generation_versioning() -> void:
 	world._results_mutex.unlock()
 
 	# Simulate main-thread consumption within budget
-	var frame_usec := Time.get_ticks_usec()
+	var frame_usec: int = Time.get_ticks_usec()
 	world._consume_ready_results(frame_usec)
 
-	var stale_after := world.stale_results_discarded
+	var stale_after: int = world.stale_results_discarded
 	_assert(stale_after > stale_before, "Stale worker result (gen=0 < current gen=1) is detected and discarded without creating chunk")
 	_assert(not world._chunks.has(cp), "Stale result does not create chunk in loaded world")
 
@@ -523,9 +523,10 @@ func test_chunk_cache_capacity_eviction() -> void:
 	world.seed_value = 1337
 	world.max_chunk_cache_size = 2
 
-	var c1 := world._load_or_generate_chunk_sync(Vector2i(0, 0))
-	var c2 := world._load_or_generate_chunk_sync(Vector2i(1, 0))
-	var c3 := world._load_or_generate_chunk_sync(Vector2i(2, 0))
+	var c1: VoxelChunk = world._load_or_generate_chunk_sync(Vector2i(0, 0))
+	var c2: VoxelChunk = world._load_or_generate_chunk_sync(Vector2i(1, 0))
+	var c3: VoxelChunk = world._load_or_generate_chunk_sync(Vector2i(2, 0))
+	_assert(c1 != null and c2 != null and c3 != null, "Sync chunk stubs load successfully")
 
 	world._unload_chunk(Vector2i(0, 0))
 	world._unload_chunk(Vector2i(1, 0))

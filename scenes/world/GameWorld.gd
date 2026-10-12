@@ -66,6 +66,10 @@ func _ready() -> void:
 		build_hud.grid_system = grid_system
 		build_hud.orchestrator = collapse_orchestrator
 		build_hud.player = player
+		if build_hud.has_method("bind_voxel_world"):
+			build_hud.bind_voxel_world(voxel_world)
+		else:
+			build_hud.voxel_world = voxel_world
 
 	# Wire Player (primary gameplay controller).
 	# Spawn on physics-validated safe surface AFTER terrain collision is committed to PhysicsServer3D.

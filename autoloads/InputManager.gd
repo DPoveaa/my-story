@@ -49,6 +49,14 @@ func setup_default_input_actions() -> void:
 	_add_key_action(&"select_slot_3", KEY_3)
 	_add_key_action(&"select_slot_4", KEY_4)
 
+	# View distance (+ / − and bracket aliases)
+	_add_key_action(&"view_distance_up", KEY_EQUAL)
+	_add_key_action(&"view_distance_up", KEY_KP_ADD)
+	_add_key_action(&"view_distance_up", KEY_BRACKETRIGHT)
+	_add_key_action(&"view_distance_down", KEY_MINUS)
+	_add_key_action(&"view_distance_down", KEY_KP_SUBTRACT)
+	_add_key_action(&"view_distance_down", KEY_BRACKETLEFT)
+
 func _add_key_action(action: StringName, keycode: Key) -> void:
 	if not InputMap.has_action(action):
 		InputMap.add_action(action)

@@ -120,6 +120,14 @@ var mining_progress: float = 0.0
 var target_voxel_pos: Vector3i = Vector3i(99999, 99999, 99999)
 var _last_mined_cell: Vector3i = Vector3i(99999, 99999, 99999)
 const MINE_TIME: float = 1.0
+const _INVALID_VOXEL := Vector3i(99999, 99999, 99999)
+
+## Thin outline + staged crack overlay for the targeted terrain voxel (reused meshes).
+var _terrain_outline: MeshInstance3D = null
+var _terrain_crack: MeshInstance3D = null
+var _outline_mat: StandardMaterial3D = null
+var _crack_mat: StandardMaterial3D = null
+var _crack_stage: int = -1
 
 ## Accumulated raw materials recovered from low-durability debris.
 ## Dictionary[StringName, int] — block_type -> amount
@@ -189,11 +197,11 @@ func _ready() -> void:
 	# Auto-capture mouse when game starts so first-person look works immediately
 	set_mouse_capture(true)
 
-	# Spawn state: start in the air above world height (WORLD_HEIGHT=32) and await terrain collision via raycast polling.
-	# Starting at Y=40.0 ensures the player is safely above all terrain while remaining well within VoxelViewer distance (64m).
-	global_position.y = 40.0
+	# Spawn above the floating-island band; spiral search + raycast settle onto solid ground.
+	global_position.y = 110.0
 	_is_spawned = false
 	velocity = Vector3.ZERO
+	_ensure_terrain_target_visuals()
 
 	set_state(State.BODY_CONTROL)
 	block_type_changed.emit(get_selected_type())
@@ -633,26 +641,20 @@ func _physics_process(delta: float) -> void:
 
 	_update_raycast()
 
-	# Process hold-to-mine interaction (continuous mining on RMB)
-	var is_rmb_pressed := Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT) or (InputMap.has_action("right_click") and Input.is_action_pressed("right_click"))
+	# Hold-to-mine (RMB / remove_block) — only VoxelWorld.mine_voxel() mutates terrain.
+	var is_rmb_pressed := (
+		Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT)
+		or (InputMap.has_action(&"remove_block") and Input.is_action_pressed(&"remove_block"))
+	)
 	if is_rmb_pressed and _mouse_captured and current_state != State.DEBUG_FLIGHT:
-		var vox_world := _get_voxel_world()
 		var hit_voxel := false
 		var hit_pos := Vector3i.ZERO
-
+		var vox_world := _get_voxel_world()
 		if vox_world != null:
-			var terrain: Node = vox_world.get_node_or_null("VoxelTerrain")
-			if terrain != null and terrain.has_method("get_voxel_tool"):
-				var vt: VoxelTool = terrain.get_voxel_tool()
-				if vt != null:
-					vt.channel = VoxelBuffer.CHANNEL_TYPE
-					var cam := get_active_camera()
-					if cam != null:
-						var hit = vt.raycast(cam.global_position, -cam.global_transform.basis.z, max_ray_distance)
-						if hit != null:
-							hit_voxel = true
-							hit_pos = hit.position
-
+			var resolved: Variant = _raycast_terrain_voxel(vox_world)
+			if resolved != null:
+				hit_voxel = true
+				hit_pos = resolved as Vector3i
 		if not hit_voxel and target_is_terrain:
 			hit_voxel = true
 			hit_pos = target_terrain_cell
@@ -664,43 +666,244 @@ func _physics_process(delta: float) -> void:
 				mining_progress = 0.0
 				target_voxel_pos = hit_pos
 				_last_mined_cell = hit_pos
-
+			_update_terrain_target_visuals(hit_pos, mining_progress / MINE_TIME)
 			if mining_progress >= MINE_TIME:
-				if vox_world != null:
-					var terrain: Node = vox_world.get_node_or_null("VoxelTerrain")
-					if terrain != null and terrain.has_method("get_voxel_tool"):
-						var vt: VoxelTool = terrain.get_voxel_tool()
-						if vt != null:
-							vt.channel = VoxelBuffer.CHANNEL_TYPE
-							vt.set_voxel(target_voxel_pos, 0)
 				_complete_mining_action()
 		else:
-			mining_progress = 0.0
-			target_voxel_pos = Vector3i(99999, 99999, 99999)
-			_last_mined_cell = Vector3i(99999, 99999, 99999)
+			_reset_mining_state()
 	else:
-		mining_progress = 0.0
-		target_voxel_pos = Vector3i(99999, 99999, 99999)
-		_last_mined_cell = Vector3i(99999, 99999, 99999)
+		if mining_progress > 0.0 or target_voxel_pos != _INVALID_VOXEL:
+			_reset_mining_state()
+		elif target_is_terrain:
+			_update_terrain_target_visuals(target_terrain_cell, 0.0)
+		else:
+			_hide_terrain_target_visuals()
 
 	if (Input.is_action_pressed(&"apply_cement") or Input.is_key_pressed(KEY_G)) and current_state != State.DEBUG_FLIGHT:
 		if debris_grabber == null or not debris_grabber.is_grabbing:
 			_handle_cement_action()
 
+func _reset_mining_state() -> void:
+	mining_progress = 0.0
+	target_voxel_pos = _INVALID_VOXEL
+	_last_mined_cell = _INVALID_VOXEL
+	_crack_stage = -1
+	if not target_is_terrain:
+		_hide_terrain_target_visuals()
+	elif target_terrain_cell != _INVALID_VOXEL:
+		_update_terrain_target_visuals(target_terrain_cell, 0.0)
+
+func _raycast_terrain_voxel(vox_world: Node) -> Variant:
+	if vox_world == null:
+		return null
+	var terrain: Node = vox_world.get_node_or_null("VoxelTerrain")
+	if terrain == null or not terrain.has_method("get_voxel_tool"):
+		return null
+	var vt: VoxelTool = terrain.get_voxel_tool()
+	if vt == null:
+		return null
+	vt.channel = VoxelBuffer.CHANNEL_TYPE
+	var cam := get_active_camera()
+	if cam == null:
+		return null
+	var hit = vt.raycast(cam.global_position, -cam.global_transform.basis.z, mini(max_ray_distance, 8.0))
+	if hit == null:
+		return null
+	return hit.position as Vector3i
+
 func _complete_mining_action() -> void:
 	var vox_world := _get_voxel_world()
-	var mine_target := target_voxel_pos if target_voxel_pos != Vector3i(99999, 99999, 99999) else target_terrain_cell
+	var mine_target := target_voxel_pos if target_voxel_pos != _INVALID_VOXEL else target_terrain_cell
 	if vox_world != null and vox_world.has_method("mine_voxel"):
+		# Authoritative path: returns original type, clears TYPE+SDF+INDICES, saves, emits once.
 		var mined_type: StringName = vox_world.mine_voxel(mine_target)
 		if not mined_type.is_empty():
 			var inv_mgr := _get_inventory_manager()
 			if inv_mgr != null:
 				inv_mgr.add_material(mined_type, 1)
 			target_face_status = "✓ Mined 1 %s!" % BlockTypeCatalog.get_display_name(mined_type)
-			target_face_changed.emit(has_target, target_remove_cell, target_face_dir, target_face_status)
-	mining_progress = 0.0
-	_last_mined_cell = Vector3i(99999, 99999, 99999)
-	target_voxel_pos = Vector3i(99999, 99999, 99999)
+			target_face_changed.emit(has_target, mine_target, target_face_dir, target_face_status)
+			if build_hud != null and build_hud.has_method("show_mine_feedback"):
+				build_hud.show_mine_feedback(mined_type, 1)
+	_reset_mining_state()
+	_hide_terrain_target_visuals()
+
+var _crack_stage_mats: Array[StandardMaterial3D] = []
+
+func _ensure_terrain_target_visuals() -> void:
+	if _terrain_outline != null:
+		return
+	# Dual-tone outline (light halo + dark core) readable on all terrain materials.
+	var outline_light := StandardMaterial3D.new()
+	outline_light.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	outline_light.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	outline_light.albedo_color = Color(1.0, 1.0, 1.0, 0.55)
+	outline_light.cull_mode = BaseMaterial3D.CULL_DISABLED
+	outline_light.no_depth_test = true
+	outline_light.render_priority = 9
+
+	_outline_mat = StandardMaterial3D.new()
+	_outline_mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+	_outline_mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+	_outline_mat.albedo_color = Color(0.05, 0.05, 0.05, 0.98)
+	_outline_mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+	_outline_mat.no_depth_test = true
+	_outline_mat.render_priority = 10
+
+	var outline_halo := MeshInstance3D.new()
+	outline_halo.name = "TerrainTargetOutlineHalo"
+	outline_halo.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	outline_halo.mesh = _build_outline_mesh(0.028)
+	outline_halo.material_override = outline_light
+	outline_halo.visible = false
+	add_child(outline_halo)
+
+	_terrain_outline = MeshInstance3D.new()
+	_terrain_outline.name = "TerrainTargetOutline"
+	_terrain_outline.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	_terrain_outline.mesh = _build_outline_mesh(0.014)
+	_terrain_outline.material_override = _outline_mat
+	_terrain_outline.set_meta("halo", outline_halo)
+	add_child(_terrain_outline)
+	_terrain_outline.visible = false
+
+	_crack_stage_mats.clear()
+	for stage in range(4):
+		var mat := StandardMaterial3D.new()
+		mat.shading_mode = BaseMaterial3D.SHADING_MODE_UNSHADED
+		mat.transparency = BaseMaterial3D.TRANSPARENCY_ALPHA
+		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+		mat.no_depth_test = true
+		mat.render_priority = 11
+		mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_NEAREST
+		mat.albedo_texture = _make_crack_texture(stage)
+		mat.albedo_color = Color(1, 1, 1, 0.85)
+		_crack_stage_mats.append(mat)
+	_crack_mat = _crack_stage_mats[0]
+
+	_terrain_crack = MeshInstance3D.new()
+	_terrain_crack.name = "TerrainMineCracks"
+	_terrain_crack.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+	var crack_box := BoxMesh.new()
+	crack_box.size = Vector3(1.015, 1.015, 1.015)
+	_terrain_crack.mesh = crack_box
+	_terrain_crack.material_override = _crack_mat
+	add_child(_terrain_crack)
+	_terrain_crack.visible = false
+
+func _make_crack_texture(stage: int) -> ImageTexture:
+	## Procedural Minecraft-like crack stages (built once, reused).
+	var img := Image.create(16, 16, false, Image.FORMAT_RGBA8)
+	img.fill(Color(0, 0, 0, 0))
+	var ink := Color(0.02, 0.02, 0.02, 0.92)
+	var patterns: Array = [
+		[[3, 2, 5, 4], [8, 3, 10, 7], [4, 9, 7, 12]],
+		[[2, 1, 6, 5], [7, 2, 12, 6], [3, 8, 8, 14], [10, 9, 14, 13], [1, 11, 4, 15]],
+		[[1, 1, 7, 5], [6, 2, 13, 7], [2, 7, 9, 14], [9, 8, 15, 13], [0, 10, 5, 15], [11, 0, 15, 4], [4, 4, 6, 10]],
+		[[0, 0, 8, 6], [5, 1, 14, 8], [1, 6, 10, 15], [8, 7, 15, 14], [0, 9, 6, 15], [10, 0, 15, 5], [3, 3, 7, 11], [12, 9, 15, 15], [2, 12, 5, 15]],
+	]
+	var segs: Array = patterns[clampi(stage, 0, 3)]
+	for seg in segs:
+		_draw_crack_line(img, int(seg[0]), int(seg[1]), int(seg[2]), int(seg[3]), ink)
+	return ImageTexture.create_from_image(img)
+
+func _draw_crack_line(img: Image, x0: int, y0: int, x1: int, y1: int, col: Color) -> void:
+	var dx: int = absi(x1 - x0)
+	var dy: int = -absi(y1 - y0)
+	var sx: int = 1 if x0 < x1 else -1
+	var sy: int = 1 if y0 < y1 else -1
+	var err: int = dx + dy
+	var x: int = x0
+	var y: int = y0
+	while true:
+		if x >= 0 and y >= 0 and x < 16 and y < 16:
+			img.set_pixel(x, y, col)
+		if x == x1 and y == y1:
+			break
+		var e2: int = err * 2
+		if e2 >= dy:
+			err += dy
+			x += sx
+		if e2 <= dx:
+			err += dx
+			y += sy
+
+func _build_outline_mesh(thickness: float = 0.018) -> ArrayMesh:
+	# Thin wireframe cube edges — reused every frame, never rebuilt.
+	var s := 0.505
+	var corners: Array[Vector3] = [
+		Vector3(-s, -s, -s), Vector3(s, -s, -s), Vector3(s, -s, s), Vector3(-s, -s, s),
+		Vector3(-s, s, -s), Vector3(s, s, -s), Vector3(s, s, s), Vector3(-s, s, s),
+	]
+	var edges: Array[Vector2i] = [
+		Vector2i(0, 1), Vector2i(1, 2), Vector2i(2, 3), Vector2i(3, 0),
+		Vector2i(4, 5), Vector2i(5, 6), Vector2i(6, 7), Vector2i(7, 4),
+		Vector2i(0, 4), Vector2i(1, 5), Vector2i(2, 6), Vector2i(3, 7),
+	]
+	var verts := PackedVector3Array()
+	for e in edges:
+		var a: Vector3 = corners[e.x]
+		var b: Vector3 = corners[e.y]
+		var dir := (b - a).normalized()
+		var abs_dir := Vector3(absf(dir.x), absf(dir.y), absf(dir.z))
+		var side := Vector3.UP if abs_dir.y < 0.9 else Vector3.RIGHT
+		var n1 := dir.cross(side).normalized() * thickness
+		var n2 := dir.cross(n1).normalized() * thickness
+		# Two-quad beam along the edge.
+		var p0 := a + n1 + n2
+		var p1 := a + n1 - n2
+		var p2 := a - n1 - n2
+		var p3 := a - n1 + n2
+		var q0 := b + n1 + n2
+		var q1 := b + n1 - n2
+		var q2 := b - n1 - n2
+		var q3 := b - n1 + n2
+		for tri in [
+			[p0, p1, q1], [p0, q1, q0], [p1, p2, q2], [p1, q2, q1],
+			[p2, p3, q3], [p2, q3, q2], [p3, p0, q0], [p3, q0, q3],
+		]:
+			verts.append(tri[0])
+			verts.append(tri[1])
+			verts.append(tri[2])
+	var arrays: Array = []
+	arrays.resize(Mesh.ARRAY_MAX)
+	arrays[Mesh.ARRAY_VERTEX] = verts
+	var mesh := ArrayMesh.new()
+	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
+	return mesh
+
+func _update_terrain_target_visuals(cell: Vector3i, progress01: float) -> void:
+	_ensure_terrain_target_visuals()
+	var center := Vector3(float(cell.x) + 0.5, float(cell.y) + 0.5, float(cell.z) + 0.5)
+	_terrain_outline.global_position = center
+	_terrain_outline.visible = true
+	if _terrain_outline.has_meta("halo"):
+		var halo: MeshInstance3D = _terrain_outline.get_meta("halo")
+		halo.global_position = center
+		halo.visible = true
+
+	var stage: int = clampi(int(floor(progress01 * 4.0)), 0, 3) if progress01 > 0.02 else -1
+	if stage < 0:
+		_terrain_crack.visible = false
+		_crack_stage = -1
+		return
+	_terrain_crack.global_position = center
+	_terrain_crack.visible = true
+	if stage != _crack_stage:
+		_crack_stage = stage
+		if stage >= 0 and stage < _crack_stage_mats.size():
+			_crack_mat = _crack_stage_mats[stage]
+			_terrain_crack.material_override = _crack_mat
+
+func _hide_terrain_target_visuals() -> void:
+	if _terrain_outline != null:
+		_terrain_outline.visible = false
+		if _terrain_outline.has_meta("halo"):
+			var halo: MeshInstance3D = _terrain_outline.get_meta("halo")
+			halo.visible = false
+	if _terrain_crack != null:
+		_terrain_crack.visible = false
+	_crack_stage = -1
 
 func _process_body_movement(delta: float) -> void:
 	if not _is_spawned or is_physics_suspended:
@@ -926,9 +1129,13 @@ func _update_raycast() -> void:
 		target_is_debris = false
 		target_debris_island = null
 		target_debris_cell = null
+		target_is_terrain = false
 		target_face_dir = Vector3i.ZERO
 		target_face_status = ""
 		target_face_changed.emit(false, Vector3i.ZERO, Vector3i.ZERO, "")
+		_hide_terrain_target_visuals()
+		if build_hud != null and build_hud.has_method("set_mining_progress"):
+			build_hud.set_mining_progress(false, "", 0)
 		if preview_ghost != null and (debris_grabber == null or not debris_grabber.is_grabbing):
 			preview_ghost.hide_preview()
 		return
@@ -988,10 +1195,15 @@ func _update_raycast() -> void:
 
 		if target_is_terrain:
 			var mat_disp := BlockTypeCatalog.get_display_name(target_terrain_type)
+			var pct: int = int((mining_progress / MINE_TIME) * 100.0)
 			if mining_progress > 0.0:
-				target_face_status = "Mining %s [%d%%]" % [mat_disp, int((mining_progress / MINE_TIME) * 100.0)]
+				target_face_status = "Mining %s [%d%%]" % [mat_disp, pct]
 			else:
 				target_face_status = "Natural %s (Hold RMB: Mine)" % mat_disp
+			if build_hud != null and build_hud.has_method("set_mining_progress"):
+				build_hud.set_mining_progress(true, mat_disp, pct if mining_progress > 0.0 else 0)
+			if mining_progress <= 0.0:
+				_update_terrain_target_visuals(target_terrain_cell, 0.0)
 		else:
 			var joint_sys: Node = null
 			if has_node("/root/JointSystem"):
@@ -1131,9 +1343,8 @@ func _handle_place_action() -> void:
 		debris_grabber.try_place_to_grid()
 		return
 
-	# LMB on natural terrain = instant voxel destruction via Zylann's native API.
+	# Terrain is mined via RMB hold-to-mine only (see _physics_process).
 	if target_is_terrain:
-		_mine_terrain_with_voxel_tool()
 		return
 
 	if not has_target:
@@ -1175,73 +1386,27 @@ func _handle_place_action() -> void:
 				if placed_b != null:
 					bp_mgr.notify_intentional_block_placed(target_place_cell, placed_b)
 
-## Destroys the terrain voxel under the crosshair using Zylann's native VoxelTool API.
-## Called on LMB when target_is_terrain is true.
-## DOES NOT use PhysicsServer raycasting — uses voxel_tool.raycast() exclusively.
+## Instant creative mine helper kept for tests / debug. Always routes through mine_voxel().
 func _mine_terrain_with_voxel_tool() -> void:
 	var vox_world := _get_voxel_world()
-	if vox_world == null:
+	if vox_world == null or not vox_world.has_method("mine_voxel"):
 		return
-
-	# Obtain a fresh VoxelTool from the live VoxelTerrain.
-	var terrain: Node = null
-	if vox_world.has_node("VoxelTerrain"):
-		terrain = vox_world.get_node("VoxelTerrain")
-	if terrain == null or not terrain.has_method("get_voxel_tool"):
-		# Fallback: use VoxelWorld.mine_voxel() on the already-known terrain cell.
-		if not target_terrain_cell == Vector3i(99999, 99999, 99999):
-			var mined: StringName = vox_world.mine_voxel(target_terrain_cell)
-			if not mined.is_empty():
-				var inv_mgr := _get_inventory_manager()
-				if inv_mgr != null:
-					inv_mgr.add_material(mined, 1)
+	var hit_pos: Vector3i = target_terrain_cell
+	var resolved: Variant = _raycast_terrain_voxel(vox_world)
+	if resolved != null:
+		hit_pos = resolved as Vector3i
+	if hit_pos == _INVALID_VOXEL:
 		return
-
-	var voxel_tool: VoxelTool = terrain.get_voxel_tool()
-	if voxel_tool == null:
+	var mined_type: StringName = vox_world.mine_voxel(hit_pos)
+	if mined_type.is_empty():
 		return
-	voxel_tool.channel = VoxelBuffer.CHANNEL_TYPE
-
-	# Use the active camera to build the ray.
-	var cam := get_active_camera()
-	if cam == null:
-		return
-
-	var ray_origin: Vector3    = cam.global_position
-	var ray_forward: Vector3   = -cam.global_transform.basis.z
-	const REACH_DISTANCE: float = 8.0
-
-	# Zylann-native voxel raycast — no PhysicsServer involved.
-	var hit: VoxelRaycastResult = voxel_tool.raycast(ray_origin, ray_forward, REACH_DISTANCE)
-	if hit == null:
-		return
-
-	var hit_pos: Vector3i = hit.position
-
-	# Record the block type before destruction for inventory.
-	var mined_type: StringName = &""
-	if vox_world.has_method("get_voxel_at"):
-		mined_type = vox_world.get_voxel_at(hit_pos)
-
-	# Destroy: set the hit voxel to AIR (ID 0).
-	voxel_tool.set_voxel(hit_pos, 0)
-
-	# Notify VoxelWorld's delta-persistence layer so the mine is remembered on reload.
-	if vox_world.has_method("mine_voxel") and mined_type.is_empty():
-		# mine_voxel will also set AIR; only call it if we didn't already get the type.
-		vox_world.mine_voxel(hit_pos)
-	elif not mined_type.is_empty():
-		# Manually record the delta without re-setting AIR (already done above).
-		if vox_world.has_method("_record_mine_delta"):
-			vox_world._record_mine_delta(hit_pos)
-		var inv_mgr := _get_inventory_manager()
-		if inv_mgr != null:
-			inv_mgr.add_material(mined_type, 1)
-		if vox_world.has_signal("voxel_mined"):
-			vox_world.emit_signal("voxel_mined", hit_pos, mined_type)
-
-	target_face_status = "✓ Mined 1 %s!" % mined_type
+	var inv_mgr := _get_inventory_manager()
+	if inv_mgr != null:
+		inv_mgr.add_material(mined_type, 1)
+	target_face_status = "✓ Mined 1 %s!" % BlockTypeCatalog.get_display_name(mined_type)
 	target_face_changed.emit(has_target, hit_pos, target_face_dir, target_face_status)
+	if build_hud != null and build_hud.has_method("show_mine_feedback"):
+		build_hud.show_mine_feedback(mined_type, 1)
 
 func _handle_remove_action() -> void:
 	if area_selection_step != AreaSelectionStep.NONE:

@@ -85,7 +85,7 @@ func _init() -> void:
 	var cp := Vector2i(10, 10)
 	# Simulate: generation=0 result arrives, but chunk was edited after dispatch (gen=1)
 	world._chunk_generation[cp] = 1  # Current generation after mining edit
-	var stale_before := world.stale_results_discarded
+	var stale_before: int = world.stale_results_discarded
 	# Insert a stale result manually (generation=0, older than current=1)
 	world._results_mutex.lock()
 	world._results_ready.append({
@@ -98,10 +98,10 @@ func _init() -> void:
 	})
 	world._results_mutex.unlock()
 	# Simulate main thread consuming results
-	var frame_start := Time.get_ticks_usec()
+	var frame_start: int = Time.get_ticks_usec()
 	world._consume_ready_results(frame_start)
-	var stale_after := world.stale_results_discarded
-	var stale_caught := (stale_after - stale_before) > 0
+	var stale_after: int = world.stale_results_discarded
+	var stale_caught: bool = (stale_after - stale_before) > 0
 	print("  Stale result (gen=0 vs current=1) was discarded: %s" % str(stale_caught))
 	assert(stale_caught, "FAIL: Stale result was NOT discarded!")
 
@@ -127,7 +127,7 @@ func _init() -> void:
 	# is present (we can't run workers headlessly). Instead verify the size wasn't exceeded
 	# during insertion by the worker (structural test only).
 	world._results_mutex.lock()
-	var cache_size := world._results_ready.size()
+	var cache_size: int = world._results_ready.size()
 	world._results_mutex.unlock()
 	print("  Cache size after 8 direct inserts (no worker limit applied): %d (expected 8)" % cache_size)
 	print("  NOTE: Worker path bounded-cache enforcement tested via code review only (headless)")
