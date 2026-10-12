@@ -4,22 +4,19 @@
 ## Extends VoxelGeneratorScript so Zylann's C++ engine calls generate_block()
 ## on a background thread for each new chunk that enters the VoxelViewer range.
 ##
-## Island shape (Castle Story formula):
-##   density = Island_2D_Mask  -  (Y_gradient * height_factor)  +  Detail_3D
-##
-##   • Island_2D_Mask   — low-frequency 2D noise drives wide cluster layout;
-##                        high values define where island COLUMNS exist.
-##   • Y_gradient       — asymmetric: gentle negative slope above the flat top
-##                        (keeps a thick plateau), steep positive slope below
-##                        (carves an inverted-mountain belly).
-##   • Detail_3D        — mid-frequency 3D noise adds overhangs and caves.
+## Island shape:
+##   1. Signed 2D mask with a hard cutoff → true AIR outside island footprints
+##      (never remap noise to [0,1] alone; that creates a world-wide layer).
+##   2. Per-column altitude / size from decorrelated 2D samples → varied heights.
+##   3. Broad grassy plateau with gentle roll; steep mask edges → blocky cliffs.
+##   4. Footprint-scaled tapered belly; rare core caves only.
 ##
 ## Block layering (top → core):
 ##   Grass  →  Dirt (1-2 voxels)  →  Stone  →  Coal / Iron / Gold ore veins
 extends VoxelGeneratorScript
 
 # ---------------------------------------------------------------------------
-# Tunable constants (mirror VoxelWorld exports so they stay in sync)
+# Block IDs
 # ---------------------------------------------------------------------------
 const BLOCK_AIR:   int = 0
 const BLOCK_GRASS: int = 1
@@ -29,144 +26,170 @@ const BLOCK_COAL:  int = 4
 const BLOCK_IRON:  int = 5
 const BLOCK_GOLD:  int = 6
 
-## Y band where islands cluster.
+## Y band where island centres may sit.
 const ISLAND_Y_MIN: float = 32.0
 const ISLAND_Y_MAX: float = 80.0
 
-## Solid if combined density > this value.  Range roughly [-1, 2].
-## 0.0 produces large, deeply solid islands.  Raise toward 0.4 to thin them.
-var density_threshold: float = 0.0
+## Signed 2D noise must exceed this to belong to an island.
+## Higher = sparser, more separated landmasses.
+const MASK_CUTOFF: float = 0.30
 
-## Legacy field — kept so VoxelWorld injects it without errors, but the
-## Castle Story formula no longer uses a raw Y-scale on the 3D sample.
+## Guaranteed soft starter island radius around world origin (spawn).
+const SPAWN_ISLAND_RADIUS: float = 42.0
+
+## Rare cave threshold on detail noise in the stone core (higher = fewer caves).
+const CAVE_THRESHOLD: float = 0.78
+
+## Legacy fields kept so VoxelWorld can inject without errors.
+var density_threshold: float = 0.30
 var vertical_scale: float = 3.5
-
-## Strength of the 2D cluster mask contribution.  Higher = wider, more
-## plate-like islands; lower = rounder, mushroom-like columns.
-const MASK_STRENGTH: float   = 1.20
-
-## How fast density falls off ABOVE the flat top plateau (gentle → thick cap).
-const TOP_FALLOFF: float     = 0.055
-
-## How fast density falls off BELOW the island centre (steep → sharp belly).
-const BELLY_FALLOFF: float   = 0.110
-
-## Y above ISLAND_Y_MAX where the flat plateau ends and sky begins.
-const FLAT_TOP_VOXELS: float = 6.0
-
-## Contribution weight of the 3D detail noise on top of the base formula.
-const DETAIL_WEIGHT: float   = 0.35
 
 # ---------------------------------------------------------------------------
 # Noise resources (injected by VoxelWorld after construction)
 # ---------------------------------------------------------------------------
-var noise_island:    FastNoiseLite = null   ## 3D detail noise
-var noise_island_2d: FastNoiseLite = null   ## 2D cluster-mask noise
+var noise_island:    FastNoiseLite = null   ## 3D detail / caves / surface roll
+var noise_island_2d: FastNoiseLite = null   ## 2D island footprint mask
 var noise_ore:       FastNoiseLite = null   ## ore vein noise
+
+# ---------------------------------------------------------------------------
+func _get_used_channels_mask() -> int:
+	return 1 << VoxelBuffer.CHANNEL_TYPE
 
 # ---------------------------------------------------------------------------
 # generate_block — called by the voxel engine on worker threads
 # ---------------------------------------------------------------------------
 func _generate_block(out_buffer: VoxelBuffer, origin_in_voxels: Vector3i, lod: int) -> void:
-	if noise_island == null:
+	if noise_island == null or noise_island_2d == null:
 		return
 
 	var size: Vector3i = out_buffer.get_size()
-	var step: int      = 1 << lod
+	var step: int = 1 << lod
 
-	var plateau_top: float  = ISLAND_Y_MAX + FLAT_TOP_VOXELS
-	var island_mid:  float  = (ISLAND_Y_MIN + ISLAND_Y_MAX) * 0.5
+	# Skip entire blocks well outside any possible island volume (no per-voxel work).
+	var y0: int = origin_in_voxels.y
+	var y1: int = origin_in_voxels.y + (size.y - 1) * step
+	if y1 < int(ISLAND_Y_MIN) - 48 or y0 > int(ISLAND_Y_MAX) + 28:
+		out_buffer.fill(BLOCK_AIR, VoxelBuffer.CHANNEL_TYPE)
+		return
 
 	for z in range(size.z):
+		var gz: int = origin_in_voxels.z + z * step
 		for x in range(size.x):
+			var gx: int = origin_in_voxels.x + x * step
+			# Column profile packed as Vector3(top, bot, center); w unused.
+			# active flag returned via Vector4.w (1 = solid column).
+			var profile: Vector4 = _sample_column(gx, gz)
+			if profile.w < 0.5:
+				for y in range(size.y):
+					out_buffer.set_voxel(BLOCK_AIR, x, y, z, VoxelBuffer.CHANNEL_TYPE)
+				continue
+
+			var top_y: float = profile.x
+			var bot_y: float = profile.y
+			var center_y: float = profile.z
 			for y in range(size.y):
-				var gx: int = origin_in_voxels.x + x * step
 				var gy: int = origin_in_voxels.y + y * step
-				var gz: int = origin_in_voxels.z + z * step
+				out_buffer.set_voxel(
+					_eval_in_column(gx, gy, gz, top_y, bot_y, center_y),
+					x, y, z, VoxelBuffer.CHANNEL_TYPE
+				)
 
-				var block_id: int = _eval_voxel(gx, gy, gz, island_mid, plateau_top)
-				out_buffer.set_voxel(block_id, x, y, z, VoxelBuffer.CHANNEL_TYPE)
+## Public entry used by VoxelWorld procedural fallback — must match runtime blocks.
+func eval_voxel(gx: int, gy: int, gz: int) -> int:
+	if noise_island == null or noise_island_2d == null:
+		return BLOCK_AIR
+	var profile: Vector4 = _sample_column(gx, gz)
+	if profile.w < 0.5:
+		return BLOCK_AIR
+	return _eval_in_column(gx, gy, gz, profile.x, profile.y, profile.z)
 
 # ---------------------------------------------------------------------------
-# Density evaluation — Castle Story formula
+# Per-column island profile (footprint, top, belly)
+# Returns Vector4(top_y, bot_y, center_y, active_flag).
+# All state is local — safe under VoxelGeneratorScript worker-thread parallelism.
 # ---------------------------------------------------------------------------
-func _eval_voxel(gx: int, gy: int, gz: int, island_mid: float, plateau_top: float) -> int:
+func _sample_column(gx: int, gz: int) -> Vector4:
+	var fx := float(gx)
+	var fz := float(gz)
+
+	var mask_n: float = noise_island_2d.get_noise_2d(fx, fz)
+
+	# Soft starter island near origin so spawn always finds solid ground.
+	var origin_d: float = sqrt(fx * fx + fz * fz)
+	if origin_d < SPAWN_ISLAND_RADIUS:
+		var boost: float = (1.0 - origin_d / SPAWN_ISLAND_RADIUS) * 0.55
+		mask_n = maxf(mask_n, MASK_CUTOFF + 0.12 + boost * 0.45)
+
+	var cutoff: float = density_threshold if density_threshold > 0.0 else MASK_CUTOFF
+	if mask_n < cutoff:
+		return Vector4(0.0, 0.0, 0.0, 0.0)
+
+	# 0 at the cliff edge → 1 at the island core (never remapped across the whole world).
+	var footprint: float = (mask_n - cutoff) / maxf(0.001, 1.0 - cutoff)
+	footprint = clampf(footprint, 0.0, 1.0)
+
+	# Decorrelated samples for altitude and size (same seed family, offset domain).
+	var height_n: float = noise_island_2d.get_noise_2d(fx + 1703.0, fz - 911.0)
+	var size_n: float = noise_island_2d.get_noise_2d(fx - 503.0, fz + 1201.0)
+	var center_y: float = lerpf(ISLAND_Y_MIN + 6.0, ISLAND_Y_MAX - 6.0, (height_n + 1.0) * 0.5)
+	var size_k: float = lerpf(0.70, 1.35, (size_n + 1.0) * 0.5)
+
+	# Gentle rolling plateau (soft natural top — not a global smooth pass).
+	var roll: float = noise_island.get_noise_3d(fx, center_y, fz) * 2.4
+
+	# Broad walkable top: height stays high across most of the footprint so mask
+	# contours read as steep stepped cliffs rather than gentle slopes.
+	var plateau: float = (5.5 + footprint * 2.0) * size_k
+	var top_y: float = center_y + plateau + roll
+
+	# Tapered rugged underside — deep in the core, pinches shut at the rim.
+	var belly_noise: float = noise_island.get_noise_3d(fx * 1.25, center_y - 12.0, fz * 1.25) * 3.5
+	var belly: float = (5.0 + footprint * footprint * 22.0) * size_k
+	var bot_y: float = center_y - belly + belly_noise
+
+	# Degenerate edge slivers become air.
+	if top_y - bot_y < 2.5:
+		return Vector4(0.0, 0.0, 0.0, 0.0)
+
+	return Vector4(top_y, bot_y, center_y, 1.0)
+
+func _eval_in_column(gx: int, gy: int, gz: int, top_y: float, bot_y: float, center_y: float) -> int:
 	var fy: float = float(gy)
 
-	# Fast reject — well outside any possible island volume.
-	if fy > plateau_top + 4.0 or fy < ISLAND_Y_MIN - 24.0:
+	if fy > top_y or fy < bot_y:
 		return BLOCK_AIR
 
-	# ── 1. 2-D island cluster mask (XZ only) ────────────────────────────────
-	# Low-frequency noise decides WHERE islands exist horizontally.
-	# Values are in [-1, 1]; we remap to [0, 1] for a clean mask.
-	var mask2d: float = 0.0
-	if noise_island_2d != null:
-		mask2d = (noise_island_2d.get_noise_2d(float(gx), float(gz)) + 1.0) * 0.5
-	else:
-		# Fallback: treat the whole world as one big island cluster.
-		mask2d = 0.75
-
-	# ── 2. Asymmetric Y-gradient ────────────────────────────────────────────
-	# Above plateau_top: steep sky cutoff.
-	# Between island_mid and plateau_top: gentle slope → thick flat top.
-	# Below island_mid: steeper falloff → inverted-mountain belly.
-	var y_gradient: float
-	if fy >= plateau_top:
-		# Above the flat cap — hard sky.
-		y_gradient = (fy - plateau_top) * TOP_FALLOFF * 8.0
-	elif fy >= island_mid:
-		# Flat-top zone: very slow density loss upward.
-		y_gradient = (fy - island_mid) * TOP_FALLOFF
-	else:
-		# Belly: faster density loss downward (inverted mountain).
-		y_gradient = (island_mid - fy) * BELLY_FALLOFF
-
-	# ── 3. 3-D detail noise ─────────────────────────────────────────────────
-	var detail3d: float = noise_island.get_noise_3d(float(gx), fy, float(gz)) * DETAIL_WEIGHT
-
-	# ── 4. Combined Castle Story density ────────────────────────────────────
-	#   density = Island_2D_Mask * MASK_STRENGTH  -  y_gradient  +  Detail_3D
-	var density: float = mask2d * MASK_STRENGTH - y_gradient + detail3d
-
-	if density < density_threshold:
+	# Occasional limited caves in the stone core only — never the dominant shape.
+	if _is_cave(gx, gy, gz, fy, top_y, bot_y):
 		return BLOCK_AIR
 
-	# ── Surface classification ───────────────────────────────────────────────
-	# Grass cap: recompute density one voxel above and check if it becomes air.
-	var fy_a: float  = fy + 1.0
-	var d3d_a: float = noise_island.get_noise_3d(float(gx), fy_a, float(gz)) * DETAIL_WEIGHT
-	var yg_a: float
-	if fy_a >= plateau_top:
-		yg_a = (fy_a - plateau_top) * TOP_FALLOFF * 8.0
-	elif fy_a >= island_mid:
-		yg_a = (fy_a - island_mid) * TOP_FALLOFF
-	else:
-		yg_a = (island_mid - fy_a) * BELLY_FALLOFF
-	var den_a: float = mask2d * MASK_STRENGTH - yg_a + d3d_a
-	if den_a < density_threshold:
+	# Surface layers relative to column top (and caves above).
+	if not _is_solid_at(gx, gy + 1, gz, fy + 1.0, top_y, bot_y):
 		return BLOCK_GRASS
-
-	# Dirt: check two voxels above.
-	var fy_b: float  = fy + 2.0
-	var d3d_b: float = noise_island.get_noise_3d(float(gx), fy_b, float(gz)) * DETAIL_WEIGHT
-	var yg_b: float
-	if fy_b >= plateau_top:
-		yg_b = (fy_b - plateau_top) * TOP_FALLOFF * 8.0
-	elif fy_b >= island_mid:
-		yg_b = (fy_b - island_mid) * TOP_FALLOFF
-	else:
-		yg_b = (island_mid - fy_b) * BELLY_FALLOFF
-	var den_b: float = mask2d * MASK_STRENGTH - yg_b + d3d_b
-	if den_b < density_threshold:
+	if not _is_solid_at(gx, gy + 2, gz, fy + 2.0, top_y, bot_y):
 		return BLOCK_DIRT
 
-	# Ore veins in the core.
+	# Deterministic ore deposits deeper in the core.
 	if noise_ore != null:
-		var ore_n: float  = noise_ore.get_noise_3d(float(gx), fy, float(gz))
-		var core_y: float = island_mid
-		if gy < int(core_y) - 8  and ore_n > 0.45: return BLOCK_GOLD
-		if gy < int(core_y) - 4  and ore_n > 0.35: return BLOCK_IRON
-		if gy < int(core_y)      and ore_n > 0.25: return BLOCK_COAL
+		var ore_n: float = noise_ore.get_noise_3d(float(gx), fy, float(gz))
+		var core_y: int = int(center_y)
+		if gy < core_y - 8 and ore_n > 0.45:
+			return BLOCK_GOLD
+		if gy < core_y - 4 and ore_n > 0.35:
+			return BLOCK_IRON
+		if gy < core_y and ore_n > 0.25:
+			return BLOCK_COAL
 
 	return BLOCK_STONE
+
+func _is_cave(gx: int, gy: int, gz: int, fy: float, top_y: float, bot_y: float) -> bool:
+	var from_top: float = top_y - fy
+	var from_bot: float = fy - bot_y
+	if from_top <= 3.5 or from_bot <= 4.5:
+		return false
+	return noise_island.get_noise_3d(float(gx) * 0.85, fy * 0.85, float(gz) * 0.85) > CAVE_THRESHOLD
+
+func _is_solid_at(gx: int, gy: int, gz: int, fy: float, top_y: float, bot_y: float) -> bool:
+	if fy > top_y or fy < bot_y:
+		return false
+	return not _is_cave(gx, gy, gz, fy, top_y, bot_y)
