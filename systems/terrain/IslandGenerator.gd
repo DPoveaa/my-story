@@ -1,9 +1,11 @@
 ## IslandGenerator.gd
 ## Castle Story hybrid floating islands — discrete TYPE voxels are authoritative.
-## Geometry smoothing happens at mesh time (HybridSurfaceMesher), not via full-volume SDF.
-## CHANNEL_SDF is a simple solid/air field for VoxelTool raycasts only.
-## Continuous style blend; local height-slope chooses ramps vs cliffs. No vegetation.
+## Walkable tops select VoxelMesherBlocky ramp/corner models from neighbor heights.
+## Sides / undersides stay full cubes (angular rocky layers). CHANNEL_SDF is a
+## simple solid/air field for VoxelTool helpers only (not used for meshing).
 extends VoxelGeneratorScript
+
+const _TerrainBlockyLibraryScript = preload("res://systems/terrain/TerrainBlockyLibrary.gd")
 
 const BLOCK_AIR:   int = 0
 const BLOCK_GRASS: int = 1
@@ -34,11 +36,8 @@ var noise_island_2d: FastNoiseLite = null
 var noise_ore: FastNoiseLite = null
 
 func _get_used_channels_mask() -> int:
-	return (
-		(1 << VoxelBuffer.CHANNEL_TYPE)
-		| (1 << VoxelBuffer.CHANNEL_SDF)
-		| (1 << VoxelBuffer.CHANNEL_INDICES)
-	)
+	# Blocky meshing reads CHANNEL_TYPE only. SDF kept for tool helpers / mining clears.
+	return (1 << VoxelBuffer.CHANNEL_TYPE) | (1 << VoxelBuffer.CHANNEL_SDF)
 
 func _generate_block(out_buffer: VoxelBuffer, origin_in_voxels: Vector3i, lod: int) -> void:
 	if noise_island == null or noise_island_2d == null:
@@ -85,7 +84,8 @@ func _generate_block(out_buffer: VoxelBuffer, origin_in_voxels: Vector3i, lod: i
 				var sdf: float = _eval_sdf_discrete(gy, top_y, bot_y, block_id)
 				out_buffer.set_voxel_f(sdf, x, y, z, VoxelBuffer.CHANNEL_SDF)
 				out_buffer.set_voxel(block_id, x, y, z, VoxelBuffer.CHANNEL_TYPE)
-				out_buffer.set_voxel(block_id, x, y, z, VoxelBuffer.CHANNEL_INDICES)
+
+	_apply_surface_slope_models(out_buffer, profiles, origin_in_voxels, size, step)
 
 func eval_voxel(gx: int, gy: int, gz: int) -> int:
 	if noise_island == null or noise_island_2d == null:
@@ -93,7 +93,13 @@ func eval_voxel(gx: int, gy: int, gz: int) -> int:
 	var profile: Vector4 = _sample_column(gx, gz)
 	if profile.w < 0.5:
 		return BLOCK_AIR
-	return _eval_in_column(gx, gy, gz, profile.x, profile.y, profile.z, profile.w - 1.0)
+	var base_id: int = _eval_in_column(gx, gy, gz, profile.x, profile.y, profile.z, profile.w - 1.0)
+	if base_id != BLOCK_GRASS:
+		return base_id
+	var top_i: int = int(floor(profile.x))
+	if gy != top_i:
+		return base_id
+	return _surface_slope_id(gx, gz, top_i, base_id)
 
 func eval_sdf(gx: int, gy: int, gz: int) -> float:
 	if noise_island == null or noise_island_2d == null:
@@ -123,12 +129,57 @@ func eval_surface_height_f(gx: int, gz: int) -> float:
 func _fill_air(out_buffer: VoxelBuffer) -> void:
 	out_buffer.fill(BLOCK_AIR, VoxelBuffer.CHANNEL_TYPE)
 	out_buffer.fill_f(SDF_CLAMP, VoxelBuffer.CHANNEL_SDF)
-	out_buffer.fill(BLOCK_AIR, VoxelBuffer.CHANNEL_INDICES)
 
 func _write_air_voxel(out_buffer: VoxelBuffer, x: int, y: int, z: int) -> void:
 	out_buffer.set_voxel_f(SDF_CLAMP, x, y, z, VoxelBuffer.CHANNEL_SDF)
 	out_buffer.set_voxel(BLOCK_AIR, x, y, z, VoxelBuffer.CHANNEL_TYPE)
-	out_buffer.set_voxel(BLOCK_AIR, x, y, z, VoxelBuffer.CHANNEL_INDICES)
+
+func _column_top_i(gx: int, gz: int) -> int:
+	var h: Vector4 = _column_heights(gx, gz)
+	if h.w < 0.5:
+		return -1
+	return int(floor(h.x))
+
+func _surface_slope_id(gx: int, gz: int, top_i: int, base_id: int) -> int:
+	var te: int = _column_top_i(gx + 1, gz)
+	var tw: int = _column_top_i(gx - 1, gz)
+	var tn: int = _column_top_i(gx, gz - 1)
+	var ts: int = _column_top_i(gx, gz + 1)
+	# Drop = how many voxels we sit above the neighbor top. Air neighbor → cliff cube.
+	var drop_px: int = 99 if te < 0 else top_i - te
+	var drop_nx: int = 99 if tw < 0 else top_i - tw
+	var drop_nz: int = 99 if tn < 0 else top_i - tn
+	var drop_pz: int = 99 if ts < 0 else top_i - ts
+	return _TerrainBlockyLibraryScript.surface_model_for_drops(base_id, drop_px, drop_nx, drop_pz, drop_nz)
+
+func _apply_surface_slope_models(
+	out_buffer: VoxelBuffer, profiles: Array, origin_in_voxels: Vector3i, size: Vector3i, step: int
+) -> void:
+	## Limitation: VoxelMesherBlocky models are fixed meshes (no automatic neighbor
+	## geometry). We only swap grass tops for pre-oriented ramps/corners when the
+	## surrounding column tops differ by exactly one voxel.
+	for z in range(size.z):
+		var gz: int = origin_in_voxels.z + z * step
+		for x in range(size.x):
+			var gx: int = origin_in_voxels.x + x * step
+			var profile: Vector4 = profiles[z * size.x + x]
+			if profile.w < 0.5:
+				continue
+			var top_i: int = int(floor(profile.x))
+			var ly: int = -1
+			if step == 1:
+				ly = top_i - origin_in_voxels.y
+			else:
+				# LOD: map world top into this block's local cells.
+				ly = int(floor(float(top_i - origin_in_voxels.y) / float(step)))
+			if ly < 0 or ly >= size.y:
+				continue
+			var base_id: int = int(out_buffer.get_voxel(x, ly, z, VoxelBuffer.CHANNEL_TYPE))
+			if base_id != BLOCK_GRASS:
+				continue
+			var slope_id: int = _surface_slope_id(gx, gz, top_i, base_id)
+			if slope_id != base_id:
+				out_buffer.set_voxel(slope_id, x, ly, z, VoxelBuffer.CHANNEL_TYPE)
 
 func _land_mask(fx: float, fz: float) -> float:
 	var bias: float = density_threshold - MASK_CUTOFF
@@ -442,7 +493,7 @@ func _fill_tiny_surface_holes(
 				changed = true
 
 func _eval_sdf_discrete(gy: int, top_y: float, bot_y: float, block_id: int) -> float:
-	## Simple solid/air SDF for VoxelTool raycasts — not used for Transvoxel meshing.
+	## Simple solid/air SDF for tool helpers — Blocky meshing ignores this channel.
 	if block_id == BLOCK_AIR:
 		var fy: float = float(gy) + 0.5
 		var outside: float = maxf(fy - top_y, bot_y - fy)

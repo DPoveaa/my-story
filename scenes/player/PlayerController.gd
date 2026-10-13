@@ -774,8 +774,8 @@ func _raycast_terrain_voxel(vox_world: Node) -> Variant:
 	var vt: VoxelTool = terrain.get_voxel_tool()
 	if vt == null:
 		return null
-	# SDF channel matches Transvoxel mesh/collision surfaces.
-	vt.channel = VoxelBuffer.CHANNEL_SDF
+	# Blocky terrain: TYPE channel + model collision drives VoxelTool raycasts.
+	vt.channel = VoxelBuffer.CHANNEL_TYPE
 	var cam := get_active_camera()
 	if cam == null:
 		return null

@@ -1,6 +1,6 @@
 extends SceneTree
 
-## Minimal smoke check: island sampling + hybrid mesher + VoxelWorld API.
+## Minimal smoke check: island sampling + blocky library + VoxelWorld API.
 func _initialize() -> void:
 	var ok := true
 	var Gen = load("res://systems/terrain/IslandGenerator.gd")
@@ -68,56 +68,34 @@ func _initialize() -> void:
 		push_error("Spawn column has no surface")
 		ok = false
 
-	# Hybrid mesher: 1:1 ramp + cliff + underside on a tiny padded buffer.
-	var Mesher = load("res://systems/terrain/HybridSurfaceMesher.gd")
-	if Mesher == null:
-		push_error("HybridSurfaceMesher failed to load")
+	var Lib = load("res://systems/terrain/TerrainBlockyLibrary.gd")
+	if Lib == null:
+		push_error("TerrainBlockyLibrary failed to load")
 		ok = false
 	else:
-		var size := Vector3i(4, 6, 4)
-		var py: int = size.y + 2
-		var pz: int = size.z + 2
-		var types := PackedByteArray()
-		types.resize((size.x + 2) * py * pz)
-		types.fill(0)
-		# Two columns: heights 4 and 3 (1:1 ramp) + one cliff drop to height 1.
-		for lz in range(4):
-			for ly in range(0, 4):
-				_set_pad(types, 0, ly, lz, 1, py, pz) # grass/dirt id=1
-			for ly2 in range(0, 3):
-				_set_pad(types, 1, ly2, lz, 2, py, pz)
-			for ly3 in range(0, 1):
-				_set_pad(types, 2, ly3, lz, 3, py, pz)
-		var built: Dictionary = Mesher.build(types, size)
-		var surfaces: Dictionary = built.get("surfaces", {})
-		var faces: PackedVector3Array = built.get("collision_faces", PackedVector3Array())
-		var vert_count := 0
-		for k in surfaces.keys():
-			vert_count += surfaces[k]["verts"].size()
-		print("terrain_smoke hybrid_verts=%d collision_tris=%d mats=%d" % [
-			vert_count, faces.size() / 3, surfaces.size()
-		])
-		if vert_count < 36 or faces.size() < 36:
-			push_error("Hybrid mesher produced too little geometry")
+		var ramp_id: int = Lib.surface_model_for_drops(1, 1, 0, 0, 0)
+		var cliff_id: int = Lib.surface_model_for_drops(1, 3, 0, 0, 0)
+		var corner_id: int = Lib.surface_model_for_drops(1, 1, 0, 1, 0)
+		print("terrain_smoke slope_ids ramp=%d cliff=%d corner=%d" % [ramp_id, cliff_id, corner_id])
+		if ramp_id != Lib.BLOCK_GRASS_RAMP_PX:
+			push_error("Expected +X grass ramp model")
 			ok = false
-		# Smooth top heights should vary (not flat cubes) on the ramp column.
-		var grass_buf = surfaces.get(&"grass", surfaces.get("grass", {}))
-		if grass_buf is Dictionary and grass_buf.has("verts"):
-			var ys: Dictionary = {}
-			for v in grass_buf["verts"]:
-				if absf(v.y - floor(v.y)) > 0.05:
-					ys[snappedf(v.y, 0.01)] = true
-			print("terrain_smoke hybrid_fractional_heights=%d" % ys.size())
-			if ys.is_empty():
-				push_error("Hybrid tops lack sub-voxel smoothing")
-				ok = false
+		if cliff_id != Lib.BLOCK_GRASS:
+			push_error("Expected cliff to stay full grass cube")
+			ok = false
+		if corner_id != Lib.BLOCK_GRASS_CORNER_PX_PZ:
+			push_error("Expected +X+Z outer corner model")
+			ok = false
+		if Lib.type_to_name(Lib.BLOCK_GRASS_RAMP_PX) != &"grass":
+			push_error("Ramp models must mine as grass")
+			ok = false
 
 	var shader_res = load("res://systems/terrain/terrain_hybrid.gdshader")
 	if shader_res == null:
 		push_error("terrain_hybrid.gdshader failed to load")
 		ok = false
 	else:
-		print("terrain_smoke hybrid_shader_ok")
+		print("terrain_smoke blocky_shader_ok")
 
 	var VW = load("res://systems/terrain/VoxelWorld.gd")
 	if VW == null:
@@ -128,9 +106,6 @@ func _initialize() -> void:
 		if not vw.has_method("wait_for_terrain_at"):
 			push_error("wait_for_terrain_at missing")
 			ok = false
-		if not vw.has_method("_rebuild_hybrid_block"):
-			push_error("hybrid rebuild missing")
-			ok = false
 		if not vw.has_signal("terrain_loading_status"):
 			push_error("terrain_loading_status signal missing")
 			ok = false
@@ -138,8 +113,3 @@ func _initialize() -> void:
 		vw.free()
 
 	quit(0 if ok else 1)
-
-
-func _set_pad(types: PackedByteArray, x: int, y: int, z: int, id: int, py: int, pz: int) -> void:
-	var idx: int = ((x + 1) * py + (y + 1)) * pz + (z + 1)
-	types[idx] = id
