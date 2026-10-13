@@ -133,17 +133,15 @@ var _crack_stage: int = -1
 ## Dictionary[StringName, int] — block_type -> amount
 var raw_materials: Dictionary = {}
 
-## Spawn state machine — RayCast polling waits for VoxelTerrain collision to generate
+## Spawn state — GameWorld drives loading; player stays frozen until resume_at_spawn().
 var _is_spawned: bool = false
+var _resolved_spawn: Vector3 = Vector3(0.5, 90.0, 0.5)
+var _gameplay_input_suspended: bool = true
 
-## Spiral-search state — used while waiting for a valid island surface below spawn.
-## Each frame the search position advances outward in a polar spiral until a
-## downward raycast hits something, preventing an infinite void-lock.
-var _spiral_angle:  float = 0.0   # current angle in radians
-var _spiral_radius: float = 0.0   # current search radius in world units
-const _SPIRAL_ANGLE_STEP:  float = 0.35   # radians per frame
-const _SPIRAL_RADIUS_STEP: float = 0.40   # units added per full rotation
-const _SPIRAL_MAX_RADIUS:  float = 128.0  # give up radius (fallback teleport)
+## Last terrain hit surface (world space) for crack/outline orientation.
+var _target_hit_normal: Vector3 = Vector3.UP
+var _target_hit_point: Vector3 = Vector3.ZERO
+var _debug_overlay_enabled: bool = false
 
 func _ensure_nodes() -> void:
 	if collision_shape == null:
@@ -194,12 +192,12 @@ func _ready() -> void:
 	if projection_camera != null:
 		projection_camera.top_level = true
 
-	# Auto-capture mouse when game starts so first-person look works immediately
-	set_mouse_capture(true)
-
-	# Spawn above the floating-island band; spiral search + raycast settle onto solid ground.
-	global_position.y = 110.0
+	# Hold above the island band; GameWorld places us after terrain+collision are ready.
+	global_position = Vector3(0.5, 90.0, 0.5)
+	_resolved_spawn = global_position
 	_is_spawned = false
+	_gameplay_input_suspended = true
+	is_physics_suspended = true
 	velocity = Vector3.ZERO
 	_ensure_terrain_target_visuals()
 
@@ -208,16 +206,99 @@ func _ready() -> void:
 	cement_changed.emit(cement_count, max_cement)
 
 ## Physics suspension state — prevents gravity and movement until terrain finishes generating.
-var is_physics_suspended: bool = false
+var is_physics_suspended: bool = true
 
 func suspend_physics() -> void:
 	is_physics_suspended = true
+	_gameplay_input_suspended = true
 	velocity = Vector3.ZERO
 
 func resume_physics() -> void:
 	is_physics_suspended = false
+	_gameplay_input_suspended = false
 	velocity = Vector3.ZERO
 	set_physics_process(true)
+
+## Place on a resolved spawn point and restore controls (called by GameWorld).
+func resume_at_spawn(spawn_pos: Vector3) -> void:
+	_resolved_spawn = spawn_pos
+	global_position = spawn_pos
+	velocity = Vector3.ZERO
+	_yaw = 0.0
+	_pitch = 0.0
+	rotation = Vector3.ZERO
+	if head != null:
+		head.rotation = Vector3.ZERO
+	_reset_mining_state()
+	_hide_terrain_target_visuals()
+	_is_spawned = true
+	resume_physics()
+	set_mouse_capture(true)
+	set_state(State.BODY_CONTROL)
+
+## Respawn at the last resolved safe spawn; keeps inventory and buildings.
+func respawn_home() -> void:
+	if debris_grabber != null and debris_grabber.is_grabbing:
+		debris_grabber.release()
+	global_position = _resolved_spawn
+	velocity = Vector3.ZERO
+	_yaw = 0.0
+	_pitch = 0.0
+	rotation = Vector3.ZERO
+	if head != null:
+		head.rotation = Vector3.ZERO
+	if projection_camera != null and body_camera != null:
+		projection_camera.global_transform = body_camera.global_transform
+	_reset_mining_state()
+	_hide_terrain_target_visuals()
+	if preview_ghost != null:
+		preview_ghost.hide_preview()
+	_is_spawned = true
+	is_physics_suspended = false
+	_gameplay_input_suspended = false
+	set_state(State.BODY_CONTROL)
+	set_mouse_capture(true)
+
+func get_resolved_spawn() -> Vector3:
+	return _resolved_spawn
+
+func get_debug_target_info() -> Dictionary:
+	var category := "none"
+	var material := "N/A"
+	var durability := "N/A"
+	var cell := Vector3i.ZERO
+	if target_is_terrain:
+		category = "terrain"
+		material = String(target_terrain_type) if not target_terrain_type.is_empty() else "N/A"
+		cell = target_terrain_cell
+		durability = "N/A"
+	elif target_is_debris:
+		category = "debris"
+		cell = target_debris_cell if target_debris_cell is Vector3i else Vector3i.ZERO
+		if target_debris_island != null and target_debris_cell != null \
+		and target_debris_island.constituent_blocks.has(target_debris_cell):
+			var bd: BlockData = target_debris_island.constituent_blocks[target_debris_cell]
+			material = String(bd.block_type)
+			var max_d: float = BlockTypeCatalog.get_max_durability(bd.block_type)
+			durability = "%.0f%%" % ((bd.durability / max_d) * 100.0 if max_d > 0.0 else 0.0)
+	elif has_target:
+		category = "building"
+		cell = target_remove_cell
+		var grid := grid_system
+		if grid != null and grid.has_method("get_block"):
+			var b: BlockData = grid.get_block(target_remove_cell)
+			if b != null:
+				material = String(b.block_type)
+				durability = "%.0f%%" % (clampf(b.durability, 0.0, 1.0) * 100.0)
+	var mine_pct := int((mining_progress / MINE_TIME) * 100.0) if mining_progress > 0.0 else 0
+	return {
+		"category": category,
+		"material": material,
+		"cell": cell,
+		"durability": durability,
+		"mining": mine_pct if category == "terrain" else "N/A",
+		"can_place": can_place_target,
+	}
 
 ## Waits for terrain directly under player to finish generating, then safely resumes physics.
 func await_terrain_and_resume() -> void:
@@ -351,6 +432,13 @@ func _is_ui_modal_open() -> bool:
 	return false
 
 func _input(event: InputEvent) -> void:
+	if _gameplay_input_suspended or not _is_spawned:
+		# Allow ESC to free cursor during load; block gameplay recapture/actions.
+		if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
+			set_mouse_capture(false)
+			get_viewport().set_input_as_handled()
+		return
+
 	# If a UI modal is active, ESC closes it and clicks do not recapture mouse
 	if area_selection_step != AreaSelectionStep.NONE and event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
 		cancel_area_selection()
@@ -382,7 +470,23 @@ func _input(event: InputEvent) -> void:
 
 ## Consume all mouse motion and keyboard gameplay events (but NOT when debug camera is active or modal is open)
 func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_F3:
+		_debug_overlay_enabled = not _debug_overlay_enabled
+		var hud := _get_build_hud()
+		if hud != null and hud.has_method("set_debug_overlay_visible"):
+			hud.set_debug_overlay_visible(_debug_overlay_enabled)
+		get_viewport().set_input_as_handled()
+		return
+
+	if event is InputEventKey and event.pressed and not event.echo \
+	and (event.keycode == KEY_HOME or event.physical_keycode == KEY_HOME):
+		respawn_home()
+		get_viewport().set_input_as_handled()
+		return
+
 	if current_state == State.DEBUG_FLIGHT or _is_ui_modal_open():
+		return
+	if _gameplay_input_suspended or not _is_spawned:
 		return
 
 	# Mouse look — requires captured cursor; no middle-mouse dragging in body modes
@@ -579,50 +683,9 @@ func _select_type_by_index(idx: int) -> void:
 		block_type_changed.emit(get_selected_type())
 
 func _physics_process(delta: float) -> void:
-	if not _is_spawned:
+	if not _is_spawned or is_physics_suspended or _gameplay_input_suspended:
 		velocity = Vector3.ZERO
-		var space_state := get_world_3d().direct_space_state
-		if space_state == null:
-			return
-
-		# Build a downward ray from the current (possibly spiral-offset) XZ column.
-		var ray_from := Vector3(global_position.x, maxf(global_position.y, 90.0), global_position.z)
-		var ray_to   := Vector3(global_position.x, -20.0, global_position.z)
-		var query    := PhysicsRayQueryParameters3D.create(ray_from, ray_to)
-		query.exclude = [get_rid()]
-		var hit_result := space_state.intersect_ray(query)
-
-		if not hit_result.is_empty():
-			# Found a surface — teleport player 0.5 m above it and enable physics.
-			global_position = Vector3(global_position.x, hit_result.position.y + 0.5, global_position.z)
-			_is_spawned = true
-			is_physics_suspended = false
-			_spiral_radius = 0.0
-			_spiral_angle  = 0.0
-			return
-
-		# ---- Void below: advance the expanding spiral and retry next frame ----
-		# Increase angle; wrap every full turn and grow the radius by one step.
-		_spiral_angle += _SPIRAL_ANGLE_STEP
-		if _spiral_angle >= TAU:
-			_spiral_angle  -= TAU
-			_spiral_radius += _SPIRAL_RADIUS_STEP
-
-		if _spiral_radius >= _SPIRAL_MAX_RADIUS:
-			# Last-resort fallback: reset to origin at a Y known to be inside the
-			# island band so the player lands as soon as a chunk generates.
-			global_position = Vector3(0.5, 90.0, 0.5)
-			_spiral_radius = 0.0
-			_spiral_angle  = 0.0
-		else:
-			# Move XZ to the next spiral candidate (Archimedean spiral around origin).
-			var sx: float = cos(_spiral_angle) * _spiral_radius
-			var sz: float = sin(_spiral_angle) * _spiral_radius
-			global_position = Vector3(sx, maxf(global_position.y, 90.0), sz)
-		return
-
-	if is_physics_suspended:
-		velocity = Vector3.ZERO
+		# Keep camera/body locked at the hold position while terrain streams in.
 		return
 
 	if _is_ui_modal_open():
@@ -702,7 +765,8 @@ func _raycast_terrain_voxel(vox_world: Node) -> Variant:
 	var vt: VoxelTool = terrain.get_voxel_tool()
 	if vt == null:
 		return null
-	vt.channel = VoxelBuffer.CHANNEL_TYPE
+	# SDF channel matches Transvoxel mesh/collision surfaces.
+	vt.channel = VoxelBuffer.CHANNEL_SDF
 	var cam := get_active_camera()
 	if cam == null:
 		return null
@@ -752,6 +816,7 @@ func _ensure_terrain_target_visuals() -> void:
 
 	var outline_halo := MeshInstance3D.new()
 	outline_halo.name = "TerrainTargetOutlineHalo"
+	outline_halo.top_level = true
 	outline_halo.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	outline_halo.mesh = _build_outline_mesh(0.028)
 	outline_halo.material_override = outline_light
@@ -760,6 +825,7 @@ func _ensure_terrain_target_visuals() -> void:
 
 	_terrain_outline = MeshInstance3D.new()
 	_terrain_outline.name = "TerrainTargetOutline"
+	_terrain_outline.top_level = true
 	_terrain_outline.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
 	_terrain_outline.mesh = _build_outline_mesh(0.014)
 	_terrain_outline.material_override = _outline_mat
@@ -781,12 +847,14 @@ func _ensure_terrain_target_visuals() -> void:
 		_crack_stage_mats.append(mat)
 	_crack_mat = _crack_stage_mats[0]
 
+	# Surface-aligned quad (not a cube) so cracks follow the hit normal/tangent.
 	_terrain_crack = MeshInstance3D.new()
 	_terrain_crack.name = "TerrainMineCracks"
+	_terrain_crack.top_level = true
 	_terrain_crack.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
-	var crack_box := BoxMesh.new()
-	crack_box.size = Vector3(1.015, 1.015, 1.015)
-	_terrain_crack.mesh = crack_box
+	var crack_quad := QuadMesh.new()
+	crack_quad.size = Vector2(1.05, 1.05)
+	_terrain_crack.mesh = crack_quad
 	_terrain_crack.material_override = _crack_mat
 	add_child(_terrain_crack)
 	_terrain_crack.visible = false
@@ -872,14 +940,28 @@ func _build_outline_mesh(thickness: float = 0.018) -> ArrayMesh:
 	mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arrays)
 	return mesh
 
+func _basis_from_normal(normal: Vector3) -> Basis:
+	var n := normal.normalized()
+	if n.length_squared() < 0.0001:
+		n = Vector3.UP
+	var tangent := Vector3.UP.cross(n)
+	if tangent.length_squared() < 0.001:
+		tangent = Vector3.RIGHT.cross(n)
+	tangent = tangent.normalized()
+	var bitangent := n.cross(tangent).normalized()
+	# QuadMesh faces +Z locally; map local +Z to world normal.
+	return Basis(tangent, bitangent, n)
+
 func _update_terrain_target_visuals(cell: Vector3i, progress01: float) -> void:
 	_ensure_terrain_target_visuals()
 	var center := Vector3(float(cell.x) + 0.5, float(cell.y) + 0.5, float(cell.z) + 0.5)
-	_terrain_outline.global_position = center
+	var n := _target_hit_normal.normalized() if _target_hit_normal.length_squared() > 0.0001 else Vector3.UP
+	# Subtle voxel outline stays axis-aligned (readable target); independent of player yaw.
+	_terrain_outline.global_transform = Transform3D(Basis.IDENTITY, center)
 	_terrain_outline.visible = true
 	if _terrain_outline.has_meta("halo"):
 		var halo: MeshInstance3D = _terrain_outline.get_meta("halo")
-		halo.global_position = center
+		halo.global_transform = Transform3D(Basis.IDENTITY, center)
 		halo.visible = true
 
 	var stage: int = clampi(int(floor(progress01 * 4.0)), 0, 3) if progress01 > 0.02 else -1
@@ -887,7 +969,10 @@ func _update_terrain_target_visuals(cell: Vector3i, progress01: float) -> void:
 		_terrain_crack.visible = false
 		_crack_stage = -1
 		return
-	_terrain_crack.global_position = center
+	# Crack decal sits on the hit surface, oriented to normal/tangent (not player transform).
+	var hitch: Vector3 = _target_hit_point if _target_hit_point != Vector3.ZERO else (center + n * 0.51)
+	var crack_pos := hitch + n * 0.02
+	_terrain_crack.global_transform = Transform3D(_basis_from_normal(n), crack_pos)
 	_terrain_crack.visible = true
 	if stage != _crack_stage:
 		_crack_stage = stage
@@ -1145,6 +1230,8 @@ func _update_raycast() -> void:
 	var hit_normal: Vector3 = result.normal
 	var hit_collider: Object = result.collider
 	var shape_idx: int = result.shape
+	_target_hit_point = hit_pos
+	_target_hit_normal = hit_normal
 
 	if hit_collider is StaticBody3D:
 		target_is_debris = false
@@ -1297,10 +1384,15 @@ func _update_raycast() -> void:
 			preview_ghost.update_area_preview(min_c, max_c, grid.cell_size)
 		elif debris_grabber != null and debris_grabber.is_grabbing:
 			pass # DebrisGrabber updates the preview ghost for recovery
+		elif target_is_terrain:
+			# Natural terrain uses the subtle outline only — no green placement cube.
+			preview_ghost.hide_preview()
 		elif target_is_debris and target_debris_island != null and target_debris_island.is_moving():
 			preview_ghost.hide_preview()
+		elif can_place_target:
+			preview_ghost.update_preview(target_place_cell, true, grid.cell_size)
 		else:
-			preview_ghost.update_preview(target_place_cell, can_place_target, grid.cell_size)
+			preview_ghost.hide_preview()
 
 func _normal_to_cell_offset(normal: Vector3) -> Vector3i:
 	var abs_norm := normal.abs()

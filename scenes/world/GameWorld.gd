@@ -100,11 +100,12 @@ func _ready() -> void:
 		if voxel_world.has_method("attach_viewer_to_player"):
 			voxel_world.attach_viewer_to_player(player)
 
-		# Fallback legacy deferred async spawn: only used if player doesn't manage its own raycast spawn
-		if not ("_is_spawned" in player):
-			var initial_spawn := voxel_world.get_spawn_position(0, 0)
-			player.global_position = initial_spawn
-			_spawn_player_on_terrain.call_deferred()
+		if player.has_method("suspend_physics"):
+			player.suspend_physics()
+		player.global_position = Vector3(0.5, 90.0, 0.5)
+		if build_hud != null and build_hud.has_method("set_loading_overlay"):
+			build_hud.set_loading_overlay(true, "Loading terrain…")
+		_spawn_player_on_terrain.call_deferred()
 
 	# Wire BuildCamera as secondary/debug tool
 	if build_camera != null:
@@ -118,31 +119,50 @@ func _ready() -> void:
 			build_camera.block_type_changed.connect(build_hud.set_selected_block_type)
 			build_hud.set_selected_block_type(build_camera.get_selected_type())
 
-## Async coroutine: waits for VoxelTerrain to finish generating and meshing the chunk
-## directly under the player before querying the safe surface Y and re-enabling physics.
+## Async: hold player still with loading UI until nearby terrain mesh+collision are ready.
 func _spawn_player_on_terrain() -> void:
-	if player == null or voxel_world == null or "_is_spawned" in player:
+	if player == null or voxel_world == null:
 		return
 
-	# Wait for VoxelTerrain to finish generating and meshing the chunk directly under the player
+	var hold := Vector3(0.5, 90.0, 0.5)
+	player.global_position = hold
+	if player.has_method("suspend_physics"):
+		player.suspend_physics()
+	if build_hud != null and build_hud.has_method("set_loading_overlay"):
+		build_hud.set_loading_overlay(true, "Loading terrain…")
+
+	# Park viewers at spawn so streaming prioritizes the landing column.
+	if voxel_world.has_method("attach_viewer_to_player"):
+		voxel_world.attach_viewer_to_player(player)
+
 	if voxel_world.has_method("wait_for_terrain_at"):
-		await voxel_world.wait_for_terrain_at(player.global_position)
+		await voxel_world.wait_for_terrain_at(Vector3(0.5, 56.0, 0.5))
 	else:
 		await voxel_world.force_sync_spawn_chunks(0, 0)
 
-	# Derive safe spawn position from real solid surface voxel data using top-down raycast or VoxelTool
 	var safe_spawn: Vector3
 	if voxel_world.has_method("get_spawn_position_raycast"):
-		safe_spawn = voxel_world.get_spawn_position_raycast(player.global_position.x, player.global_position.z)
+		safe_spawn = voxel_world.get_spawn_position_raycast(0.5, 0.5)
 	else:
-		safe_spawn = voxel_world.get_spawn_position(int(floor(player.global_position.x)), int(floor(player.global_position.z)))
-	player.global_position = safe_spawn
+		safe_spawn = voxel_world.get_spawn_position(0, 0)
 
-	# Re-enable player physics now that terrain collision is committed to PhysicsServer3D
-	if player.has_method("resume_physics"):
-		player.resume_physics()
-	elif player.has_method("set_physics_process"):
-		player.set_physics_process(true)
+	# Extra frames so PhysicsServer commits colliders before unfreezing.
+	await get_tree().physics_frame
+	await get_tree().physics_frame
+	if voxel_world.has_method("get_spawn_position_raycast"):
+		var ray_spawn: Vector3 = voxel_world.get_spawn_position_raycast(safe_spawn.x, safe_spawn.z)
+		if ray_spawn.y < 200.0:
+			safe_spawn = ray_spawn
+
+	if player.has_method("resume_at_spawn"):
+		player.resume_at_spawn(safe_spawn)
+	else:
+		player.global_position = safe_spawn
+		if player.has_method("resume_physics"):
+			player.resume_physics()
+
+	if build_hud != null and build_hud.has_method("set_loading_overlay"):
+		build_hud.set_loading_overlay(false)
 
 func _unhandled_input(event: InputEvent) -> void:
 	if build_hud != null and build_hud.has_method("is_modal_open") and build_hud.is_modal_open():
@@ -159,6 +179,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			spawn_test_arch(Vector3i(6, 0, 0))
 		elif event.keycode == KEY_C:
 			clear_world()
+		elif event.keycode == KEY_HOME or event.physical_keycode == KEY_HOME:
+			if player != null and player.has_method("respawn_home"):
+				player.respawn_home()
 
 ## Toggles the development free-flight camera without corrupting player state.
 func toggle_debug_camera() -> void:

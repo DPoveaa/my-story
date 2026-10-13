@@ -47,6 +47,18 @@ var _controls_body: VBoxContainer = null
 var _controls_toggle: Button = null
 var _controls_expanded: bool = true
 
+## Loading overlay (spawn wait).
+var _loading_overlay: ColorRect = null
+var _loading_label: Label = null
+
+## F3 debug target overlay.
+var _debug_panel: PanelContainer = null
+var _debug_label: Label = null
+var _debug_visible: bool = false
+
+## Respawn / Home button.
+var _respawn_btn: Button = null
+
 ## Blueprint Save Modal Nodes
 var _save_modal: PanelContainer = null
 var _save_name_input: LineEdit = null
@@ -123,6 +135,9 @@ func _ready() -> void:
 	_create_view_distance_controls()
 	_create_mining_hud()
 	_create_controls_panel()
+	_create_loading_overlay()
+	_create_debug_overlay()
+	_create_respawn_button()
 	if voxel_world != null:
 		bind_voxel_world(voxel_world)
 
@@ -292,6 +307,9 @@ func _process(delta: float) -> void:
 		if _mine_feedback_timer <= 0.0 and _mine_feedback_label != null:
 			_mine_feedback_label.visible = false
 
+	if _debug_visible:
+		_refresh_debug_overlay()
+
 func _create_mining_hud() -> void:
 	if _mine_panel != null:
 		return
@@ -433,7 +451,123 @@ func _build_controls_lines() -> PackedStringArray:
 	lines.append("Blueprints: %s / %s" % [_action_keys("save_blueprint"), _action_keys("load_blueprint")])
 	lines.append("Debug camera: %s" % _action_keys("debug_camera"))
 	lines.append("View distance: + / −  (or [ / ])")
+	lines.append("Respawn / Home: button or Home key")
+	lines.append("Target debug: F3")
 	return lines
+
+func _create_loading_overlay() -> void:
+	if _loading_overlay != null:
+		return
+	_loading_overlay = ColorRect.new()
+	_loading_overlay.name = "LoadingOverlay"
+	_loading_overlay.color = Color(0.02, 0.03, 0.05, 0.72)
+	_loading_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_loading_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	_loading_overlay.visible = false
+	_loading_overlay.z_index = 20
+	add_child(_loading_overlay)
+
+	_loading_label = Label.new()
+	_loading_label.text = "Loading terrain…"
+	_loading_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_loading_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_loading_label.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_loading_label.add_theme_font_size_override("font_size", 28)
+	_loading_label.add_theme_color_override("font_color", Color(0.92, 0.95, 1.0))
+	_loading_overlay.add_child(_loading_label)
+
+func set_loading_overlay(active: bool, message: String = "Loading terrain…") -> void:
+	if _loading_overlay == null:
+		_create_loading_overlay()
+	_loading_overlay.visible = active
+	if _loading_label != null and not message.is_empty():
+		_loading_label.text = message
+
+func _create_debug_overlay() -> void:
+	if _debug_panel != null:
+		return
+	_debug_panel = PanelContainer.new()
+	_debug_panel.name = "DebugTargetPanel"
+	_debug_panel.anchor_left = 0.5
+	_debug_panel.anchor_right = 0.5
+	_debug_panel.anchor_top = 0.0
+	_debug_panel.anchor_bottom = 0.0
+	_debug_panel.offset_left = -220.0
+	_debug_panel.offset_right = 220.0
+	_debug_panel.offset_top = 52.0
+	_debug_panel.offset_bottom = 168.0
+	_debug_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_debug_panel.visible = false
+	add_child(_debug_panel)
+
+	_debug_label = Label.new()
+	_debug_label.add_theme_font_size_override("font_size", 13)
+	_debug_label.add_theme_color_override("font_color", Color(0.85, 0.95, 0.75))
+	_debug_label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	_debug_panel.add_child(_debug_label)
+
+func set_debug_overlay_visible(visible_flag: bool) -> void:
+	_debug_visible = visible_flag
+	if _debug_panel == null:
+		_create_debug_overlay()
+	_debug_panel.visible = visible_flag
+	if visible_flag:
+		_refresh_debug_overlay()
+
+func _refresh_debug_overlay() -> void:
+	if _debug_label == null:
+		return
+	var info := {
+		"category": "none",
+		"material": "N/A",
+		"cell": Vector3i.ZERO,
+		"durability": "N/A",
+		"mining": "N/A",
+	}
+	if player != null and player.has_method("get_debug_target_info"):
+		info = player.get_debug_target_info()
+	var cell: Vector3i = info.get("cell", Vector3i.ZERO)
+	var stream_line := ""
+	if voxel_world != null and voxel_world.has_method("get_stream_diagnostics"):
+		var sd: Dictionary = voxel_world.get_stream_diagnostics()
+		if not sd.is_empty():
+			stream_line = "\nStream: rem=%s upd=%s col=%sc" % [
+				str(sd.get("remaining_main_thread_blocks", "—")),
+				str(sd.get("updated_blocks", "—")),
+				str(sd.get("collision_chunks", "—")),
+			]
+	_debug_label.text = "F3 Target Debug\nType/Material: %s\nVoxel: (%d, %d, %d)\nCategory: %s\nMining: %s\nDurability: %s%s" % [
+		str(info.get("material", "N/A")),
+		cell.x, cell.y, cell.z,
+		str(info.get("category", "none")),
+		str(info.get("mining", "N/A")),
+		str(info.get("durability", "N/A")),
+		stream_line,
+	]
+
+func _create_respawn_button() -> void:
+	if _respawn_btn != null:
+		return
+	_respawn_btn = Button.new()
+	_respawn_btn.name = "RespawnButton"
+	_respawn_btn.text = "Respawn"
+	_respawn_btn.tooltip_text = "Return to spawn (Home)"
+	_respawn_btn.anchor_left = 1.0
+	_respawn_btn.anchor_right = 1.0
+	_respawn_btn.anchor_top = 0.0
+	_respawn_btn.anchor_bottom = 0.0
+	_respawn_btn.offset_left = -120.0
+	_respawn_btn.offset_top = 104.0
+	_respawn_btn.offset_right = -12.0
+	_respawn_btn.offset_bottom = 136.0
+	_respawn_btn.pressed.connect(_on_respawn_pressed)
+	add_child(_respawn_btn)
+
+func _on_respawn_pressed() -> void:
+	if player != null and player.has_method("respawn_home"):
+		player.respawn_home()
+	elif player != null and player.has_method("set_mouse_capture"):
+		player.set_mouse_capture(true)
 
 func _action_keys(action1: StringName, action2: StringName = &"", action3: StringName = &"", action4: StringName = &"") -> String:
 	var parts: PackedStringArray = PackedStringArray()

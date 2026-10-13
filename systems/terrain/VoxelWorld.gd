@@ -1,8 +1,9 @@
 class_name VoxelWorld
 extends Node3D
 
-## VoxelWorld — wrapper around Zylann's VoxelTerrain + VoxelMesherBlocky.
-## Streaming / collisions / mining use CHANNEL_TYPE. Public API kept for GameWorld.
+## VoxelWorld — Zylann VoxelTerrain + VoxelMesherTransvoxel (SDF smooth geometry).
+## CHANNEL_SDF drives mesh/collision; CHANNEL_TYPE holds mineable IDs; CHANNEL_INDICES textures.
+## Dual VoxelViewers: nearby collisions + full-range visuals. Player-built grid stays separate.
 
 const BLOCK_AIR:   int = 0
 const BLOCK_GRASS: int = 1
@@ -18,6 +19,9 @@ const ISLAND_Y_MAX: float = 80.0
 const SURF_MIN: float = ISLAND_Y_MIN
 const SURF_MAX: float = ISLAND_Y_MAX
 const SPAWN_SYNC_RADIUS: int = 2
+const SDF_AIR: float = 3.5
+## Nearby collision radius in chunks (visuals use full view_distance_chunks).
+const COLLISION_VIEW_CHUNKS: int = 6
 
 signal voxel_mined(world_cell: Vector3i, block_type: StringName)
 signal spawn_chunks_ready
@@ -44,9 +48,10 @@ const VIEW_DIST_CHUNKS_MAX: int = 32
 
 var _terrain: VoxelTerrain = null
 var _viewer: VoxelViewer = null
-var _library: VoxelBlockyLibrary = null
+var _viewer_collision: VoxelViewer = null
 var _voxel_tool: VoxelTool = null
 var _chunks: Dictionary = {}
+var _terrain_material: ShaderMaterial = null
 
 var _noise_2d: FastNoiseLite = null
 var _noise_3d: FastNoiseLite = null
@@ -54,6 +59,7 @@ var _noise_ore: FastNoiseLite = null
 var _island_gen = null
 
 const _IslandGeneratorScript = preload("res://systems/terrain/IslandGenerator.gd")
+const _TRANSVOXEL_SHADER = preload("res://systems/terrain/terrain_transvoxel.gdshader")
 
 const DELTA_SAVE_PATH: String = "user://terrain_deltas.json"
 var _mined_deltas: Dictionary = {}
@@ -72,11 +78,12 @@ var max_frame_budget_ms: float = 8.0
 var _view_down_prev: bool = false
 var _view_up_prev: bool = false
 var _delta_reapply_timer: float = 0.0
+var _stream_diag_timer: float = 0.0
+var _last_stream_diag: Dictionary = {}
 
 func _ready() -> void:
 	_setup_fallback_noise()
 	load_terrain_deltas()
-	_build_library()
 	_build_terrain()
 	_build_viewer()
 	_apply_persisted_deltas()
@@ -116,39 +123,63 @@ func _process(delta: float) -> void:
 			var center: Vector3 = _viewer.global_position if _viewer.is_inside_tree() else Vector3.ZERO
 			_apply_persisted_deltas_near(center, float(_effective_view_distance()))
 
+	_stream_diag_timer += delta
+	if _stream_diag_timer >= 1.5:
+		_stream_diag_timer = 0.0
+		_refresh_stream_diagnostics()
+
 # ---------------------------------------------------------------------------
-# Library + VoxelTerrain (Blocky) — known-good streaming path
+# VoxelTerrain + Transvoxel (SDF)
 # ---------------------------------------------------------------------------
-func _build_library() -> void:
-	_library = VoxelBlockyLibrary.new()
+func _build_terrain_material() -> ShaderMaterial:
+	var mat := ShaderMaterial.new()
+	mat.shader = _TRANSVOXEL_SHADER
+	mat.set_shader_parameter("u_uv_scale", 0.45)
+	mat.set_shader_parameter("u_transition_mask", 0)
+	mat.set_shader_parameter("u_texture_array", _build_terrain_texture_array())
+	_terrain_material = mat
+	return mat
 
-	var air := VoxelBlockyModelEmpty.new()
-	_library.add_model(air)
-
-	var add_cube := func(albedo: Color, rough: float = 0.8, metal: float = 0.0) -> void:
-		var mat := StandardMaterial3D.new()
-		mat.albedo_color = albedo
-		mat.roughness = rough
-		mat.metallic = metal
-		var cube := VoxelBlockyModelCube.new()
-		cube.set_material_override(0, mat)
-		_library.add_model(cube)
-
-	add_cube.call(Color(0.28, 0.62, 0.24), 0.85, 0.0) # grass
-	add_cube.call(Color(0.42, 0.30, 0.20), 0.90, 0.0) # dirt
-	add_cube.call(Color(0.52, 0.54, 0.58), 0.80, 0.0) # stone
-	add_cube.call(Color(0.22, 0.22, 0.24), 0.90, 0.0) # coal
-	add_cube.call(Color(0.72, 0.74, 0.78), 0.50, 0.60) # iron
-	add_cube.call(Color(0.90, 0.76, 0.10), 0.25, 0.85) # gold
-	_library.bake()
+func _build_terrain_texture_array() -> Texture2DArray:
+	## Solid-color layers indexed by CHANNEL_INDICES (0=air unused, 1..6 materials).
+	var colors: Array[Color] = [
+		Color(0.05, 0.05, 0.06, 1.0), # 0 unused
+		Color(0.28, 0.62, 0.24, 1.0), # grass
+		Color(0.42, 0.30, 0.20, 1.0), # dirt
+		Color(0.52, 0.54, 0.58, 1.0), # stone
+		Color(0.22, 0.22, 0.24, 1.0), # coal
+		Color(0.72, 0.74, 0.78, 1.0), # iron
+		Color(0.90, 0.76, 0.10, 1.0), # gold
+	]
+	var images: Array[Image] = []
+	for c in colors:
+		var img := Image.create(4, 4, false, Image.FORMAT_RGBA8)
+		img.fill(c)
+		images.append(img)
+	var arr := Texture2DArray.new()
+	arr.create_from_images(images)
+	return arr
 
 func _build_terrain() -> void:
 	_terrain = VoxelTerrain.new()
 	_terrain.name = "VoxelTerrain"
 
-	var mesher := VoxelMesherBlocky.new()
-	mesher.library = _library
+	# TEXTURES_SINGLE_S4 needs 8-bit indices.
+	if ClassDB.class_exists("VoxelFormat"):
+		var fmt = ClassDB.instantiate("VoxelFormat")
+		if fmt != null and "indices_depth" in fmt:
+			fmt.indices_depth = VoxelBuffer.DEPTH_8_BIT
+			if "format" in _terrain:
+				_terrain.format = fmt
+
+	var mesher := VoxelMesherTransvoxel.new()
+	if "texturing_mode" in mesher:
+		# TEXTURES_SINGLE_S4 = 2 — pairs with terrain_transvoxel.gdshader + CHANNEL_INDICES.
+		mesher.texturing_mode = 2
+	if "transitions_enabled" in mesher:
+		mesher.transitions_enabled = false # VoxelTerrain has no LOD seams
 	_terrain.mesher = mesher
+	_terrain.material_override = _build_terrain_material()
 
 	_island_gen = _IslandGeneratorScript.new()
 	_island_gen.noise_island = _noise_3d
@@ -164,6 +195,12 @@ func _build_terrain() -> void:
 	_terrain.mesh_block_size = 16
 	_terrain.automatic_loading_enabled = true
 	_terrain.block_enter_notification_enabled = true
+
+	# Clamp vertical volume to the floating-island band so empty sky/void chunks are not streamed.
+	var y0: float = ISLAND_Y_MIN - 40.0
+	var y_size: float = (ISLAND_Y_MAX - ISLAND_Y_MIN) + 80.0
+	_terrain.bounds = AABB(Vector3(-500000.0, y0, -500000.0), Vector3(1000000.0, y_size, 1000000.0))
+
 	if _terrain.has_signal("mesh_block_entered"):
 		_terrain.mesh_block_entered.connect(_on_mesh_block_entered)
 
@@ -179,22 +216,32 @@ func _on_mesh_block_entered(_block_pos: Vector3i) -> void:
 		spawn_chunks_ready.emit()
 
 func _build_viewer() -> void:
+	# Visuals at full view distance (no distant colliders).
 	_viewer = VoxelViewer.new()
 	_viewer.name = "VoxelViewer"
-	_viewer.requires_collisions = true
+	_viewer.requires_collisions = false
 	_viewer.requires_visuals = true
-	_sync_view_distance()
 	add_child(_viewer)
 
+	# Nearby collisions only — primary streaming bottleneck was full-range colliders.
+	_viewer_collision = VoxelViewer.new()
+	_viewer_collision.name = "VoxelViewerCollision"
+	_viewer_collision.requires_collisions = true
+	_viewer_collision.requires_visuals = false
+	add_child(_viewer_collision)
+
+	_sync_view_distance()
+
 func attach_viewer_to_player(player_node: Node3D) -> void:
-	if _viewer == null or player_node == null:
+	if player_node == null:
 		return
-	if _viewer.get_parent() != null:
-		_viewer.get_parent().remove_child(_viewer)
-	player_node.add_child(_viewer)
-	_viewer.position = Vector3.ZERO
-	_viewer.requires_collisions = true
-	_viewer.requires_visuals = true
+	for v in [_viewer, _viewer_collision]:
+		if v == null:
+			continue
+		if v.get_parent() != null:
+			v.get_parent().remove_child(v)
+		player_node.add_child(v)
+		v.position = Vector3.ZERO
 	_sync_view_distance()
 
 func get_view_distance_voxels() -> int:
@@ -209,15 +256,20 @@ func adjust_view_distance_chunks(delta: int) -> void:
 func _effective_view_distance() -> int:
 	return view_distance_chunks * 16
 
+func _collision_view_distance() -> int:
+	return COLLISION_VIEW_CHUNKS * 16
+
 func _sync_view_distance() -> void:
 	var dist := _effective_view_distance()
+	var col_dist := mini(dist, _collision_view_distance())
 	if _viewer != null:
 		_viewer.view_distance = dist
 		_viewer.requires_visuals = true
-		_viewer.requires_collisions = true
-		# Enough vertical reach so floating islands below the player still stream.
-		if "view_distance_vertical_ratio" in _viewer:
-			_viewer.view_distance_vertical_ratio = 1.0
+		_viewer.requires_collisions = false
+	if _viewer_collision != null:
+		_viewer_collision.view_distance = col_dist
+		_viewer_collision.requires_visuals = false
+		_viewer_collision.requires_collisions = true
 	if _terrain != null:
 		_terrain.max_view_distance = dist
 	view_distance_changed.emit(dist, view_distance_chunks)
@@ -250,13 +302,24 @@ func _setup_fallback_noise() -> void:
 	_noise_ore.noise_type = FastNoiseLite.TYPE_PERLIN
 	_noise_ore.frequency = noise_frequency_ore
 
+func _refresh_stream_diagnostics() -> void:
+	_last_stream_diag = {
+		"backend": "VoxelTerrain+Transvoxel",
+		"view_chunks": view_distance_chunks,
+		"collision_chunks": COLLISION_VIEW_CHUNKS,
+	}
+	if _terrain != null and _terrain.has_method("get_statistics"):
+		var stats: Dictionary = _terrain.get_statistics()
+		_last_stream_diag["remaining_main_thread_blocks"] = int(stats.get("remaining_main_thread_blocks", 0))
+		_last_stream_diag["updated_blocks"] = int(stats.get("updated_blocks", 0))
+
+func get_stream_diagnostics() -> Dictionary:
+	return _last_stream_diag.duplicate()
+
 # ---------------------------------------------------------------------------
 # Spawn helpers
 # ---------------------------------------------------------------------------
 func has_voxel(world_cell: Vector3i) -> bool:
-	if _terrain != null and _voxel_tool != null and _has_data_at(world_cell):
-		_voxel_tool.channel = VoxelBuffer.CHANNEL_TYPE
-		return _voxel_tool.get_voxel(world_cell) != BLOCK_AIR
 	return is_solid_block(world_cell)
 
 func _has_data_at(world_cell: Vector3i) -> bool:
@@ -269,11 +332,35 @@ func is_chunk_ready(world_pos: Vector3) -> bool:
 	if _terrain == null:
 		return true
 	var ipos := Vector3i(int(floor(world_pos.x)), int(floor(world_pos.y)), int(floor(world_pos.z)))
-	# Prefer a sample inside the island band so readiness matches real terrain.
 	var probe := Vector3i(ipos.x, clampi(ipos.y, int(ISLAND_Y_MIN), int(ISLAND_Y_MAX)), ipos.z)
 	if not _has_data_at(probe):
 		return get_highest_solid_y(ipos.x, ipos.z) >= 0 and _viewer_near_enough(world_pos)
+	if _terrain.has_method("is_area_meshed"):
+		var area := AABB(Vector3(probe) - Vector3(2, 2, 2), Vector3(5, 5, 5))
+		if not bool(_terrain.is_area_meshed(area)):
+			return false
 	return get_highest_solid_y(ipos.x, ipos.z) >= 0
+
+func is_collision_ready_at(world_pos: Vector3) -> bool:
+	## True when nearby mesh+collision should be available for safe standing.
+	if not is_chunk_ready(world_pos):
+		return false
+	if is_inside_tree() and get_world_3d() != null:
+		var space_state := get_world_3d().direct_space_state
+		if space_state != null:
+			var x: float = world_pos.x
+			var z: float = world_pos.z
+			var query := PhysicsRayQueryParameters3D.create(
+				Vector3(x, float(WORLD_HEIGHT) + 10.0, z),
+				Vector3(x, -10.0, z)
+			)
+			query.collide_with_areas = false
+			query.collide_with_bodies = true
+			query.collision_mask = 1
+			var hit := space_state.intersect_ray(query)
+			if not hit.is_empty():
+				return true
+	return get_highest_solid_y(int(floor(world_pos.x)), int(floor(world_pos.z))) >= 0
 
 func _viewer_near_enough(world_pos: Vector3) -> bool:
 	if _viewer == null:
@@ -284,12 +371,12 @@ func _viewer_near_enough(world_pos: Vector3) -> bool:
 func wait_for_terrain_at(world_pos: Vector3) -> void:
 	if not is_inside_tree() or _terrain == null:
 		return
-	if is_chunk_ready(world_pos):
+	if is_collision_ready_at(world_pos):
 		await get_tree().process_frame
 		return
-	var max_wait_cycles := 240
+	var max_wait_cycles := 300
 	var cycles := 0
-	while not is_chunk_ready(world_pos) and cycles < max_wait_cycles:
+	while not is_collision_ready_at(world_pos) and cycles < max_wait_cycles:
 		cycles += 1
 		await get_tree().process_frame
 	_apply_persisted_deltas()
@@ -300,23 +387,21 @@ func wait_for_terrain_at(world_pos: Vector3) -> void:
 func force_sync_spawn_chunks(cx: int = 0, cz: int = 0) -> void:
 	if not is_inside_tree():
 		return
-	# Wait on a point inside the floating-island band (not y=16 void).
 	var world_pos := Vector3(float(cx * 16) + 0.5, 56.0, float(cz * 16) + 0.5)
 	await wait_for_terrain_at(world_pos)
 
 func get_highest_solid_y(x: int, z: int) -> int:
-	if _voxel_tool != null:
-		_voxel_tool.channel = VoxelBuffer.CHANNEL_TYPE
+	if _voxel_tool != null and _has_data_at(Vector3i(x, int(ISLAND_Y_MAX), z)):
+		_voxel_tool.channel = VoxelBuffer.CHANNEL_SDF
 		var ray_origin := Vector3(float(x) + 0.5, float(WORLD_HEIGHT) + 4.0, float(z) + 0.5)
 		var hit = _voxel_tool.raycast(ray_origin, Vector3.DOWN, float(WORLD_HEIGHT) + 8.0)
 		if hit != null:
 			return hit.position.y
 
-	if _terrain != null and _voxel_tool != null and _has_data_at(Vector3i(x, int(ISLAND_Y_MAX), z)):
-		_voxel_tool.channel = VoxelBuffer.CHANNEL_TYPE
-		for y in range(WORLD_HEIGHT - 1, -1, -1):
-			if _voxel_tool.get_voxel(Vector3i(x, y, z)) != BLOCK_AIR:
-				return y
+	if _island_gen != null and _island_gen.has_method("eval_surface_y"):
+		var sy: int = int(_island_gen.eval_surface_y(x, z))
+		if sy >= 0:
+			return sy
 
 	for y in range(WORLD_HEIGHT - 1, -1, -1):
 		if is_solid_block(Vector3i(x, y, z)):
@@ -364,6 +449,19 @@ func get_spawn_position(x: int = 0, z: int = 0) -> Vector3:
 # Query API
 # ---------------------------------------------------------------------------
 func is_solid_block(world_cell: Vector3i) -> bool:
+	if world_cell.y < 0 or world_cell.y >= WORLD_HEIGHT:
+		return false
+	var cx := floori(float(world_cell.x) / 16.0)
+	var cz := floori(float(world_cell.z) / 16.0)
+	var cp := Vector2i(cx, cz)
+	var lc := Vector3i(posmod(world_cell.x, 16), world_cell.y, posmod(world_cell.z, 16))
+	if _mined_deltas_set.has(cp) and _mined_deltas_set[cp].has(lc):
+		return false
+
+	if _terrain != null and _voxel_tool != null and _has_data_at(world_cell):
+		_voxel_tool.channel = VoxelBuffer.CHANNEL_SDF
+		return _voxel_tool.get_voxel_f(world_cell) < 0.0
+
 	return not get_voxel_at(world_cell).is_empty()
 
 func is_ground_cell(world_cell: Vector3i) -> bool:
@@ -391,12 +489,16 @@ func get_voxel_at(world_cell: Vector3i) -> StringName:
 	return _procedural_voxel(world_cell.x, world_cell.y, world_cell.z, cp, lc)
 
 # ---------------------------------------------------------------------------
-# Mining — single authoritative TYPE clear
+# Mining — clear TYPE + SDF + INDICES together
 # ---------------------------------------------------------------------------
 func mine_voxel(world_cell: Vector3i) -> StringName:
 	var b_type := get_voxel_at(world_cell)
 	if b_type.is_empty():
-		return &""
+		# SDF solid without TYPE label still yields stone for resources.
+		if is_solid_block(world_cell):
+			b_type = &"stone"
+		else:
+			return &""
 
 	var cx := floori(float(world_cell.x) / 16.0)
 	var cz := floori(float(world_cell.z) / 16.0)
@@ -417,6 +519,11 @@ func _apply_air_edit(world_cell: Vector3i) -> void:
 			return
 	_voxel_tool.channel = VoxelBuffer.CHANNEL_TYPE
 	_voxel_tool.set_voxel(world_cell, BLOCK_AIR)
+	_voxel_tool.channel = VoxelBuffer.CHANNEL_SDF
+	_voxel_tool.set_voxel_f(world_cell, SDF_AIR)
+	_voxel_tool.channel = VoxelBuffer.CHANNEL_INDICES
+	_voxel_tool.set_voxel(world_cell, BLOCK_AIR)
+	_voxel_tool.channel = VoxelBuffer.CHANNEL_TYPE
 
 func _record_mine_delta(world_cell: Vector3i) -> void:
 	var cx := floori(float(world_cell.x) / 16.0)
@@ -459,7 +566,6 @@ func is_chunk_loaded(cp: Vector2i) -> bool:
 	if _chunks.has(cp):
 		return true
 	if _terrain != null:
-		# Probe mid island band for this XZ column.
 		var probe := Vector3i(cp.x * 16 + 8, int(ISLAND_Y_MIN) + 16, cp.y * 16 + 8)
 		return _terrain.has_data_block(_terrain.voxel_to_data_block(Vector3(probe)))
 	return false
@@ -482,17 +588,21 @@ func verify_spawn_physics(_pos: Vector3) -> bool:
 	return true
 
 func get_diagnostics() -> Dictionary:
-	return {
-		"backend": "ZylannVoxelTerrain",
+	var diag := {
+		"backend": "ZylannVoxelTerrain+Transvoxel",
 		"viewer_on_player": _viewer != null and _viewer.get_parent() != self,
 		"view_distance_voxels": _effective_view_distance(),
 		"view_distance_chunks": view_distance_chunks,
+		"collision_view_chunks": COLLISION_VIEW_CHUNKS,
 		"main_total_frame_time_ms": 0.0,
 		"loaded_chunks": _chunks.size(),
 		"total_chunks_generated": 0,
 		"cancelled_tasks_count": 0,
 		"stale_results_discarded": stale_results_discarded,
 	}
+	for k in _last_stream_diag.keys():
+		diag[k] = _last_stream_diag[k]
+	return diag
 
 # ---------------------------------------------------------------------------
 # Legacy test helpers
