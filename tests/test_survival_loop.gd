@@ -142,8 +142,8 @@ func test_fast_column_generation_matches_point_evaluation() -> void:
 			var gx := start_x + lx
 			var gz := start_z + lz
 			for ly in range(VoxelChunk.SIZE_Y):
-				var expected := world._evaluate_procedural_voxel(gx, ly, gz, cp, Vector3i(lx, ly, lz))
-				var actual := chunk.get_voxel_local(lx, ly, lz)
+				var expected: StringName = world._evaluate_procedural_voxel(gx, ly, gz, cp, Vector3i(lx, ly, lz))
+				var actual: StringName = chunk.get_voxel_local(lx, ly, lz)
 				if expected != actual:
 					mismatches += 1
 

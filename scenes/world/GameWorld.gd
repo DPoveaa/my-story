@@ -136,11 +136,18 @@ func _spawn_player_on_terrain() -> void:
 		voxel_world.attach_viewer_to_player(player)
 
 	var loaded_ok: bool = false
+	var on_load_status := func(message: String) -> void:
+		if build_hud != null and build_hud.has_method("set_loading_overlay"):
+			build_hud.set_loading_overlay(true, message)
+	if voxel_world.has_signal("terrain_loading_status"):
+		voxel_world.terrain_loading_status.connect(on_load_status)
 	if voxel_world.has_method("wait_for_terrain_at"):
 		loaded_ok = await voxel_world.wait_for_terrain_at(Vector3(0.5, 56.0, 0.5))
 	else:
 		await voxel_world.force_sync_spawn_chunks(0, 0)
 		loaded_ok = true
+	if voxel_world.has_signal("terrain_loading_status") and voxel_world.terrain_loading_status.is_connected(on_load_status):
+		voxel_world.terrain_loading_status.disconnect(on_load_status)
 
 	var safe_spawn := Vector3.ZERO
 	if loaded_ok:

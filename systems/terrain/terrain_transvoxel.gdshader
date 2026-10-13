@@ -1,9 +1,14 @@
 shader_type spatial;
 render_mode cull_back, diffuse_burley, specular_schlick_ggx;
 
+/// Kept for optional plugin Transvoxel debugging. Hybrid path uses terrain_hybrid.gdshader.
+/// Fragment NORMAL stays view-space; world normals only via varyings / MODEL_NORMAL_MATRIX.
+
 uniform sampler2DArray u_texture_array : source_color, filter_linear_mipmap, repeat_enable;
 uniform float u_uv_scale = 0.45;
 uniform int u_transition_mask;
+uniform float u_weight_sharpen = 2.8;
+uniform float u_facet_strength = 0.92;
 
 varying vec4 v_indices;
 varying vec4 v_weights;
@@ -43,7 +48,7 @@ vec3 get_transvoxel_position(vec3 vertex_pos, vec4 fdata) {
 
 vec3 get_triplanar_blend(vec3 world_normal) {
 	vec3 blending = abs(world_normal);
-	blending = normalize(max(blending, vec3(0.00001)));
+	blending = pow(max(blending, vec3(0.00001)), vec3(4.0));
 	float b = blending.x + blending.y + blending.z;
 	return blending / vec3(b);
 }
@@ -55,6 +60,13 @@ vec4 texture_array_triplanar(sampler2DArray tex, vec3 world_pos, vec3 blend, flo
 	return xaxis * blend.x + yaxis * blend.y + zaxis * blend.z;
 }
 
+vec4 sharpen_s4_weights(vec4 w, float sharpen) {
+	w = max(w - vec4(0.10), vec4(0.0));
+	w = pow(max(w, vec4(1e-5)), vec4(sharpen));
+	float s = max(dot(w, vec4(1.0)), 1e-4);
+	return w / s;
+}
+
 void vertex() {
 	VERTEX = get_transvoxel_position(VERTEX, CUSTOM0);
 	v_indices = decode_8bit_vec4(CUSTOM1.x);
@@ -64,15 +76,29 @@ void vertex() {
 }
 
 void fragment() {
-	vec3 blending = get_triplanar_blend(v_world_normal);
+	vec3 world_n = normalize(v_world_normal);
+	vec3 blending = get_triplanar_blend(world_n);
 	vec3 p = v_world_pos * u_uv_scale;
+
+	vec4 w = sharpen_s4_weights(v_weights, u_weight_sharpen);
 	vec3 col0 = texture_array_triplanar(u_texture_array, p, blending, v_indices.x).rgb;
 	vec3 col1 = texture_array_triplanar(u_texture_array, p, blending, v_indices.y).rgb;
 	vec3 col2 = texture_array_triplanar(u_texture_array, p, blending, v_indices.z).rgb;
 	vec3 col3 = texture_array_triplanar(u_texture_array, p, blending, v_indices.w).rgb;
-	vec3 albedo = col0 * v_weights.x + col1 * v_weights.y + col2 * v_weights.z + col3 * v_weights.w;
-	ALBEDO = albedo;
-	ROUGHNESS = 0.85;
-	METALLIC = 0.05;
-	NORMAL = normalize(v_world_normal);
+	ALBEDO = col0 * w.x + col1 * w.y + col2 * w.z + col3 * w.w;
+
+	// View-space NORMAL only — never assign world_n directly.
+	vec3 smooth_n = normalize(NORMAL);
+	vec3 flat_n = normalize(cross(dFdy(VERTEX), dFdx(VERTEX)));
+	float upness = world_n.y;
+	float facet = 1.0 - smoothstep(0.30, 0.72, abs(upness));
+	if (upness < -0.08) {
+		facet = max(facet, 0.92);
+	}
+	facet *= u_facet_strength;
+	NORMAL = normalize(mix(smooth_n, flat_n, facet));
+
+	ROUGHNESS = mix(0.92, 0.84, facet);
+	METALLIC = 0.0;
+	SPECULAR = mix(0.12, 0.20, facet);
 }

@@ -1,8 +1,8 @@
 ## IslandGenerator.gd
-## Castle Story hybrid floating islands for Zylann VoxelLodTerrain + VoxelMesherTransvoxel.
-## CHANNEL_SDF: smooth top surfaces / ramps; quantized blocky cliffs + angular undersides.
-## CHANNEL_TYPE / CHANNEL_INDICES: grass tops, dirt mantle on cliffs, selective stone, ore veins.
-## No vegetation. Island footprint / size distribution is preserved from the column sampler.
+## Castle Story hybrid floating islands — discrete TYPE voxels are authoritative.
+## Geometry smoothing happens at mesh time (HybridSurfaceMesher), not via full-volume SDF.
+## CHANNEL_SDF is a simple solid/air field for VoxelTool raycasts only.
+## Continuous style blend; local height-slope chooses ramps vs cliffs. No vegetation.
 extends VoxelGeneratorScript
 
 const BLOCK_AIR:   int = 0
@@ -21,6 +21,10 @@ const CAVE_THRESHOLD: float = 0.86
 const DIRT_DEPTH: int = 3
 const DIRT_CLIFF_EXTRA: float = 5.0
 const SDF_CLAMP: float = 3.5
+const MIN_COLUMN_THICKNESS: float = 3.5
+const SLOPE_SAMPLE_STEP: int = 2
+## Local geometric slope above this → angular cliff materials / steeper silhouette.
+const CLIFF_SLOPE: float = 1.05
 
 var density_threshold: float = 0.30
 var vertical_scale: float = 3.5
@@ -50,7 +54,6 @@ func _generate_block(out_buffer: VoxelBuffer, origin_in_voxels: Vector3i, lod: i
 		_fill_air(out_buffer)
 		return
 
-	# Pass 1: sample every column profile once (avoids repeated noise in Y loop).
 	var profiles: Array = []
 	profiles.resize(size.x * size.z)
 	for z in range(size.z):
@@ -59,10 +62,10 @@ func _generate_block(out_buffer: VoxelBuffer, origin_in_voxels: Vector3i, lod: i
 			var gx: int = origin_in_voxels.x + x * step
 			profiles[z * size.x + x] = _sample_column(gx, gz)
 
-	# Pass 2: close tiny accidental surface holes (1Ã—1 / 1Ã—2) without flattening terrain.
 	_fill_tiny_surface_holes(profiles, size.x, size.z, origin_in_voxels, step)
+	_refine_slope_from_neighbors(profiles, size.x, size.z, step)
+	_cull_isolated_spikes(profiles, size.x, size.z)
 
-	# Pass 3: write SDF + TYPE + INDICES.
 	for z in range(size.z):
 		var gz: int = origin_in_voxels.z + z * step
 		for x in range(size.x):
@@ -78,16 +81,10 @@ func _generate_block(out_buffer: VoxelBuffer, origin_in_voxels: Vector3i, lod: i
 			var steep: float = profile.w - 1.0
 			for y in range(size.y):
 				var gy: int = origin_in_voxels.y + y * step
-				var sdf: float = _eval_sdf(gx, gy, gz, top_y, bot_y, center_y, steep)
-				var block_id: int = BLOCK_AIR
-				if sdf < 0.0:
-					block_id = _eval_in_column(gx, gy, gz, top_y, bot_y, center_y, steep)
-					if block_id == BLOCK_AIR:
-						# SDF solid but column classifier empty (soft shell) — stone core.
-						block_id = BLOCK_STONE
+				var block_id: int = _eval_in_column(gx, gy, gz, top_y, bot_y, center_y, steep)
+				var sdf: float = _eval_sdf_discrete(gy, top_y, bot_y, block_id)
 				out_buffer.set_voxel_f(sdf, x, y, z, VoxelBuffer.CHANNEL_SDF)
 				out_buffer.set_voxel(block_id, x, y, z, VoxelBuffer.CHANNEL_TYPE)
-				# TEXTURES_SINGLE_S4: 8-bit texture index in INDICES (0 = air/unused).
 				out_buffer.set_voxel(block_id, x, y, z, VoxelBuffer.CHANNEL_INDICES)
 
 func eval_voxel(gx: int, gy: int, gz: int) -> int:
@@ -104,7 +101,8 @@ func eval_sdf(gx: int, gy: int, gz: int) -> float:
 	var profile: Vector4 = _sample_column(gx, gz)
 	if profile.w < 0.5:
 		return SDF_CLAMP
-	return _eval_sdf(gx, gy, gz, profile.x, profile.y, profile.z, profile.w - 1.0)
+	var block_id: int = _eval_in_column(gx, gy, gz, profile.x, profile.y, profile.z, profile.w - 1.0)
+	return _eval_sdf_discrete(gy, profile.x, profile.y, block_id)
 
 func eval_surface_y(gx: int, gz: int) -> int:
 	if noise_island == null or noise_island_2d == null:
@@ -113,6 +111,14 @@ func eval_surface_y(gx: int, gz: int) -> int:
 	if profile.w < 0.5:
 		return -1
 	return int(floor(profile.x))
+
+func eval_surface_height_f(gx: int, gz: int) -> float:
+	if noise_island == null or noise_island_2d == null:
+		return -1.0
+	var profile: Vector4 = _sample_column(gx, gz)
+	if profile.w < 0.5:
+		return -1.0
+	return profile.x
 
 func _fill_air(out_buffer: VoxelBuffer) -> void:
 	out_buffer.fill(BLOCK_AIR, VoxelBuffer.CHANNEL_TYPE)
@@ -139,8 +145,8 @@ func _land_mask(fx: float, fz: float) -> float:
 		mask = maxf(mask, lerpf(cutoff, 0.70, (n_arch - 0.22) / 0.78))
 
 	var ridge: float = 1.0 - absf(n_ridge)
-	if ridge > 0.80 and n_main > -0.15:
-		mask = maxf(mask, cutoff + (ridge - 0.80) * 0.55)
+	if ridge > 0.88 and n_main > 0.02 and n_med > -0.05:
+		mask = maxf(mask, cutoff + (ridge - 0.88) * 0.40)
 
 	var origin_d: float = sqrt(fx * fx + fz * fz)
 	if origin_d < SPAWN_ISLAND_RADIUS:
@@ -149,7 +155,8 @@ func _land_mask(fx: float, fz: float) -> float:
 
 	return mask
 
-func _sample_column(gx: int, gz: int) -> Vector4:
+## Heights only (w=1 solid / 0 air). No steep — used for neighbor slope without recursion.
+func _column_heights(gx: int, gz: int) -> Vector4:
 	var fx := float(gx)
 	var fz := float(gz)
 
@@ -159,63 +166,221 @@ func _sample_column(gx: int, gz: int) -> Vector4:
 		return Vector4(0.0, 0.0, 0.0, 0.0)
 
 	var footprint: float = clampf((mask_n - cutoff) / maxf(0.001, 1.0 - cutoff), 0.0, 1.0)
+	if footprint < 0.06:
+		return Vector4(0.0, 0.0, 0.0, 0.0)
 
 	var height_n: float = noise_island_2d.get_noise_2d(fx + 1703.0, fz - 911.0)
 	var size_n: float = noise_island_2d.get_noise_2d(fx - 503.0, fz + 1201.0)
 	var center_y: float = lerpf(ISLAND_Y_MIN + 6.0, ISLAND_Y_MAX - 6.0, (height_n + 1.0) * 0.5)
 	var size_k: float = lerpf(0.70, 1.35, (size_n + 1.0) * 0.5)
 
+	# Continuous style blend (plateau ↔ hills ↔ ridges) — no hard if/elif switches.
 	var style: float = noise_island_2d.get_noise_2d(fx * 0.35 + 19.0, fz * 0.35 - 7.0)
+	var style_t: float = clampf((style + 1.0) * 0.5, 0.0, 1.0)
 	var macro: float = noise_island_2d.get_noise_2d(fx * 0.55 + 12.0, fz * 0.55 - 33.0)
-	var meso: float = noise_island_2d.get_noise_2d(fx * 1.35 - 70.0, fz * 1.35 + 55.0)
-	var micro: float = noise_island.get_noise_3d(fx * 0.55, 0.0, fz * 0.55) * 0.35
-	var ridge: float = 1.0 - absf(noise_island_2d.get_noise_2d(fx * 0.85 + 200.0, fz * 0.85))
-	var valley: float = noise_island_2d.get_noise_2d(fx * 0.65 - 300.0, fz * 0.65 + 180.0)
+	var meso: float = noise_island_2d.get_noise_2d(fx * 0.95 - 70.0, fz * 0.95 + 55.0)
+	var micro: float = 0.0
+	if noise_island != null:
+		micro = noise_island.get_noise_3d(fx * 0.22, 0.0, fz * 0.22) * 0.10
+	var ridge: float = 1.0 - absf(noise_island_2d.get_noise_2d(fx * 0.55 + 200.0, fz * 0.55))
+	var valley: float = noise_island_2d.get_noise_2d(fx * 0.45 - 300.0, fz * 0.45 + 180.0)
 
-	var relief: float
-	var terraced: bool = false
-	if style < -0.35:
-		relief = macro * 1.6 + meso * 0.8 + micro
-	elif style < 0.15:
-		relief = macro * 4.5 + meso * 2.8 + micro
-	elif style < 0.45:
-		var terrace: float = floor((macro + 1.0) * 2.0) * 1.6
-		relief = 3.5 + terrace + meso * 1.0 + micro * 0.4
-		terraced = true
-	else:
-		relief = macro * 5.0 + pow(maxf(0.0, ridge), 1.6) * 12.0 + meso * 3.5 + micro
-		if valley > 0.15:
-			relief -= valley * 8.0
+	# Plateau (low style_t): broad gentle tops.
+	var plateau_relief: float = macro * 1.2 + meso * 0.30 + micro
+	# Rolling hills (mid): walkable ramps.
+	var hill_relief: float = macro * 3.0 + meso * 1.0 + micro
+	# Ridged highlands (high): mountains with valleys — no terrace quantization.
+	var ridge_relief: float = macro * 3.4 + pow(maxf(0.0, ridge), 2.0) * 5.5 + meso * 1.2 + micro
+	if valley > 0.25:
+		ridge_relief -= (valley - 0.25) * 3.0
+
+	var w_plateau: float = 1.0 - smoothstep(0.20, 0.45, style_t)
+	var w_ridge: float = smoothstep(0.55, 0.85, style_t)
+	var w_hill: float = maxf(0.0, 1.0 - w_plateau - w_ridge)
+	var w_sum: float = maxf(1e-4, w_plateau + w_hill + w_ridge)
+	w_plateau /= w_sum
+	w_hill /= w_sum
+	w_ridge /= w_sum
+
+	var relief: float = (
+		plateau_relief * w_plateau
+		+ hill_relief * w_hill
+		+ ridge_relief * w_ridge
+	)
 
 	var rim: float = smoothstep(0.0, 0.30, footprint)
-	relief *= size_k * (0.55 + rim * 0.45)
+	relief *= size_k * (0.55 + rim * 0.45) * clampf(vertical_scale / 3.5, 0.75, 1.35)
 
-	var roll: float = noise_island.get_noise_3d(fx * 0.45, center_y, fz * 0.45) * 1.6
+	var roll: float = 0.0
+	if noise_island != null:
+		roll = noise_island.get_noise_3d(fx * 0.18, center_y * 0.04, fz * 0.18) * 0.70
 	var plateau: float = (5.0 + footprint * 2.5) * size_k
 	var top_y: float = center_y + plateau + relief + roll
-	if terraced:
-		# Keep terraces as stepped plateaus (sharp lips) while hills stay smooth.
-		top_y = floor(top_y * 0.5) * 2.0 + 0.15
 
-	var belly_noise: float = noise_island.get_noise_3d(fx * 1.25, center_y - 12.0, fz * 1.25) * 3.5
-	var belly: float = (5.0 + footprint * footprint * 22.0) * size_k
+	# Soft tapered belly — low-frequency only (no underside needle / tube noise).
+	var belly_noise: float = 0.0
+	if noise_island != null:
+		belly_noise = noise_island.get_noise_3d(fx * 0.14, center_y - 12.0, fz * 0.14) * 0.40
+	var belly: float = (6.0 + footprint * footprint * 18.0) * size_k
 	var bot_y: float = center_y - belly + belly_noise
 
-	if top_y - bot_y < 2.5:
+	# Edge taper: pull underside up near weak footprint so silhouettes read solid, not hollow.
+	if footprint < 0.42:
+		var edge_lift: float = (0.42 - footprint) / 0.42
+		bot_y = lerpf(bot_y, top_y - MIN_COLUMN_THICKNESS - 1.0, edge_lift * 0.55)
+		# Keep a coherent rocky mass — avoid thin shells at the rim.
+		bot_y = minf(bot_y, top_y - MIN_COLUMN_THICKNESS)
+
+	var thickness: float = top_y - bot_y
+	if thickness < MIN_COLUMN_THICKNESS:
+		return Vector4(0.0, 0.0, 0.0, 0.0)
+	if thickness < 5.0 and footprint < 0.22:
 		return Vector4(0.0, 0.0, 0.0, 0.0)
 
-	var dx: float = _land_mask(fx + 2.0, fz) - _land_mask(fx - 2.0, fz)
-	var dz: float = _land_mask(fx, fz + 2.0) - _land_mask(fx, fz - 2.0)
-	var steep: float = clampf((absf(dx) + absf(dz)) * 2.2, 0.0, 2.0)
+	return Vector4(top_y, bot_y, center_y, 1.0)
 
-	return Vector4(top_y, bot_y, center_y, 1.0 + steep)
+func _slope_from_heights(gx: int, gz: int, top_y: float, bot_y: float) -> float:
+	## Local geometric slope from neighboring column tops — not only the footprint mask.
+	var s: int = SLOPE_SAMPLE_STEP
+	var n_e: Vector4 = _column_heights(gx + s, gz)
+	var n_w: Vector4 = _column_heights(gx - s, gz)
+	var n_n: Vector4 = _column_heights(gx, gz - s)
+	var n_s: Vector4 = _column_heights(gx, gz + s)
+
+	var top_dx := 0.0
+	var top_dz := 0.0
+	var samples := 0.0
+	if n_e.w >= 0.5 and n_w.w >= 0.5:
+		top_dx = (n_e.x - n_w.x) / float(s * 2)
+		samples += 1.0
+	elif n_e.w >= 0.5:
+		top_dx = (n_e.x - top_y) / float(s)
+		samples += 0.5
+	elif n_w.w >= 0.5:
+		top_dx = (top_y - n_w.x) / float(s)
+		samples += 0.5
+	if n_n.w >= 0.5 and n_s.w >= 0.5:
+		top_dz = (n_s.x - n_n.x) / float(s * 2)
+		samples += 1.0
+	elif n_s.w >= 0.5:
+		top_dz = (n_s.x - top_y) / float(s)
+		samples += 0.5
+	elif n_n.w >= 0.5:
+		top_dz = (top_y - n_n.x) / float(s)
+		samples += 0.5
+
+	var geom: float = 0.0
+	if samples > 0.0:
+		geom = sqrt(top_dx * top_dx + top_dz * top_dz)
+		var air_edges := 0
+		for np in [n_e, n_w, n_n, n_s]:
+			if np.w < 0.5:
+				air_edges += 1
+		if air_edges >= 1:
+			geom = maxf(geom, 0.60 + float(air_edges) * 0.28)
+		# Large neighbor height break → cliff even without air.
+		for np2 in [n_e, n_w, n_n, n_s]:
+			if np2.w >= 0.5 and absf(np2.x - top_y) > 1.0:
+				geom = maxf(geom, absf(np2.x - top_y) * 0.55)
+
+	var fx := float(gx)
+	var fz := float(gz)
+	var dx_m: float = _land_mask(fx + float(s), fz) - _land_mask(fx - float(s), fz)
+	var dz_m: float = _land_mask(fx, fz + float(s)) - _land_mask(fx, fz - float(s))
+	var mask_grad: float = (absf(dx_m) + absf(dz_m)) * 0.85
+
+	return clampf(geom * 0.90 + mask_grad * 0.40, 0.0, 2.5)
+
+func _sample_column(gx: int, gz: int) -> Vector4:
+	var heights: Vector4 = _column_heights(gx, gz)
+	if heights.w < 0.5:
+		return Vector4(0.0, 0.0, 0.0, 0.0)
+	var steep: float = _slope_from_heights(gx, gz, heights.x, heights.y)
+	return Vector4(heights.x, heights.y, heights.z, 1.0 + steep)
+
+func _refine_slope_from_neighbors(profiles: Array, width: int, depth: int, step: int) -> void:
+	var refined: Array = profiles.duplicate()
+	for z in range(depth):
+		for x in range(width):
+			var idx: int = z * width + x
+			var p: Vector4 = profiles[idx]
+			if p.w < 0.5:
+				continue
+			var top_dx := 0.0
+			var top_dz := 0.0
+			var have_x := false
+			var have_z := false
+			var air_edges := 0
+			var max_break := 0.0
+			if x > 0 and x < width - 1:
+				var pe: Vector4 = profiles[z * width + (x + 1)]
+				var pw: Vector4 = profiles[z * width + (x - 1)]
+				if pe.w < 0.5:
+					air_edges += 1
+				else:
+					max_break = maxf(max_break, absf(pe.x - p.x))
+				if pw.w < 0.5:
+					air_edges += 1
+				else:
+					max_break = maxf(max_break, absf(pw.x - p.x))
+				if pe.w >= 0.5 and pw.w >= 0.5:
+					top_dx = (pe.x - pw.x) / float(step * 2)
+					have_x = true
+			if z > 0 and z < depth - 1:
+				var ps: Vector4 = profiles[(z + 1) * width + x]
+				var pn: Vector4 = profiles[(z - 1) * width + x]
+				if ps.w < 0.5:
+					air_edges += 1
+				else:
+					max_break = maxf(max_break, absf(ps.x - p.x))
+				if pn.w < 0.5:
+					air_edges += 1
+				else:
+					max_break = maxf(max_break, absf(pn.x - p.x))
+				if ps.w >= 0.5 and pn.w >= 0.5:
+					top_dz = (ps.x - pn.x) / float(step * 2)
+					have_z = true
+			if not have_x and not have_z and air_edges == 0 and max_break <= 1.0:
+				continue
+			var geom: float = sqrt(top_dx * top_dx + top_dz * top_dz)
+			if air_edges >= 1:
+				geom = maxf(geom, 0.60 + float(air_edges) * 0.25)
+			if max_break > 1.0:
+				geom = maxf(geom, max_break * 0.55)
+			var steep: float = clampf(lerpf(p.w - 1.0, geom * 0.95, 0.70), 0.0, 2.5)
+			refined[idx] = Vector4(p.x, p.y, p.z, 1.0 + steep)
+	for i in range(profiles.size()):
+		profiles[i] = refined[i]
+
+func _cull_isolated_spikes(profiles: Array, width: int, depth: int) -> void:
+	## Drop 1-voxel twin-towers / single-column needles that read as spikes under hybrid meshing.
+	for z in range(depth):
+		for x in range(width):
+			var idx: int = z * width + x
+			var p: Vector4 = profiles[idx]
+			if p.w < 0.5:
+				continue
+			var solid_n := 0
+			var max_n_top := -1.0e9
+			for d in [Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(0, 1)]:
+				var nx: int = x + d.x
+				var nz: int = z + d.y
+				if nx < 0 or nz < 0 or nx >= width or nz >= depth:
+					continue
+				var np: Vector4 = profiles[nz * width + nx]
+				if np.w >= 0.5:
+					solid_n += 1
+					max_n_top = maxf(max_n_top, np.x)
+			if solid_n == 0:
+				profiles[idx] = Vector4(0.0, 0.0, 0.0, 0.0)
+			elif solid_n <= 1 and p.x > max_n_top + 1.6:
+				# Lone column jutting above its only neighbor — flatten/cull spike.
+				profiles[idx] = Vector4(0.0, 0.0, 0.0, 0.0)
 
 func _fill_tiny_surface_holes(
 	profiles: Array, width: int, depth: int,
 	origin_in_voxels: Vector3i, step: int
 ) -> void:
-	## Promote isolated air columns that sit inside an otherwise continuous island surface.
-	## Only fills 1x1 or 1x2 gaps; leaves real craters, caves, cliffs and inter-island voids.
 	var changed := true
 	var passes := 0
 	while changed and passes < 2:
@@ -237,7 +402,6 @@ func _fill_tiny_surface_holes(
 					var nz: int = z + d.y
 					var np: Vector4
 					if nx < 0 or nz < 0 or nx >= width or nz >= depth:
-						# Sample outside the block so edge holes still heal when surrounded in world.
 						np = _sample_column(
 							origin_in_voxels.x + nx * step,
 							origin_in_voxels.z + nz * step
@@ -250,17 +414,13 @@ func _fill_tiny_surface_holes(
 						avg_bot += np.y
 						avg_cen += np.z
 						avg_steep += np.w - 1.0
-
-				# 1x1 hole: all 4 neighbors solid. 1x2 hole: 3 neighbors solid.
 				if solid_n < 3:
 					continue
-
 				avg_top /= float(solid_n)
 				avg_bot /= float(solid_n)
 				avg_cen /= float(solid_n)
 				avg_steep /= float(solid_n)
-				# Reject fills that would bridge distant islands / large height breaks.
-				if avg_top - avg_bot < 2.5:
+				if avg_top - avg_bot < MIN_COLUMN_THICKNESS:
 					continue
 				var height_spread := 0.0
 				for d2 in [Vector2i(-1, 0), Vector2i(1, 0), Vector2i(0, -1), Vector2i(0, 1)]:
@@ -281,79 +441,25 @@ func _fill_tiny_surface_holes(
 				profiles[idx] = Vector4(avg_top, avg_bot, avg_cen, 1.0 + avg_steep)
 				changed = true
 
-func _eval_sdf(
-	gx: int, gy: int, gz: int,
-	top_y: float, bot_y: float, center_y: float, steep: float
-) -> float:
-	## Hybrid SDF: continuous gradients on gentle tops/ramps; quantized + saturated
-	## fields on cliffs and undersides so Transvoxel yields stepped / angular faces
-	## instead of a single melted blob.
-	var fy: float = float(gy)
-	var fx := float(gx)
-	var fz := float(gz)
-	var cutoff: float = density_threshold if density_threshold > 0.0 else MASK_CUTOFF
-	var mask_n: float = _land_mask(fx, fz)
-	var footprint: float = clampf((mask_n - cutoff) / maxf(0.001, 1.0 - cutoff), 0.0, 1.0)
-
-	var from_top: float = top_y - fy
-	var from_bot: float = fy - bot_y
-	var cliff_w: float = clampf((steep - 0.35) / 1.1, 0.0, 1.0)
-	if (top_y - center_y) > 20.0:
-		cliff_w = maxf(cliff_w, 0.55)
-	# Near the top of a gentle column → prefer smooth; cliffs / belly → blocky.
-	var top_smooth_w: float = 1.0 - clampf(cliff_w, 0.0, 1.0)
-	top_smooth_w *= smoothstep(3.2, 0.0, absf(from_top))
-	top_smooth_w *= smoothstep(0.08, 0.28, footprint)
-	var bot_block_w: float = smoothstep(6.0, 1.5, from_bot)
-	var blockiness: float = clampf(maxf(cliff_w, bot_block_w) - top_smooth_w * 0.85, 0.0, 1.0)
-
-	# --- Smooth shell (walkable tops + natural ramps) ---
-	var sd_smooth: float = maxf(fy - top_y, bot_y - fy)
-	# Positive edge only carves air at the rim. Negative edge must not flatten core SDF.
-	var edge_soft: float = (0.18 - footprint) * lerpf(2.4, 3.8, 1.0 - cliff_w)
-	if edge_soft > 0.0:
-		sd_smooth = maxf(sd_smooth, edge_soft)
-
-	# --- Blocky / terraced shell (cliffs + angular underside) ---
-	var terrace: float = 1.0 if cliff_w > 0.55 else 2.0
-	var q_top: float = floor(top_y / terrace) * terrace + (terrace - 0.05)
-	var jagged: float = 0.0
-	if noise_island != null:
-		jagged = floor((noise_island.get_noise_3d(fx * 1.1, bot_y, fz * 1.1) + 1.0) * 2.0) * 0.5
-	var q_bot: float = ceil(bot_y - 0.001) - 0.02 - jagged * bot_block_w
-	var sd_blocky: float = maxf(fy - q_top, q_bot - fy)
-	var edge_hard: float = (0.12 - footprint) * lerpf(3.8, 6.5, cliff_w)
-	if edge_hard > 0.0:
-		sd_blocky = maxf(sd_blocky, edge_hard)
-	# Stratified mid-cliff steps (visible dirt/stone shelves).
-	if cliff_w > 0.45 and from_top > 1.5 and from_bot > 2.5 and footprint > 0.18:
-		var shelf: float = (absf(fmod(from_top, 2.0) - 1.0) - 0.85) * 0.35 * cliff_w
-		sd_blocky = maxf(sd_blocky, shelf)
-
-	var sd: float = lerpf(sd_smooth, sd_blocky, blockiness)
-
-	# Cave carving (air SDF union) — keep after blend so caves cut both styles.
-	if from_top > 4.0 and from_bot > 5.0 and noise_island != null:
-		var cave_n: float = noise_island.get_noise_3d(fx * 0.85, fy * 0.85, fz * 0.85)
-		if cave_n > CAVE_THRESHOLD:
-			sd = maxf(sd, (cave_n - CAVE_THRESHOLD) * 8.0)
-
-	# Blocky regions: saturate away from the isosurface so Transvoxel facets
-	# (cliffs / underside) instead of rounding into melted blobs.
-	if blockiness > 0.28:
-		if sd < 0.0:
-			sd = minf(sd * lerpf(1.15, 2.8, blockiness), -0.7)
-		else:
-			sd = maxf(sd * lerpf(1.15, 2.8, blockiness), 0.7)
-
-	return clampf(sd, -SDF_CLAMP, SDF_CLAMP)
+func _eval_sdf_discrete(gy: int, top_y: float, bot_y: float, block_id: int) -> float:
+	## Simple solid/air SDF for VoxelTool raycasts — not used for Transvoxel meshing.
+	if block_id == BLOCK_AIR:
+		var fy: float = float(gy) + 0.5
+		var outside: float = maxf(fy - top_y, bot_y - fy)
+		return clampf(maxf(outside, 0.5), 0.5, SDF_CLAMP)
+	var fy2: float = float(gy) + 0.5
+	var from_top: float = top_y - fy2
+	var from_bot: float = fy2 - bot_y
+	var inside: float = -minf(from_top, from_bot)
+	return clampf(minf(inside, -0.5), -SDF_CLAMP, -0.5)
 
 func _eval_in_column(
 	gx: int, gy: int, gz: int,
 	top_y: float, bot_y: float, center_y: float, steep: float
 ) -> int:
 	var fy: float = float(gy)
-	if fy > top_y or fy < bot_y:
+	# Discrete occupancy: solid for gy in [floor(bot), floor(top)].
+	if fy > floor(top_y) or fy < floor(bot_y):
 		return BLOCK_AIR
 	if _is_cave(gx, gy, gz, fy, top_y, bot_y):
 		return BLOCK_AIR
@@ -366,28 +472,34 @@ func _eval_in_column(
 	var cutoff: float = density_threshold if density_threshold > 0.0 else MASK_CUTOFF
 	var mask_n: float = _land_mask(fx, fz)
 	var footprint: float = clampf((mask_n - cutoff) / maxf(0.001, 1.0 - cutoff), 0.0, 1.0)
-	var near_edge: bool = footprint < 0.42
+	var near_edge: bool = footprint < 0.40
+	var cliffish: bool = steep >= CLIFF_SLOPE or (steep > 0.70 and near_edge)
 
-	# Grass only on true upper surface of gentle / walkable tops.
-	if depth < 1.0 and steep < 1.25 and not (steep > 1.05 and near_edge):
+	# Grass on gentle walkable tops only.
+	if depth < 1.0 and steep < CLIFF_SLOPE and not cliffish:
 		return BLOCK_GRASS
 
-	# Brown dirt mantle under grass and across most cliff faces (not the whole core).
-	var dirt_band: float = float(DIRT_DEPTH) + 0.5
-	if steep > 0.55 or near_edge:
+	# Dirt mantle under grass and across cliff faces.
+	var dirt_band: float = float(DIRT_DEPTH) + 1.0
+	if cliffish or near_edge:
 		dirt_band += DIRT_CLIFF_EXTRA
-	if depth < dirt_band and from_bot > 2.0:
+	if depth < dirt_band and from_bot > 1.5:
 		return BLOCK_DIRT
-	# Outer cliff shell stays dirt-brown rather than uniform stone.
-	if near_edge and depth < minf(thickness * 0.55, dirt_band + 3.0) and from_bot > 3.0:
+	if near_edge and depth < minf(thickness * 0.65, dirt_band + 4.0) and from_bot > 2.0:
 		return BLOCK_DIRT
+
+	# Stone on deep undersides and the steepest rocky faces past the dirt shell.
+	var underside: bool = from_bot < 3.0 or depth > thickness * 0.75
+	if cliffish and steep > 1.35 and depth > dirt_band + 0.5:
+		return BLOCK_STONE
+	if underside and depth > dirt_band:
+		return BLOCK_STONE
 
 	if noise_ore != null and depth > 4.0:
 		var ore_id: int = _eval_ore(gx, gy, gz, depth)
 		if ore_id != BLOCK_AIR:
 			return ore_id
 
-	# Selective stone exposure: deep underside tip + very steep rocky outcrops / core.
 	return BLOCK_STONE
 
 func _eval_ore(gx: int, gy: int, gz: int, depth: float) -> int:
