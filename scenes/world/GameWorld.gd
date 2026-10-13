@@ -135,26 +135,37 @@ func _spawn_player_on_terrain() -> void:
 	if voxel_world.has_method("attach_viewer_to_player"):
 		voxel_world.attach_viewer_to_player(player)
 
+	var loaded_ok: bool = false
 	if voxel_world.has_method("wait_for_terrain_at"):
-		await voxel_world.wait_for_terrain_at(Vector3(0.5, 56.0, 0.5))
+		loaded_ok = await voxel_world.wait_for_terrain_at(Vector3(0.5, 56.0, 0.5))
 	else:
 		await voxel_world.force_sync_spawn_chunks(0, 0)
-
-	await get_tree().physics_frame
-	await get_tree().physics_frame
+		loaded_ok = true
 
 	var safe_spawn := Vector3.ZERO
-	if voxel_world.has_method("try_find_safe_spawn"):
-		safe_spawn = await voxel_world.try_find_safe_spawn(24, player)
-	elif voxel_world.has_method("get_spawn_position_raycast"):
-		safe_spawn = voxel_world.get_spawn_position_raycast(0.5, 0.5)
+	if loaded_ok:
+		await get_tree().physics_frame
+		await get_tree().physics_frame
+		if voxel_world.has_method("try_find_safe_spawn"):
+			safe_spawn = await voxel_world.try_find_safe_spawn(24, player)
+		elif voxel_world.has_method("get_spawn_position_raycast"):
+			safe_spawn = voxel_world.get_spawn_position_raycast(0.5, 0.5)
 
-	if safe_spawn == Vector3.ZERO and voxel_world.has_method("get_spawn_position"):
-		safe_spawn = voxel_world.get_spawn_position(0, 0)
+	var verified: bool = false
+	if safe_spawn != Vector3.ZERO:
+		if voxel_world.has_method("verify_spawn_physics"):
+			verified = voxel_world.verify_spawn_physics(safe_spawn)
+		else:
+			verified = true
 
-	if safe_spawn == Vector3.ZERO:
-		safe_spawn = Vector3(0.5, 56.0, 0.5)
+	if not loaded_ok or safe_spawn == Vector3.ZERO or not verified:
+		if build_hud != null and build_hud.has_method("set_loading_overlay"):
+			build_hud.set_loading_overlay(true, "Terrain load failed — press Home to retry")
+		if player.has_method("suspend_physics"):
+			player.suspend_physics()
+		return
 
+	# Confirmed valid spawn surface and collision!
 	if player.has_method("resume_at_spawn"):
 		player.resume_at_spawn(safe_spawn)
 	else:

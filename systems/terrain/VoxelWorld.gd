@@ -173,12 +173,8 @@ func _build_terrain_texture_array() -> Texture2DArray:
 	return arr
 
 func _build_terrain() -> void:
-	_uses_lod_terrain = ClassDB.class_exists("VoxelLodTerrain")
-	if _uses_lod_terrain:
-		_terrain = ClassDB.instantiate("VoxelLodTerrain")
-	else:
-		_terrain = VoxelTerrain.new()
-	# Keep legacy node name so PlayerController / tools keep finding the terrain.
+	_uses_lod_terrain = false
+	_terrain = VoxelTerrain.new()
 	_terrain.name = "VoxelTerrain"
 
 	# TEXTURES_SINGLE_S4 needs 8-bit indices.
@@ -194,15 +190,9 @@ func _build_terrain() -> void:
 		# TEXTURES_SINGLE_S4 = 2 — pairs with terrain_transvoxel.gdshader + CHANNEL_INDICES.
 		mesher.texturing_mode = 2
 	if "transitions_enabled" in mesher:
-		# LOD seams need transition meshes; flat VoxelTerrain does not.
-		mesher.transitions_enabled = _uses_lod_terrain
-	_terrain.set("mesher", mesher)
-
-	var mat := _build_terrain_material()
-	if _uses_lod_terrain and _terrain.has_method("set_material"):
-		_terrain.call("set_material", mat)
-	elif "material_override" in _terrain:
-		_terrain.material_override = mat
+		mesher.transitions_enabled = false
+	_terrain.mesher = mesher
+	_terrain.material_override = _build_terrain_material()
 
 	_island_gen = _IslandGeneratorScript.new()
 	_island_gen.noise_island = _noise_3d
@@ -210,41 +200,22 @@ func _build_terrain() -> void:
 	_island_gen.noise_ore = _noise_ore
 	_island_gen.density_threshold = island_density_threshold
 	_island_gen.vertical_scale = island_vertical_scale
-	_terrain.set("generator", _island_gen)
+	_terrain.generator = _island_gen
 
-	_terrain.set("generate_collisions", true)
-	_terrain.set("collision_layer", 1)
-	_terrain.set("collision_mask", 1)
-	if "mesh_block_size" in _terrain:
-		_terrain.set("mesh_block_size", 16)
+	_terrain.generate_collisions = true
+	_terrain.collision_layer = 1
+	_terrain.collision_mask = 1
+	_terrain.mesh_block_size = 16
+	_terrain.automatic_loading_enabled = true
+	_terrain.block_enter_notification_enabled = true
 
-	# Vertical volume clamped to the floating-island band.
 	var y0: float = ISLAND_Y_MIN - 40.0
 	var y_size: float = (ISLAND_Y_MAX - ISLAND_Y_MIN) + 80.0
-	var volume := AABB(Vector3(-500000.0, y0, -500000.0), Vector3(1000000.0, y_size, 1000000.0))
-	if _uses_lod_terrain:
-		_terrain.set("voxel_bounds", volume)
-		_terrain.set("lod_count", 7)
-		_terrain.set("lod_distance", 64.0)
-		if "secondary_lod_distance" in _terrain:
-			_terrain.set("secondary_lod_distance", 64.0)
-		# Only full-detail LOD rings get collision meshes.
-		_terrain.set("collision_lod_count", 1)
-		if "streaming_system" in _terrain:
-			# STREAMING_SYSTEM_CLIPBOX = 1
-			_terrain.set("streaming_system", 1)
-	else:
-		if "bounds" in _terrain:
-			_terrain.set("bounds", volume)
-		if "automatic_loading_enabled" in _terrain:
-			_terrain.set("automatic_loading_enabled", true)
-		if "block_enter_notification_enabled" in _terrain:
-			_terrain.set("block_enter_notification_enabled", true)
+	_terrain.bounds = AABB(Vector3(-500000.0, y0, -500000.0), Vector3(1000000.0, y_size, 1000000.0))
 
 	if _terrain.has_signal("mesh_block_entered"):
-		_terrain.connect("mesh_block_entered", _on_mesh_block_entered)
+		_terrain.mesh_block_entered.connect(_on_mesh_block_entered)
 
-	_backend_view_limit_voxels = _view_chunks_ceiling() * 16
 	_sync_view_distance()
 	add_child(_terrain)
 
@@ -427,22 +398,25 @@ func _viewer_near_enough(world_pos: Vector3) -> bool:
 	var vp: Vector3 = _viewer.global_position if _viewer.is_inside_tree() else Vector3.ZERO
 	return vp.distance_to(world_pos) < float(_effective_view_distance())
 
-func wait_for_terrain_at(world_pos: Vector3) -> void:
+func wait_for_terrain_at(world_pos: Vector3) -> bool:
 	if not is_inside_tree() or _terrain == null:
-		return
+		return false
 	if is_collision_ready_at(world_pos):
-		await get_tree().process_frame
-		return
-	var max_wait_cycles := 480
+		_apply_persisted_deltas()
+		spawn_chunks_ready.emit()
+		return true
+	var max_wait_cycles := 240
 	var cycles := 0
 	while not is_collision_ready_at(world_pos) and cycles < max_wait_cycles:
 		cycles += 1
 		await get_tree().process_frame
-	_apply_persisted_deltas()
-	await get_tree().physics_frame
-	await get_tree().process_frame
 	if is_collision_ready_at(world_pos):
+		_apply_persisted_deltas()
+		await get_tree().physics_frame
+		await get_tree().process_frame
 		spawn_chunks_ready.emit()
+		return true
+	return false
 
 func force_sync_spawn_chunks(cx: int = 0, cz: int = 0) -> void:
 	if not is_inside_tree():
@@ -504,12 +478,18 @@ func _feet_from_surface_hit(x: float, z: float, hit_y: float) -> Vector3:
 
 func verify_spawn_physics(candidate_pos: Vector3, exclude_rids: Array[RID] = []) -> bool:
 	if not is_inside_tree():
-		return true
+		return false
 	var space := get_world_3d().direct_space_state if get_world_3d() != null else null
 	if space == null:
-		return true
+		return false
 
-	# Check player capsule clearance (ensure no intersecting solid walls/blocks)
+	var ground := _raycast_top_surface(candidate_pos.x, candidate_pos.z)
+	if ground.is_empty():
+		return false
+	var ground_y: float = ground.position.y
+	if absf(candidate_pos.y - (ground_y + SPAWN_FEET_CLEARANCE)) > 0.35:
+		return false
+
 	var capsule := CapsuleShape3D.new()
 	capsule.radius = SPAWN_CAPSULE_RADIUS
 	capsule.height = SPAWN_CAPSULE_HEIGHT
@@ -520,15 +500,7 @@ func verify_spawn_physics(candidate_pos: Vector3, exclude_rids: Array[RID] = [])
 	query.exclude = exclude_rids
 	query.margin = 0.01
 	var overlaps := space.intersect_shape(query, 1)
-	if not overlaps.is_empty():
-		return false
-
-	var ground := _raycast_top_surface(candidate_pos.x, candidate_pos.z)
-	if not ground.is_empty():
-		var ground_y: float = ground.position.y
-		if absf(candidate_pos.y - (ground_y + SPAWN_FEET_CLEARANCE)) > 1.5:
-			return false
-	return true
+	return overlaps.is_empty()
 
 func get_spawn_position_raycast(x: float = 0.5, z: float = 0.5) -> Vector3:
 	var hit := _raycast_top_surface(x, z)
@@ -538,8 +510,9 @@ func get_spawn_position_raycast(x: float = 0.5, z: float = 0.5) -> Vector3:
 			return feet
 	return Vector3.ZERO
 
-func try_find_safe_spawn(max_radius: int = 8, carrier: Node3D = null) -> Vector3:
-	## Fast non-blocking search for starter-island top-surface spawn (< 1ms).
+func try_find_safe_spawn(max_radius: int = 16, carrier: Node3D = null) -> Vector3:
+	## Search starter-island columns for a validated top-surface spawn with real collision.
+	## Returns Vector3.ZERO if no confirmed physics surface exists.
 	var spawn_x := 0.5
 	var spawn_z := 0.5
 	if carrier != null:
@@ -549,7 +522,7 @@ func try_find_safe_spawn(max_radius: int = 8, carrier: Node3D = null) -> Vector3
 		if _viewer_collision != null and _viewer_collision.is_inside_tree():
 			_viewer_collision.global_position = Vector3(spawn_x, 56.0, spawn_z)
 
-	var search_limit := clampi(max_radius, 1, 8)
+	var search_limit := clampi(max_radius, 1, 24)
 	var origins: Array[Vector2i] = [Vector2i(0, 0)]
 	for radius in range(1, search_limit + 1):
 		for dx in range(-radius, radius + 1):
@@ -558,27 +531,19 @@ func try_find_safe_spawn(max_radius: int = 8, carrier: Node3D = null) -> Vector3
 					continue
 				origins.append(Vector2i(dx, dz))
 
-	# Phase 1: Check 3D physics raycast surface hit on nearby columns (up to 3 frames wait)
-	for attempt in range(3):
+	# Poll up to 120 frames (~2 seconds) for physics collisions to mesh around spawn origin
+	var wait_cycles := 0
+	while wait_cycles < 120:
 		for col in origins:
 			var x: float = float(col.x) + 0.5
 			var z: float = float(col.y) + 0.5
 			var feet := get_spawn_position_raycast(x, z)
 			if feet != Vector3.ZERO and verify_spawn_physics(feet):
 				return feet
-		await get_tree().physics_frame
+		wait_cycles += 1
+		await get_tree().process_frame
 
-	# Phase 2: Instant procedural fallback based on noise height profile
-	for col in origins:
-		var x: float = float(col.x) + 0.5
-		var z: float = float(col.y) + 0.5
-		var top_y := get_highest_solid_y(col.x, col.y)
-		if top_y >= 0:
-			var candidate := Vector3(x, float(top_y) + 1.0 + SPAWN_FEET_CLEARANCE, z)
-			if verify_spawn_physics(candidate):
-				return candidate
-
-	return Vector3(0.5, 56.0, 0.5)
+	return Vector3.ZERO
 
 func get_spawn_position(x: int = 0, z: int = 0) -> Vector3:
 	## Synchronous best-effort (tests / presets). Gameplay spawn uses try_find_safe_spawn().
