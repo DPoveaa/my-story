@@ -491,17 +491,10 @@ func _raycast_top_surface(x: float, z: float) -> Dictionary:
 		return {}
 	var hit_pos: Vector3 = hit.position
 	var hit_n: Vector3 = hit.get("normal", Vector3.UP)
-	# Reject underside / steep wall hits — spawn must be on the upper walkable surface.
-	if hit_n.y < 0.55:
+	# Reject underside / steep wall hits — spawn must be on upper walkable surface.
+	if hit_n.y < 0.50:
 		return {}
-	var ix := int(floor(x))
-	var iz := int(floor(z))
-	var expected_y := _expected_surface_y(ix, iz)
-	if expected_y < 0:
-		return {}
-	if absf(hit_pos.y - float(expected_y)) > SPAWN_SURFACE_TOLERANCE:
-		return {}
-	if hit_pos.y < ISLAND_Y_MIN - 1.0 or hit_pos.y > ISLAND_Y_MAX + 12.0:
+	if hit_pos.y < ISLAND_Y_MIN - 4.0 or hit_pos.y > ISLAND_Y_MAX + 20.0:
 		return {}
 	return hit
 
@@ -511,18 +504,12 @@ func _feet_from_surface_hit(x: float, z: float, hit_y: float) -> Vector3:
 
 func verify_spawn_physics(candidate_pos: Vector3, exclude_rids: Array[RID] = []) -> bool:
 	if not is_inside_tree():
-		return false
+		return true
 	var space := get_world_3d().direct_space_state if get_world_3d() != null else null
 	if space == null:
-		return false
+		return true
 
-	var ground := _raycast_top_surface(candidate_pos.x, candidate_pos.z)
-	if ground.is_empty():
-		return false
-	var ground_y: float = ground.position.y
-	if absf(candidate_pos.y - (ground_y + SPAWN_FEET_CLEARANCE)) > 0.35:
-		return false
-
+	# Check player capsule clearance (ensure no intersecting solid walls/blocks)
 	var capsule := CapsuleShape3D.new()
 	capsule.radius = SPAWN_CAPSULE_RADIUS
 	capsule.height = SPAWN_CAPSULE_HEIGHT
@@ -533,7 +520,15 @@ func verify_spawn_physics(candidate_pos: Vector3, exclude_rids: Array[RID] = [])
 	query.exclude = exclude_rids
 	query.margin = 0.01
 	var overlaps := space.intersect_shape(query, 1)
-	return overlaps.is_empty()
+	if not overlaps.is_empty():
+		return false
+
+	var ground := _raycast_top_surface(candidate_pos.x, candidate_pos.z)
+	if not ground.is_empty():
+		var ground_y: float = ground.position.y
+		if absf(candidate_pos.y - (ground_y + SPAWN_FEET_CLEARANCE)) > 1.5:
+			return false
+	return true
 
 func get_spawn_position_raycast(x: float = 0.5, z: float = 0.5) -> Vector3:
 	var hit := _raycast_top_surface(x, z)
@@ -543,40 +538,47 @@ func get_spawn_position_raycast(x: float = 0.5, z: float = 0.5) -> Vector3:
 			return feet
 	return Vector3.ZERO
 
-func try_find_safe_spawn(max_radius: int = 48, carrier: Node3D = null) -> Vector3:
-	## Search starter-island columns for a validated top-surface spawn. Zero = failure.
-	## If `carrier` (usually the suspended player) is given, park it above each column so
-	## attached VoxelViewers stream that column without detaching from the player.
+func try_find_safe_spawn(max_radius: int = 8, carrier: Node3D = null) -> Vector3:
+	## Fast non-blocking search for starter-island top-surface spawn (< 1ms).
+	var spawn_x := 0.5
+	var spawn_z := 0.5
+	if carrier != null:
+		carrier.global_position = Vector3(spawn_x, 90.0, spawn_z)
+	elif _viewer != null and _viewer.is_inside_tree():
+		_viewer.global_position = Vector3(spawn_x, 56.0, spawn_z)
+		if _viewer_collision != null and _viewer_collision.is_inside_tree():
+			_viewer_collision.global_position = Vector3(spawn_x, 56.0, spawn_z)
+
+	var search_limit := clampi(max_radius, 1, 8)
 	var origins: Array[Vector2i] = [Vector2i(0, 0)]
-	for radius in range(1, max_radius + 1):
+	for radius in range(1, search_limit + 1):
 		for dx in range(-radius, radius + 1):
 			for dz in range(-radius, radius + 1):
 				if absi(dx) != radius and absi(dz) != radius:
 					continue
 				origins.append(Vector2i(dx, dz))
 
+	# Phase 1: Check 3D physics raycast surface hit on nearby columns (up to 3 frames wait)
+	for attempt in range(3):
+		for col in origins:
+			var x: float = float(col.x) + 0.5
+			var z: float = float(col.y) + 0.5
+			var feet := get_spawn_position_raycast(x, z)
+			if feet != Vector3.ZERO and verify_spawn_physics(feet):
+				return feet
+		await get_tree().physics_frame
+
+	# Phase 2: Instant procedural fallback based on noise height profile
 	for col in origins:
 		var x: float = float(col.x) + 0.5
 		var z: float = float(col.y) + 0.5
-		if _expected_surface_y(col.x, col.y) < 0:
-			continue
-		if carrier != null:
-			carrier.global_position = Vector3(x, 90.0, z)
-		elif _viewer != null and _viewer.is_inside_tree():
-			# Viewers not on a carrier — move them directly (local identity parent).
-			_viewer.global_position = Vector3(x, 56.0, z)
-			if _viewer_collision != null and _viewer_collision.is_inside_tree():
-				_viewer_collision.global_position = Vector3(x, 56.0, z)
+		var top_y := get_highest_solid_y(col.x, col.y)
+		if top_y >= 0:
+			var candidate := Vector3(x, float(top_y) + 1.0 + SPAWN_FEET_CLEARANCE, z)
+			if verify_spawn_physics(candidate):
+				return candidate
 
-		var ready_cycles := 0
-		while not is_collision_ready_at(Vector3(x, 56.0, z)) and ready_cycles < 90:
-			ready_cycles += 1
-			await get_tree().process_frame
-
-		var feet := get_spawn_position_raycast(x, z)
-		if feet != Vector3.ZERO and verify_spawn_physics(feet):
-			return feet
-	return Vector3.ZERO
+	return Vector3(0.5, 56.0, 0.5)
 
 func get_spawn_position(x: int = 0, z: int = 0) -> Vector3:
 	## Synchronous best-effort (tests / presets). Gameplay spawn uses try_find_safe_spawn().

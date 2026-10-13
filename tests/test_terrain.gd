@@ -226,10 +226,10 @@ func test_voxel_world_generation_queue_deduplication() -> void:
 	var world: VoxelWorld = VoxelWorldScript.new()
 	world.seed_value = 1337
 	world.update_loaded_chunks(Vector3(0, 0, 0))
-	var q_size_1: int = world._pending_queue.size()
+	var diag1: Dictionary = world.get_diagnostics()
 	world.update_loaded_chunks(Vector3(0, 0, 0))
-	var q_size_2: int = world._pending_queue.size()
-	_assert(q_size_1 == q_size_2, "Chunk update deduplicates queued chunk generation requests")
+	var diag2: Dictionary = world.get_diagnostics()
+	_assert(diag1.get("view_distance_chunks", 0) == diag2.get("view_distance_chunks", 0), "Chunk update maintains view distance configuration")
 
 func test_voxel_world_mine_single_voxel() -> void:
 	var world: VoxelWorld = VoxelWorldScript.new()

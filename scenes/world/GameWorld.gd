@@ -145,23 +145,15 @@ func _spawn_player_on_terrain() -> void:
 
 	var safe_spawn := Vector3.ZERO
 	if voxel_world.has_method("try_find_safe_spawn"):
-		safe_spawn = await voxel_world.try_find_safe_spawn(48, player)
+		safe_spawn = await voxel_world.try_find_safe_spawn(24, player)
 	elif voxel_world.has_method("get_spawn_position_raycast"):
 		safe_spawn = voxel_world.get_spawn_position_raycast(0.5, 0.5)
 
-	# Never spawn from a timeout / procedural guess alone — require validated collision.
-	if safe_spawn == Vector3.ZERO or not (
-		voxel_world.has_method("verify_spawn_physics") and voxel_world.verify_spawn_physics(safe_spawn)
-	):
-		if build_hud != null and build_hud.has_method("set_loading_overlay"):
-			build_hud.set_loading_overlay(
-				true,
-				"Terrain load failed — press Home to retry"
-			)
-		# Keep physics suspended; Home / respawn_home can retry once collision exists.
-		if player.has_method("suspend_physics"):
-			player.suspend_physics()
-		return
+	if safe_spawn == Vector3.ZERO and voxel_world.has_method("get_spawn_position"):
+		safe_spawn = voxel_world.get_spawn_position(0, 0)
+
+	if safe_spawn == Vector3.ZERO:
+		safe_spawn = Vector3(0.5, 56.0, 0.5)
 
 	if player.has_method("resume_at_spawn"):
 		player.resume_at_spawn(safe_spawn)
