@@ -25,7 +25,11 @@ func _ready() -> void:
 	visible = false
 
 ## Updates the position and visual state of the single-block preview ghost.
+## Only valid placement targets show the green cube; invalid/terrain callers must hide.
 func update_preview(cell: Vector3i, is_valid: bool, cell_size: float = 1.0) -> void:
+	if not is_valid:
+		hide_preview()
+		return
 	if _mesh_instance != null and _mesh_instance.mesh is BoxMesh:
 		(_mesh_instance.mesh as BoxMesh).size = Vector3.ONE * (cell_size * 1.02)
 	var world_center := Vector3(
@@ -34,7 +38,7 @@ func update_preview(cell: Vector3i, is_valid: bool, cell_size: float = 1.0) -> v
 		(float(cell.z) + 0.5) * cell_size
 	)
 	global_position = world_center
-	_material.albedo_color = valid_color if is_valid else invalid_color
+	_material.albedo_color = valid_color
 	visible = true
 
 ## Updates the position and visual bounding box preview for area selection.

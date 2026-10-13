@@ -237,9 +237,17 @@ func resume_at_spawn(spawn_pos: Vector3) -> void:
 	set_state(State.BODY_CONTROL)
 
 ## Respawn at the last resolved safe spawn; keeps inventory and buildings.
+## If initial spawn never completed, retry safe terrain placement via GameWorld.
 func respawn_home() -> void:
 	if debris_grabber != null and debris_grabber.is_grabbing:
 		debris_grabber.release()
+	if not _is_spawned:
+		var world := get_parent()
+		if world != null and world.has_method("_spawn_player_on_terrain"):
+			if has_method("suspend_physics"):
+				suspend_physics()
+			world.call_deferred("_spawn_player_on_terrain")
+		return
 	global_position = _resolved_spawn
 	velocity = Vector3.ZERO
 	_yaw = 0.0
@@ -1362,19 +1370,42 @@ func _update_raycast() -> void:
 			target_face_changed.emit(false, Vector3i.ZERO, Vector3i.ZERO, "")
 
 	else:
+		# Non-StaticBody hit (e.g. engine terrain collider) — classify natural terrain.
 		target_is_debris = false
 		target_debris_island = null
 		target_debris_cell = null
 		target_place_cell = grid.world_to_cell(hit_pos + hit_normal * (grid.cell_size * 0.5))
-		target_remove_cell = grid.world_to_cell(hit_pos - hit_normal * (grid.cell_size * 0.5))
-
-		var grid_valid: bool = grid.can_place_block(target_place_cell)
-		var blocked_by_debris: bool = false
-		if orchestrator != null:
-			blocked_by_debris = orchestrator.is_cell_blocked_by_debris(target_place_cell, grid.cell_size)
-		var overlaps_player: bool = is_cell_overlapping_player(target_place_cell, grid.cell_size)
-
-		can_place_target = grid_valid and not blocked_by_debris and not overlaps_player
+		var interior_pt := hit_pos - hit_normal * 0.05
+		target_remove_cell = Vector3i(
+			int(floor(interior_pt.x)),
+			int(floor(interior_pt.y)),
+			int(floor(interior_pt.z))
+		)
+		target_face_dir = _normal_to_cell_offset(hit_normal)
+		var vox_world2 := _get_voxel_world()
+		if vox_world2 != null and vox_world2.has_method("is_solid_block") \
+		and vox_world2.is_solid_block(target_remove_cell):
+			target_is_terrain = true
+			target_terrain_cell = target_remove_cell
+			target_terrain_type = vox_world2.get_voxel_at(target_remove_cell)
+			can_place_target = false
+			var mat_disp2 := BlockTypeCatalog.get_display_name(target_terrain_type)
+			target_face_status = "Natural %s (Hold RMB: Mine)" % mat_disp2
+			if build_hud != null and build_hud.has_method("set_mining_progress"):
+				build_hud.set_mining_progress(true, mat_disp2, 0)
+			_update_terrain_target_visuals(target_terrain_cell, 0.0)
+			target_face_changed.emit(true, target_remove_cell, target_face_dir, target_face_status)
+		else:
+			target_is_terrain = false
+			var grid_valid: bool = grid.can_place_block(target_place_cell)
+			var blocked_by_debris: bool = false
+			if orchestrator != null:
+				blocked_by_debris = orchestrator.is_cell_blocked_by_debris(target_place_cell, grid.cell_size)
+			var overlaps_player: bool = is_cell_overlapping_player(target_place_cell, grid.cell_size)
+			var blocked_by_terrain2: bool = false
+			if vox_world2 != null and vox_world2.has_method("is_solid_block"):
+				blocked_by_terrain2 = vox_world2.is_solid_block(target_place_cell)
+			can_place_target = grid_valid and not blocked_by_debris and not overlaps_player and not blocked_by_terrain2
 
 	if preview_ghost != null:
 		if area_selection_step == AreaSelectionStep.CORNER_2:

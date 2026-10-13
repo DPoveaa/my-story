@@ -1,9 +1,10 @@
 class_name VoxelWorld
 extends Node3D
 
-## VoxelWorld — Zylann VoxelTerrain + VoxelMesherTransvoxel (SDF smooth geometry).
+## VoxelWorld — Zylann VoxelLodTerrain + VoxelMesherTransvoxel (hybrid SDF).
 ## CHANNEL_SDF drives mesh/collision; CHANNEL_TYPE holds mineable IDs; CHANNEL_INDICES textures.
-## Dual VoxelViewers: nearby collisions + full-range visuals. Player-built grid stays separate.
+## LOD enables far visuals without full-detail geometry; dual viewers keep collisions nearby.
+## Player-built grid stays separate from natural terrain.
 
 const BLOCK_AIR:   int = 0
 const BLOCK_GRASS: int = 1
@@ -22,13 +23,21 @@ const SPAWN_SYNC_RADIUS: int = 2
 const SDF_AIR: float = 3.5
 ## Nearby collision radius in chunks (visuals use full view_distance_chunks).
 const COLLISION_VIEW_CHUNKS: int = 6
+## Capsule used for spawn clearance (matches PlayerController defaults).
+const SPAWN_CAPSULE_RADIUS: float = 0.4
+const SPAWN_CAPSULE_HEIGHT: float = 1.8
+const SPAWN_FEET_CLEARANCE: float = 0.08
+const SPAWN_SURFACE_TOLERANCE: float = 4.0
 
 signal voxel_mined(world_cell: Vector3i, block_type: StringName)
 signal spawn_chunks_ready
 signal view_distance_changed(voxels: int, chunks: int)
 
-const VIEW_DIST_CHUNKS_MIN: int = 16
-const VIEW_DIST_CHUNKS_MAX: int = 32
+const VIEW_DIST_CHUNKS_MIN: int = 8
+## LOD backend practical ceiling (chunks). Far rings use lower detail — not full mesh/collision.
+const VIEW_DIST_CHUNKS_MAX_LOD: int = 160
+## Non-LOD VoxelTerrain fallback ceiling if LOD is unavailable in the build.
+const VIEW_DIST_CHUNKS_MAX_FLAT: int = 32
 
 @export var seed_value: int = 1337:
 	set(val):
@@ -37,7 +46,7 @@ const VIEW_DIST_CHUNKS_MAX: int = 32
 
 @export var view_distance_chunks: int = 20:
 	set(val):
-		view_distance_chunks = clampi(val, VIEW_DIST_CHUNKS_MIN, VIEW_DIST_CHUNKS_MAX)
+		view_distance_chunks = clampi(val, VIEW_DIST_CHUNKS_MIN, _view_chunks_ceiling())
 		_sync_view_distance()
 
 @export var noise_frequency_2d: float = 0.0075
@@ -46,7 +55,9 @@ const VIEW_DIST_CHUNKS_MAX: int = 32
 @export var island_density_threshold: float = 0.30
 @export var island_vertical_scale: float = 3.5
 
-var _terrain: VoxelTerrain = null
+## VoxelLodTerrain when available; otherwise VoxelTerrain. Keep node name "VoxelTerrain".
+var _terrain: Node = null
+var _uses_lod_terrain: bool = false
 var _viewer: VoxelViewer = null
 var _viewer_collision: VoxelViewer = null
 var _voxel_tool: VoxelTool = null
@@ -80,6 +91,7 @@ var _view_up_prev: bool = false
 var _delta_reapply_timer: float = 0.0
 var _stream_diag_timer: float = 0.0
 var _last_stream_diag: Dictionary = {}
+var _backend_view_limit_voxels: int = 0
 
 func _ready() -> void:
 	_setup_fallback_noise()
@@ -144,9 +156,9 @@ func _build_terrain_texture_array() -> Texture2DArray:
 	## Solid-color layers indexed by CHANNEL_INDICES (0=air unused, 1..6 materials).
 	var colors: Array[Color] = [
 		Color(0.05, 0.05, 0.06, 1.0), # 0 unused
-		Color(0.28, 0.62, 0.24, 1.0), # grass
-		Color(0.42, 0.30, 0.20, 1.0), # dirt
-		Color(0.52, 0.54, 0.58, 1.0), # stone
+		Color(0.30, 0.66, 0.26, 1.0), # grass
+		Color(0.55, 0.36, 0.20, 1.0), # dirt (warm brown mantle)
+		Color(0.58, 0.55, 0.50, 1.0), # stone (warm grey, not blue underside)
 		Color(0.22, 0.22, 0.24, 1.0), # coal
 		Color(0.72, 0.74, 0.78, 1.0), # iron
 		Color(0.90, 0.76, 0.10, 1.0), # gold
@@ -161,7 +173,12 @@ func _build_terrain_texture_array() -> Texture2DArray:
 	return arr
 
 func _build_terrain() -> void:
-	_terrain = VoxelTerrain.new()
+	_uses_lod_terrain = ClassDB.class_exists("VoxelLodTerrain")
+	if _uses_lod_terrain:
+		_terrain = ClassDB.instantiate("VoxelLodTerrain")
+	else:
+		_terrain = VoxelTerrain.new()
+	# Keep legacy node name so PlayerController / tools keep finding the terrain.
 	_terrain.name = "VoxelTerrain"
 
 	# TEXTURES_SINGLE_S4 needs 8-bit indices.
@@ -177,9 +194,15 @@ func _build_terrain() -> void:
 		# TEXTURES_SINGLE_S4 = 2 — pairs with terrain_transvoxel.gdshader + CHANNEL_INDICES.
 		mesher.texturing_mode = 2
 	if "transitions_enabled" in mesher:
-		mesher.transitions_enabled = false # VoxelTerrain has no LOD seams
-	_terrain.mesher = mesher
-	_terrain.material_override = _build_terrain_material()
+		# LOD seams need transition meshes; flat VoxelTerrain does not.
+		mesher.transitions_enabled = _uses_lod_terrain
+	_terrain.set("mesher", mesher)
+
+	var mat := _build_terrain_material()
+	if _uses_lod_terrain and _terrain.has_method("set_material"):
+		_terrain.call("set_material", mat)
+	elif "material_override" in _terrain:
+		_terrain.material_override = mat
 
 	_island_gen = _IslandGeneratorScript.new()
 	_island_gen.noise_island = _noise_3d
@@ -187,23 +210,41 @@ func _build_terrain() -> void:
 	_island_gen.noise_ore = _noise_ore
 	_island_gen.density_threshold = island_density_threshold
 	_island_gen.vertical_scale = island_vertical_scale
-	_terrain.generator = _island_gen
+	_terrain.set("generator", _island_gen)
 
-	_terrain.generate_collisions = true
-	_terrain.collision_layer = 1
-	_terrain.collision_mask = 1
-	_terrain.mesh_block_size = 16
-	_terrain.automatic_loading_enabled = true
-	_terrain.block_enter_notification_enabled = true
+	_terrain.set("generate_collisions", true)
+	_terrain.set("collision_layer", 1)
+	_terrain.set("collision_mask", 1)
+	if "mesh_block_size" in _terrain:
+		_terrain.set("mesh_block_size", 16)
 
-	# Clamp vertical volume to the floating-island band so empty sky/void chunks are not streamed.
+	# Vertical volume clamped to the floating-island band.
 	var y0: float = ISLAND_Y_MIN - 40.0
 	var y_size: float = (ISLAND_Y_MAX - ISLAND_Y_MIN) + 80.0
-	_terrain.bounds = AABB(Vector3(-500000.0, y0, -500000.0), Vector3(1000000.0, y_size, 1000000.0))
+	var volume := AABB(Vector3(-500000.0, y0, -500000.0), Vector3(1000000.0, y_size, 1000000.0))
+	if _uses_lod_terrain:
+		_terrain.set("voxel_bounds", volume)
+		_terrain.set("lod_count", 7)
+		_terrain.set("lod_distance", 64.0)
+		if "secondary_lod_distance" in _terrain:
+			_terrain.set("secondary_lod_distance", 64.0)
+		# Only full-detail LOD rings get collision meshes.
+		_terrain.set("collision_lod_count", 1)
+		if "streaming_system" in _terrain:
+			# STREAMING_SYSTEM_CLIPBOX = 1
+			_terrain.set("streaming_system", 1)
+	else:
+		if "bounds" in _terrain:
+			_terrain.set("bounds", volume)
+		if "automatic_loading_enabled" in _terrain:
+			_terrain.set("automatic_loading_enabled", true)
+		if "block_enter_notification_enabled" in _terrain:
+			_terrain.set("block_enter_notification_enabled", true)
 
 	if _terrain.has_signal("mesh_block_entered"):
-		_terrain.mesh_block_entered.connect(_on_mesh_block_entered)
+		_terrain.connect("mesh_block_entered", _on_mesh_block_entered)
 
+	_backend_view_limit_voxels = _view_chunks_ceiling() * 16
 	_sync_view_distance()
 	add_child(_terrain)
 
@@ -223,7 +264,7 @@ func _build_viewer() -> void:
 	_viewer.requires_visuals = true
 	add_child(_viewer)
 
-	# Nearby collisions only — primary streaming bottleneck was full-range colliders.
+	# Nearby collisions only — never allocate full-detail colliders for far LOD rings.
 	_viewer_collision = VoxelViewer.new()
 	_viewer_collision.name = "VoxelViewerCollision"
 	_viewer_collision.requires_collisions = true
@@ -250,8 +291,18 @@ func get_view_distance_voxels() -> int:
 func get_view_distance_chunks() -> int:
 	return view_distance_chunks
 
+func get_view_distance_backend_limit_voxels() -> int:
+	return _backend_view_limit_voxels
+
+func uses_lod_terrain() -> bool:
+	return _uses_lod_terrain
+
 func adjust_view_distance_chunks(delta: int) -> void:
-	view_distance_chunks = clampi(view_distance_chunks + delta, VIEW_DIST_CHUNKS_MIN, VIEW_DIST_CHUNKS_MAX)
+	view_distance_chunks = clampi(view_distance_chunks + delta, VIEW_DIST_CHUNKS_MIN, _view_chunks_ceiling())
+
+func _view_chunks_ceiling() -> int:
+	var lod_ok: bool = _uses_lod_terrain or ClassDB.class_exists("VoxelLodTerrain")
+	return VIEW_DIST_CHUNKS_MAX_LOD if lod_ok else VIEW_DIST_CHUNKS_MAX_FLAT
 
 func _effective_view_distance() -> int:
 	return view_distance_chunks * 16
@@ -266,12 +317,21 @@ func _sync_view_distance() -> void:
 		_viewer.view_distance = dist
 		_viewer.requires_visuals = true
 		_viewer.requires_collisions = false
+		if "view_distance_vertical_ratio" in _viewer:
+			_viewer.view_distance_vertical_ratio = 1.0
 	if _viewer_collision != null:
 		_viewer_collision.view_distance = col_dist
 		_viewer_collision.requires_visuals = false
 		_viewer_collision.requires_collisions = true
+		if "view_distance_vertical_ratio" in _viewer_collision:
+			_viewer_collision.view_distance_vertical_ratio = 1.0
 	if _terrain != null:
-		_terrain.max_view_distance = dist
+		if _uses_lod_terrain:
+			_terrain.set("view_distance", dist)
+		elif "max_view_distance" in _terrain:
+			_terrain.set("max_view_distance", dist)
+		# Reflect the active backend ceiling (LOD high; flat VoxelTerrain lower).
+		_backend_view_limit_voxels = _view_chunks_ceiling() * 16
 	view_distance_changed.emit(dist, view_distance_chunks)
 
 func _apply_generator_params() -> void:
@@ -304,9 +364,11 @@ func _setup_fallback_noise() -> void:
 
 func _refresh_stream_diagnostics() -> void:
 	_last_stream_diag = {
-		"backend": "VoxelTerrain+Transvoxel",
+		"backend": "VoxelLodTerrain+Transvoxel" if _uses_lod_terrain else "VoxelTerrain+Transvoxel",
 		"view_chunks": view_distance_chunks,
+		"view_limit_chunks": _view_chunks_ceiling(),
 		"collision_chunks": COLLISION_VIEW_CHUNKS,
+		"lod": _uses_lod_terrain,
 	}
 	if _terrain != null and _terrain.has_method("get_statistics"):
 		var stats: Dictionary = _terrain.get_statistics()
@@ -325,8 +387,14 @@ func has_voxel(world_cell: Vector3i) -> bool:
 func _has_data_at(world_cell: Vector3i) -> bool:
 	if _terrain == null:
 		return false
-	var block_pos: Vector3i = _terrain.voxel_to_data_block(Vector3(world_cell))
-	return _terrain.has_data_block(block_pos)
+	if _voxel_tool != null and _voxel_tool.has_method("is_area_editable"):
+		var area := AABB(Vector3(world_cell), Vector3.ONE)
+		if bool(_voxel_tool.is_area_editable(area)):
+			return true
+	if _terrain.has_method("has_data_block") and _terrain.has_method("voxel_to_data_block"):
+		var block_pos: Vector3i = _terrain.voxel_to_data_block(Vector3(world_cell))
+		return bool(_terrain.has_data_block(block_pos))
+	return false
 
 func is_chunk_ready(world_pos: Vector3) -> bool:
 	if _terrain == null:
@@ -334,33 +402,24 @@ func is_chunk_ready(world_pos: Vector3) -> bool:
 	var ipos := Vector3i(int(floor(world_pos.x)), int(floor(world_pos.y)), int(floor(world_pos.z)))
 	var probe := Vector3i(ipos.x, clampi(ipos.y, int(ISLAND_Y_MIN), int(ISLAND_Y_MAX)), ipos.z)
 	if not _has_data_at(probe):
-		return get_highest_solid_y(ipos.x, ipos.z) >= 0 and _viewer_near_enough(world_pos)
+		return false
 	if _terrain.has_method("is_area_meshed"):
 		var area := AABB(Vector3(probe) - Vector3(2, 2, 2), Vector3(5, 5, 5))
-		if not bool(_terrain.is_area_meshed(area)):
+		var meshed: bool
+		if _uses_lod_terrain:
+			meshed = bool(_terrain.is_area_meshed(area, 0))
+		else:
+			meshed = bool(_terrain.is_area_meshed(area))
+		if not meshed:
 			return false
 	return get_highest_solid_y(ipos.x, ipos.z) >= 0
 
 func is_collision_ready_at(world_pos: Vector3) -> bool:
-	## True when nearby mesh+collision should be available for safe standing.
+	## True only when a validated top-surface physics hit is available.
 	if not is_chunk_ready(world_pos):
 		return false
-	if is_inside_tree() and get_world_3d() != null:
-		var space_state := get_world_3d().direct_space_state
-		if space_state != null:
-			var x: float = world_pos.x
-			var z: float = world_pos.z
-			var query := PhysicsRayQueryParameters3D.create(
-				Vector3(x, float(WORLD_HEIGHT) + 10.0, z),
-				Vector3(x, -10.0, z)
-			)
-			query.collide_with_areas = false
-			query.collide_with_bodies = true
-			query.collision_mask = 1
-			var hit := space_state.intersect_ray(query)
-			if not hit.is_empty():
-				return true
-	return get_highest_solid_y(int(floor(world_pos.x)), int(floor(world_pos.z))) >= 0
+	var hit := _raycast_top_surface(world_pos.x, world_pos.z)
+	return not hit.is_empty()
 
 func _viewer_near_enough(world_pos: Vector3) -> bool:
 	if _viewer == null:
@@ -374,7 +433,7 @@ func wait_for_terrain_at(world_pos: Vector3) -> void:
 	if is_collision_ready_at(world_pos):
 		await get_tree().process_frame
 		return
-	var max_wait_cycles := 300
+	var max_wait_cycles := 480
 	var cycles := 0
 	while not is_collision_ready_at(world_pos) and cycles < max_wait_cycles:
 		cycles += 1
@@ -382,7 +441,8 @@ func wait_for_terrain_at(world_pos: Vector3) -> void:
 	_apply_persisted_deltas()
 	await get_tree().physics_frame
 	await get_tree().process_frame
-	spawn_chunks_ready.emit()
+	if is_collision_ready_at(world_pos):
+		spawn_chunks_ready.emit()
 
 func force_sync_spawn_chunks(cx: int = 0, cz: int = 0) -> void:
 	if not is_inside_tree():
@@ -408,29 +468,130 @@ func get_highest_solid_y(x: int, z: int) -> int:
 			return y
 	return -1
 
+func _expected_surface_y(x: int, z: int) -> int:
+	if _island_gen != null and _island_gen.has_method("eval_surface_y"):
+		return int(_island_gen.eval_surface_y(x, z))
+	return get_highest_solid_y(x, z)
+
+func _raycast_top_surface(x: float, z: float) -> Dictionary:
+	if not is_inside_tree() or get_world_3d() == null:
+		return {}
+	var space_state := get_world_3d().direct_space_state
+	if space_state == null:
+		return {}
+	var query := PhysicsRayQueryParameters3D.create(
+		Vector3(x, float(WORLD_HEIGHT) + 10.0, z),
+		Vector3(x, float(ISLAND_Y_MIN) - 20.0, z)
+	)
+	query.collide_with_areas = false
+	query.collide_with_bodies = true
+	query.collision_mask = 1
+	var hit := space_state.intersect_ray(query)
+	if hit.is_empty() or not hit.has("position"):
+		return {}
+	var hit_pos: Vector3 = hit.position
+	var hit_n: Vector3 = hit.get("normal", Vector3.UP)
+	# Reject underside / steep wall hits — spawn must be on the upper walkable surface.
+	if hit_n.y < 0.55:
+		return {}
+	var ix := int(floor(x))
+	var iz := int(floor(z))
+	var expected_y := _expected_surface_y(ix, iz)
+	if expected_y < 0:
+		return {}
+	if absf(hit_pos.y - float(expected_y)) > SPAWN_SURFACE_TOLERANCE:
+		return {}
+	if hit_pos.y < ISLAND_Y_MIN - 1.0 or hit_pos.y > ISLAND_Y_MAX + 12.0:
+		return {}
+	return hit
+
+func _feet_from_surface_hit(x: float, z: float, hit_y: float) -> Vector3:
+	## CharacterBody3D origin at capsule bottom / feet.
+	return Vector3(x, hit_y + SPAWN_FEET_CLEARANCE, z)
+
+func verify_spawn_physics(candidate_pos: Vector3, exclude_rids: Array[RID] = []) -> bool:
+	if not is_inside_tree():
+		return false
+	var space := get_world_3d().direct_space_state if get_world_3d() != null else null
+	if space == null:
+		return false
+
+	var ground := _raycast_top_surface(candidate_pos.x, candidate_pos.z)
+	if ground.is_empty():
+		return false
+	var ground_y: float = ground.position.y
+	if absf(candidate_pos.y - (ground_y + SPAWN_FEET_CLEARANCE)) > 0.35:
+		return false
+
+	var capsule := CapsuleShape3D.new()
+	capsule.radius = SPAWN_CAPSULE_RADIUS
+	capsule.height = SPAWN_CAPSULE_HEIGHT
+	var query := PhysicsShapeQueryParameters3D.new()
+	query.shape = capsule
+	query.transform = Transform3D(Basis(), candidate_pos + Vector3(0.0, SPAWN_CAPSULE_HEIGHT * 0.5, 0.0))
+	query.collision_mask = 1 | 4
+	query.exclude = exclude_rids
+	query.margin = 0.01
+	var overlaps := space.intersect_shape(query, 1)
+	return overlaps.is_empty()
+
 func get_spawn_position_raycast(x: float = 0.5, z: float = 0.5) -> Vector3:
-	if is_inside_tree() and get_world_3d() != null:
-		var space_state := get_world_3d().direct_space_state
-		if space_state != null:
-			var query := PhysicsRayQueryParameters3D.create(
-				Vector3(x, float(WORLD_HEIGHT) + 10.0, z),
-				Vector3(x, -10.0, z)
-			)
-			query.collide_with_areas = false
-			query.collide_with_bodies = true
-			query.collision_mask = 1
-			var hit := space_state.intersect_ray(query)
-			if not hit.is_empty() and hit.has("position"):
-				return Vector3(x, hit.position.y + 0.5, z)
-	return get_spawn_position(int(floor(x)), int(floor(z)))
+	var hit := _raycast_top_surface(x, z)
+	if not hit.is_empty():
+		var feet := _feet_from_surface_hit(x, z, hit.position.y)
+		if verify_spawn_physics(feet):
+			return feet
+	return Vector3.ZERO
+
+func try_find_safe_spawn(max_radius: int = 48, carrier: Node3D = null) -> Vector3:
+	## Search starter-island columns for a validated top-surface spawn. Zero = failure.
+	## If `carrier` (usually the suspended player) is given, park it above each column so
+	## attached VoxelViewers stream that column without detaching from the player.
+	var origins: Array[Vector2i] = [Vector2i(0, 0)]
+	for radius in range(1, max_radius + 1):
+		for dx in range(-radius, radius + 1):
+			for dz in range(-radius, radius + 1):
+				if absi(dx) != radius and absi(dz) != radius:
+					continue
+				origins.append(Vector2i(dx, dz))
+
+	for col in origins:
+		var x: float = float(col.x) + 0.5
+		var z: float = float(col.y) + 0.5
+		if _expected_surface_y(col.x, col.y) < 0:
+			continue
+		if carrier != null:
+			carrier.global_position = Vector3(x, 90.0, z)
+		elif _viewer != null and _viewer.is_inside_tree():
+			# Viewers not on a carrier — move them directly (local identity parent).
+			_viewer.global_position = Vector3(x, 56.0, z)
+			if _viewer_collision != null and _viewer_collision.is_inside_tree():
+				_viewer_collision.global_position = Vector3(x, 56.0, z)
+
+		var ready_cycles := 0
+		while not is_collision_ready_at(Vector3(x, 56.0, z)) and ready_cycles < 90:
+			ready_cycles += 1
+			await get_tree().process_frame
+
+		var feet := get_spawn_position_raycast(x, z)
+		if feet != Vector3.ZERO and verify_spawn_physics(feet):
+			return feet
+	return Vector3.ZERO
 
 func get_spawn_position(x: int = 0, z: int = 0) -> Vector3:
+	## Synchronous best-effort (tests / presets). Gameplay spawn uses try_find_safe_spawn().
+	var ray := get_spawn_position_raycast(float(x) + 0.5, float(z) + 0.5)
+	if ray != Vector3.ZERO:
+		return ray
+
 	var top_y := get_highest_solid_y(x, z)
 	if top_y >= 0:
 		var a1 := Vector3i(x, top_y + 1, z)
 		var a2 := Vector3i(x, top_y + 2, z)
 		if not is_solid_block(a1) and not is_solid_block(a2):
-			return Vector3(float(x) + 0.5, float(top_y) + 1.5, float(z) + 0.5)
+			var candidate := Vector3(float(x) + 0.5, float(top_y) + 1.0 + SPAWN_FEET_CLEARANCE, float(z) + 0.5)
+			if verify_spawn_physics(candidate):
+				return candidate
 
 	for radius in range(1, 48):
 		for dx in range(-radius, radius + 1):
@@ -441,9 +602,11 @@ func get_spawn_position(x: int = 0, z: int = 0) -> Vector3:
 				if sy >= 0:
 					if not is_solid_block(Vector3i(x + dx, sy + 1, z + dz)) \
 					and not is_solid_block(Vector3i(x + dx, sy + 2, z + dz)):
-						return Vector3(float(x + dx) + 0.5, float(sy) + 1.5, float(z + dz) + 0.5)
+						var c2 := Vector3(float(x + dx) + 0.5, float(sy) + 1.0 + SPAWN_FEET_CLEARANCE, float(z + dz) + 0.5)
+						if verify_spawn_physics(c2):
+							return c2
 
-	return Vector3(0.5, ISLAND_Y_MAX + 2.0, 0.5)
+	return Vector3.ZERO
 
 # ---------------------------------------------------------------------------
 # Query API
@@ -567,7 +730,7 @@ func is_chunk_loaded(cp: Vector2i) -> bool:
 		return true
 	if _terrain != null:
 		var probe := Vector3i(cp.x * 16 + 8, int(ISLAND_Y_MIN) + 16, cp.y * 16 + 8)
-		return _terrain.has_data_block(_terrain.voxel_to_data_block(Vector3(probe)))
+		return _has_data_at(probe)
 	return false
 
 func clear_world() -> void:
@@ -584,15 +747,13 @@ func clear_world() -> void:
 	_chunk_generation.clear()
 	_results_ready.clear()
 
-func verify_spawn_physics(_pos: Vector3) -> bool:
-	return true
-
 func get_diagnostics() -> Dictionary:
 	var diag := {
-		"backend": "ZylannVoxelTerrain+Transvoxel",
+		"backend": "ZylannVoxelLodTerrain+Transvoxel" if _uses_lod_terrain else "ZylannVoxelTerrain+Transvoxel",
 		"viewer_on_player": _viewer != null and _viewer.get_parent() != self,
 		"view_distance_voxels": _effective_view_distance(),
 		"view_distance_chunks": view_distance_chunks,
+		"view_distance_limit_voxels": _backend_view_limit_voxels,
 		"collision_view_chunks": COLLISION_VIEW_CHUNKS,
 		"main_total_frame_time_ms": 0.0,
 		"loaded_chunks": _chunks.size(),

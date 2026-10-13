@@ -1,8 +1,8 @@
 ## IslandGenerator.gd
-## Castle Story-style floating islands for Zylann VoxelTerrain + VoxelMesherTransvoxel.
-## Writes CHANNEL_SDF (smooth geometry), CHANNEL_TYPE (mineable IDs), CHANNEL_INDICES (textures).
-## No vegetation. Preserves island layout while producing rounded hills / walkable ramps
-## and sharper cliffs where steepness is high. Fills tiny 1x1 / 1x2 surface void holes.
+## Castle Story hybrid floating islands for Zylann VoxelLodTerrain + VoxelMesherTransvoxel.
+## CHANNEL_SDF: smooth top surfaces / ramps; quantized blocky cliffs + angular undersides.
+## CHANNEL_TYPE / CHANNEL_INDICES: grass tops, dirt mantle on cliffs, selective stone, ore veins.
+## No vegetation. Island footprint / size distribution is preserved from the column sampler.
 extends VoxelGeneratorScript
 
 const BLOCK_AIR:   int = 0
@@ -19,6 +19,7 @@ const MASK_CUTOFF: float = 0.30
 const SPAWN_ISLAND_RADIUS: float = 42.0
 const CAVE_THRESHOLD: float = 0.86
 const DIRT_DEPTH: int = 3
+const DIRT_CLIFF_EXTRA: float = 5.0
 const SDF_CLAMP: float = 3.5
 
 var density_threshold: float = 0.30
@@ -284,35 +285,66 @@ func _eval_sdf(
 	gx: int, gy: int, gz: int,
 	top_y: float, bot_y: float, center_y: float, steep: float
 ) -> float:
+	## Hybrid SDF: continuous gradients on gentle tops/ramps; quantized + saturated
+	## fields on cliffs and undersides so Transvoxel yields stepped / angular faces
+	## instead of a single melted blob.
 	var fy: float = float(gy)
-	# Vertical shell SDF (negative inside the island band).
-	var sd: float = maxf(fy - top_y, bot_y - fy)
-
-	# Horizontal edge falloff from land mask — soft ramps on gentle shores, cliffs when steep.
 	var fx := float(gx)
 	var fz := float(gz)
 	var cutoff: float = density_threshold if density_threshold > 0.0 else MASK_CUTOFF
 	var mask_n: float = _land_mask(fx, fz)
 	var footprint: float = clampf((mask_n - cutoff) / maxf(0.001, 1.0 - cutoff), 0.0, 1.0)
-	var edge_sd: float = (0.22 - footprint) * lerpf(2.4, 6.0, clampf(steep * 0.5, 0.0, 1.0))
-	sd = maxf(sd, edge_sd)
 
-	# Cave carving as union with air SDF (positive inside cave).
 	var from_top: float = top_y - fy
 	var from_bot: float = fy - bot_y
-	if from_top > 4.0 and from_bot > 5.0:
-		var cave_n: float = noise_island.get_noise_3d(fx * 0.85, fy * 0.85, fz * 0.85)
-		# Air = positive SDF. When cave_n > CAVE_THRESHOLD, force positive SDF.
-		if cave_n > CAVE_THRESHOLD:
-			var cave_air: float = (cave_n - CAVE_THRESHOLD) * 8.0
-			sd = maxf(sd, cave_air)
+	var cliff_w: float = clampf((steep - 0.35) / 1.1, 0.0, 1.0)
+	if (top_y - center_y) > 20.0:
+		cliff_w = maxf(cliff_w, 0.55)
+	# Near the top of a gentle column → prefer smooth; cliffs / belly → blocky.
+	var top_smooth_w: float = 1.0 - clampf(cliff_w, 0.0, 1.0)
+	top_smooth_w *= smoothstep(3.2, 0.0, absf(from_top))
+	top_smooth_w *= smoothstep(0.08, 0.28, footprint)
+	var bot_block_w: float = smoothstep(6.0, 1.5, from_bot)
+	var blockiness: float = clampf(maxf(cliff_w, bot_block_w) - top_smooth_w * 0.85, 0.0, 1.0)
 
-	# Steep faces: sharpen the gradient so cliffs stay terraced/craggy.
-	# Gentle faces: keep soft gradients for walkable natural ramps.
-	var sharpen: float = lerpf(1.0, 2.4, clampf((steep - 0.85) / 0.9, 0.0, 1.0))
-	if (top_y - center_y) > 22.0:
-		sharpen = maxf(sharpen, 2.0)
-	sd *= sharpen
+	# --- Smooth shell (walkable tops + natural ramps) ---
+	var sd_smooth: float = maxf(fy - top_y, bot_y - fy)
+	# Positive edge only carves air at the rim. Negative edge must not flatten core SDF.
+	var edge_soft: float = (0.18 - footprint) * lerpf(2.4, 3.8, 1.0 - cliff_w)
+	if edge_soft > 0.0:
+		sd_smooth = maxf(sd_smooth, edge_soft)
+
+	# --- Blocky / terraced shell (cliffs + angular underside) ---
+	var terrace: float = 1.0 if cliff_w > 0.55 else 2.0
+	var q_top: float = floor(top_y / terrace) * terrace + (terrace - 0.05)
+	var jagged: float = 0.0
+	if noise_island != null:
+		jagged = floor((noise_island.get_noise_3d(fx * 1.1, bot_y, fz * 1.1) + 1.0) * 2.0) * 0.5
+	var q_bot: float = ceil(bot_y - 0.001) - 0.02 - jagged * bot_block_w
+	var sd_blocky: float = maxf(fy - q_top, q_bot - fy)
+	var edge_hard: float = (0.12 - footprint) * lerpf(3.8, 6.5, cliff_w)
+	if edge_hard > 0.0:
+		sd_blocky = maxf(sd_blocky, edge_hard)
+	# Stratified mid-cliff steps (visible dirt/stone shelves).
+	if cliff_w > 0.45 and from_top > 1.5 and from_bot > 2.5 and footprint > 0.18:
+		var shelf: float = (absf(fmod(from_top, 2.0) - 1.0) - 0.85) * 0.35 * cliff_w
+		sd_blocky = maxf(sd_blocky, shelf)
+
+	var sd: float = lerpf(sd_smooth, sd_blocky, blockiness)
+
+	# Cave carving (air SDF union) — keep after blend so caves cut both styles.
+	if from_top > 4.0 and from_bot > 5.0 and noise_island != null:
+		var cave_n: float = noise_island.get_noise_3d(fx * 0.85, fy * 0.85, fz * 0.85)
+		if cave_n > CAVE_THRESHOLD:
+			sd = maxf(sd, (cave_n - CAVE_THRESHOLD) * 8.0)
+
+	# Blocky regions: saturate away from the isosurface so Transvoxel facets
+	# (cliffs / underside) instead of rounding into melted blobs.
+	if blockiness > 0.28:
+		if sd < 0.0:
+			sd = minf(sd * lerpf(1.15, 2.8, blockiness), -0.7)
+		else:
+			sd = maxf(sd * lerpf(1.15, 2.8, blockiness), 0.7)
 
 	return clampf(sd, -SDF_CLAMP, SDF_CLAMP)
 
@@ -327,29 +359,52 @@ func _eval_in_column(
 		return BLOCK_AIR
 
 	var depth: float = top_y - fy
+	var from_bot: float = fy - bot_y
+	var thickness: float = maxf(1.0, top_y - bot_y)
+	var fx := float(gx)
+	var fz := float(gz)
+	var cutoff: float = density_threshold if density_threshold > 0.0 else MASK_CUTOFF
+	var mask_n: float = _land_mask(fx, fz)
+	var footprint: float = clampf((mask_n - cutoff) / maxf(0.001, 1.0 - cutoff), 0.0, 1.0)
+	var near_edge: bool = footprint < 0.42
 
-	if depth < 1.0:
-		if steep > 1.15 or (top_y - center_y) > 22.0:
-			return BLOCK_STONE
+	# Grass only on true upper surface of gentle / walkable tops.
+	if depth < 1.0 and steep < 1.25 and not (steep > 1.05 and near_edge):
 		return BLOCK_GRASS
-	if depth < float(DIRT_DEPTH) + 0.5:
-		if steep > 1.15:
-			return BLOCK_STONE
+
+	# Brown dirt mantle under grass and across most cliff faces (not the whole core).
+	var dirt_band: float = float(DIRT_DEPTH) + 0.5
+	if steep > 0.55 or near_edge:
+		dirt_band += DIRT_CLIFF_EXTRA
+	if depth < dirt_band and from_bot > 2.0:
+		return BLOCK_DIRT
+	# Outer cliff shell stays dirt-brown rather than uniform stone.
+	if near_edge and depth < minf(thickness * 0.55, dirt_band + 3.0) and from_bot > 3.0:
 		return BLOCK_DIRT
 
 	if noise_ore != null and depth > 4.0:
-		var wx: float = float(gx) * 0.55 + noise_ore.get_noise_3d(float(gx) * 0.07, fy * 0.04, float(gz) * 0.07) * 4.0
-		var wz: float = float(gz) * 0.55 + noise_ore.get_noise_3d(float(gx) * 0.07 + 40.0, fy * 0.05, float(gz) * 0.07) * 4.0
-		var vein: float = noise_ore.get_noise_3d(wx, fy * 1.8, wz)
-		var core: float = noise_ore.get_noise_3d(wx * 2.1 + 90.0, fy * 0.6, wz * 2.1)
-		if depth >= 5.0 and depth <= 16.0 and vein > 0.72 and core > 0.22:
-			return BLOCK_COAL
-		if depth >= 11.0 and depth <= 28.0 and vein > 0.82 and core > 0.38:
-			return BLOCK_IRON
-		if depth >= 20.0 and vein > 0.88 and core > 0.52:
-			return BLOCK_GOLD
+		var ore_id: int = _eval_ore(gx, gy, gz, depth)
+		if ore_id != BLOCK_AIR:
+			return ore_id
 
+	# Selective stone exposure: deep underside tip + very steep rocky outcrops / core.
 	return BLOCK_STONE
+
+func _eval_ore(gx: int, gy: int, gz: int, depth: float) -> int:
+	if noise_ore == null:
+		return BLOCK_AIR
+	var fy: float = float(gy)
+	var wx: float = float(gx) * 0.55 + noise_ore.get_noise_3d(float(gx) * 0.07, fy * 0.04, float(gz) * 0.07) * 4.0
+	var wz: float = float(gz) * 0.55 + noise_ore.get_noise_3d(float(gx) * 0.07 + 40.0, fy * 0.05, float(gz) * 0.07) * 4.0
+	var vein: float = noise_ore.get_noise_3d(wx, fy * 1.8, wz)
+	var core: float = noise_ore.get_noise_3d(wx * 2.1 + 90.0, fy * 0.6, wz * 2.1)
+	if depth >= 5.0 and depth <= 16.0 and vein > 0.72 and core > 0.22:
+		return BLOCK_COAL
+	if depth >= 11.0 and depth <= 28.0 and vein > 0.82 and core > 0.38:
+		return BLOCK_IRON
+	if depth >= 20.0 and vein > 0.88 and core > 0.52:
+		return BLOCK_GOLD
+	return BLOCK_AIR
 
 func _is_cave(gx: int, gy: int, gz: int, fy: float, top_y: float, bot_y: float) -> bool:
 	var from_top: float = top_y - fy

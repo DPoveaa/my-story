@@ -230,10 +230,20 @@ func _update_raycast() -> void:
 		can_place_target = grid_valid and not blocked_by_debris
 
 	if preview_ghost != null:
+		var hit_terrain := false
+		if has_target and grid != null:
+			var world := get_parent()
+			var vox = null
+			if world != null and "voxel_world" in world:
+				vox = world.voxel_world
+			if vox != null and vox.has_method("is_solid_block"):
+				hit_terrain = vox.is_solid_block(target_remove_cell)
 		if target_is_debris and target_debris_island != null and target_debris_island.is_moving():
 			preview_ghost.hide_preview()
+		elif hit_terrain or not can_place_target:
+			preview_ghost.hide_preview()
 		else:
-			preview_ghost.update_preview(target_place_cell, can_place_target, grid.cell_size)
+			preview_ghost.update_preview(target_place_cell, true, grid.cell_size)
 
 func _normal_to_cell_offset(normal: Vector3) -> Vector3i:
 	var abs_norm := normal.abs()

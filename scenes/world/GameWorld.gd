@@ -119,7 +119,7 @@ func _ready() -> void:
 			build_camera.block_type_changed.connect(build_hud.set_selected_block_type)
 			build_hud.set_selected_block_type(build_camera.get_selected_type())
 
-## Async: hold player still with loading UI until nearby terrain mesh+collision are ready.
+## Async: hold player still with loading UI until a validated top-surface spawn exists.
 func _spawn_player_on_terrain() -> void:
 	if player == null or voxel_world == null:
 		return
@@ -140,19 +140,28 @@ func _spawn_player_on_terrain() -> void:
 	else:
 		await voxel_world.force_sync_spawn_chunks(0, 0)
 
-	var safe_spawn: Vector3
-	if voxel_world.has_method("get_spawn_position_raycast"):
-		safe_spawn = voxel_world.get_spawn_position_raycast(0.5, 0.5)
-	else:
-		safe_spawn = voxel_world.get_spawn_position(0, 0)
+	await get_tree().physics_frame
+	await get_tree().physics_frame
 
-	# Extra frames so PhysicsServer commits colliders before unfreezing.
-	await get_tree().physics_frame
-	await get_tree().physics_frame
-	if voxel_world.has_method("get_spawn_position_raycast"):
-		var ray_spawn: Vector3 = voxel_world.get_spawn_position_raycast(safe_spawn.x, safe_spawn.z)
-		if ray_spawn.y < 200.0:
-			safe_spawn = ray_spawn
+	var safe_spawn := Vector3.ZERO
+	if voxel_world.has_method("try_find_safe_spawn"):
+		safe_spawn = await voxel_world.try_find_safe_spawn(48, player)
+	elif voxel_world.has_method("get_spawn_position_raycast"):
+		safe_spawn = voxel_world.get_spawn_position_raycast(0.5, 0.5)
+
+	# Never spawn from a timeout / procedural guess alone — require validated collision.
+	if safe_spawn == Vector3.ZERO or not (
+		voxel_world.has_method("verify_spawn_physics") and voxel_world.verify_spawn_physics(safe_spawn)
+	):
+		if build_hud != null and build_hud.has_method("set_loading_overlay"):
+			build_hud.set_loading_overlay(
+				true,
+				"Terrain load failed — press Home to retry"
+			)
+		# Keep physics suspended; Home / respawn_home can retry once collision exists.
+		if player.has_method("suspend_physics"):
+			player.suspend_physics()
+		return
 
 	if player.has_method("resume_at_spawn"):
 		player.resume_at_spawn(safe_spawn)
@@ -209,7 +218,8 @@ func spawn_test_tower(origin: Vector3i = Vector3i.ZERO) -> void:
 
 	if origin.y == 0 and voxel_world != null:
 		var spawn_pos := voxel_world.get_spawn_position(origin.x, origin.z)
-		origin.y = int(floor(spawn_pos.y - 1.2))
+		if spawn_pos != Vector3.ZERO:
+			origin.y = int(floor(spawn_pos.y - 1.2))
 
 	var placed: Array[Vector3i] = []
 	# 2x2 Pillar, 7 blocks tall
@@ -247,7 +257,8 @@ func spawn_test_bridge(origin: Vector3i = Vector3i.ZERO) -> void:
 
 	if origin.y == 0 and voxel_world != null:
 		var spawn_pos := voxel_world.get_spawn_position(origin.x, origin.z)
-		origin.y = int(floor(spawn_pos.y - 1.2))
+		if spawn_pos != Vector3.ZERO:
+			origin.y = int(floor(spawn_pos.y - 1.2))
 
 	var placed: Array[Vector3i] = []
 	# Left Pillar (height 5)
@@ -277,7 +288,8 @@ func spawn_test_arch(origin: Vector3i = Vector3i.ZERO) -> void:
 
 	if origin.y == 0 and voxel_world != null:
 		var spawn_pos := voxel_world.get_spawn_position(origin.x, origin.z)
-		origin.y = int(floor(spawn_pos.y - 1.2))
+		if spawn_pos != Vector3.ZERO:
+			origin.y = int(floor(spawn_pos.y - 1.2))
 
 	var placed: Array[Vector3i] = []
 	# Left column

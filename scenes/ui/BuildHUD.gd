@@ -184,7 +184,7 @@ func _create_view_distance_controls() -> void:
 	_view_panel.anchor_right = 1.0
 	_view_panel.anchor_top = 0.0
 	_view_panel.anchor_bottom = 0.0
-	_view_panel.offset_left = -220.0
+	_view_panel.offset_left = -280.0
 	_view_panel.offset_top = 52.0
 	_view_panel.offset_right = -12.0
 	_view_panel.offset_bottom = 96.0
@@ -206,7 +206,7 @@ func _create_view_distance_controls() -> void:
 	_view_label = Label.new()
 	_view_label.text = "View: --"
 	_view_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_view_label.custom_minimum_size = Vector2(120, 0)
+	_view_label.custom_minimum_size = Vector2(170, 0)
 	_view_label.add_theme_font_size_override("font_size", 14)
 	row.add_child(_view_label)
 
@@ -228,7 +228,7 @@ func _on_view_plus_pressed() -> void:
 func _on_view_distance_changed(voxels: int, chunks: int) -> void:
 	if _view_label == null:
 		return
-	_view_label.text = "View: %d (%dc)" % [voxels, chunks]
+	_view_label.text = _format_view_distance_label(voxels, chunks)
 
 func _refresh_view_distance_label() -> void:
 	if _view_label == null or voxel_world == null:
@@ -239,7 +239,22 @@ func _refresh_view_distance_label() -> void:
 		voxels = int(voxel_world.get_view_distance_voxels())
 	if voxel_world.has_method("get_view_distance_chunks"):
 		chunks = int(voxel_world.get_view_distance_chunks())
-	_view_label.text = "View: %d (%dc)" % [voxels, chunks]
+	_view_label.text = _format_view_distance_label(voxels, chunks)
+
+func _format_view_distance_label(voxels: int, chunks: int) -> String:
+	var limit_voxels := 0
+	var lod := false
+	if voxel_world != null:
+		if voxel_world.has_method("get_view_distance_backend_limit_voxels"):
+			limit_voxels = int(voxel_world.get_view_distance_backend_limit_voxels())
+		if voxel_world.has_method("uses_lod_terrain"):
+			lod = bool(voxel_world.uses_lod_terrain())
+	if limit_voxels > 0 and voxels >= limit_voxels:
+		var tag := "LOD" if lod else "max"
+		return "View: %d (%dc) [%s]" % [voxels, chunks, tag]
+	if lod:
+		return "View: %d (%dc) LOD" % [voxels, chunks]
+	return "View: %d (%dc)" % [voxels, chunks]
 
 func set_cement(current: int, max_val: int) -> void:
 	if cement_label == null:
