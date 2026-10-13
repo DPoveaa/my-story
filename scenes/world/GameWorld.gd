@@ -167,7 +167,7 @@ func _spawn_player_on_terrain() -> void:
 
 	if not loaded_ok or safe_spawn == Vector3.ZERO or not verified:
 		if build_hud != null and build_hud.has_method("set_loading_overlay"):
-			build_hud.set_loading_overlay(true, "Terrain load failed — press Home to retry")
+			build_hud.set_loading_overlay(true, "Terrain load failed — press Home to retry or Esc to quit")
 		if player.has_method("suspend_physics"):
 			player.suspend_physics()
 		return
@@ -201,6 +201,8 @@ func _unhandled_input(event: InputEvent) -> void:
 		elif event.keycode == KEY_HOME or event.physical_keycode == KEY_HOME:
 			if player != null and player.has_method("respawn_home"):
 				player.respawn_home()
+		elif event.keycode == KEY_ESCAPE:
+			get_tree().quit()
 
 ## Toggles the development free-flight camera without corrupting player state.
 func toggle_debug_camera() -> void:

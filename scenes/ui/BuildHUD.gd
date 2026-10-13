@@ -50,6 +50,9 @@ var _controls_expanded: bool = true
 ## Loading overlay (spawn wait).
 var _loading_overlay: ColorRect = null
 var _loading_label: Label = null
+var _loading_btn_container: HBoxContainer = null
+var _loading_retry_btn: Button = null
+var _loading_quit_btn: Button = null
 
 ## F3 debug target overlay.
 var _debug_panel: PanelContainer = null
@@ -491,12 +494,52 @@ func _create_loading_overlay() -> void:
 	_loading_label.add_theme_color_override("font_color", Color(0.92, 0.95, 1.0))
 	_loading_overlay.add_child(_loading_label)
 
+	_loading_btn_container = HBoxContainer.new()
+	_loading_btn_container.name = "LoadingButtons"
+	_loading_btn_container.alignment = BoxContainer.ALIGNMENT_CENTER
+	_loading_btn_container.add_theme_constant_override("separation", 16)
+	_loading_btn_container.anchor_left = 0.5
+	_loading_btn_container.anchor_right = 0.5
+	_loading_btn_container.anchor_top = 0.5
+	_loading_btn_container.anchor_bottom = 0.5
+	_loading_btn_container.offset_left = -160.0
+	_loading_btn_container.offset_right = 160.0
+	_loading_btn_container.offset_top = 60.0
+	_loading_btn_container.offset_bottom = 100.0
+	_loading_btn_container.visible = false
+	_loading_overlay.add_child(_loading_btn_container)
+
+	_loading_retry_btn = Button.new()
+	_loading_retry_btn.text = "Retry (Home)"
+	_loading_retry_btn.custom_minimum_size = Vector2(140, 36)
+	_loading_retry_btn.pressed.connect(_on_loading_retry_pressed)
+	_loading_btn_container.add_child(_loading_retry_btn)
+
+	_loading_quit_btn = Button.new()
+	_loading_quit_btn.text = "Quit (Esc)"
+	_loading_quit_btn.custom_minimum_size = Vector2(140, 36)
+	_loading_quit_btn.pressed.connect(_on_loading_quit_pressed)
+	_loading_btn_container.add_child(_loading_quit_btn)
+
 func set_loading_overlay(active: bool, message: String = "Loading terrain…") -> void:
 	if _loading_overlay == null:
 		_create_loading_overlay()
 	_loading_overlay.visible = active
 	if _loading_label != null and not message.is_empty():
 		_loading_label.text = message
+	var is_failure: bool = active and ("failed" in message.to_lower() or "slow" in message.to_lower())
+	if _loading_btn_container != null:
+		_loading_btn_container.visible = is_failure
+	if is_failure:
+		Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
+
+func _on_loading_retry_pressed() -> void:
+	if player != null and player.has_method("respawn_home"):
+		player.respawn_home()
+
+func _on_loading_quit_pressed() -> void:
+	if is_inside_tree() and get_tree() != null:
+		get_tree().quit()
 
 func _create_debug_overlay() -> void:
 	if _debug_panel != null:

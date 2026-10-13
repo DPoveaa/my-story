@@ -441,10 +441,11 @@ func _is_ui_modal_open() -> bool:
 
 func _input(event: InputEvent) -> void:
 	if _gameplay_input_suspended or not _is_spawned:
-		# Allow ESC to free cursor during load; block gameplay recapture/actions.
+		# Allow ESC to free cursor during load; if already free, let GameWorld handle ESC to quit.
 		if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_ESCAPE:
-			set_mouse_capture(false)
-			get_viewport().set_input_as_handled()
+			if _mouse_captured:
+				set_mouse_capture(false)
+				get_viewport().set_input_as_handled()
 		return
 
 	# If a UI modal is active, ESC closes it and clicks do not recapture mouse

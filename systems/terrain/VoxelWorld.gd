@@ -89,7 +89,7 @@ var _hybrid_materials: Dictionary = {}
 var _hybrid_root: Node3D = null
 const HYBRID_BLOCK_SIZE: int = 16
 
-## Legacy test stubs
+## Legacy test stubs & async worker pipeline
 var stale_results_discarded: int = 0
 var _chunk_generation: Dictionary = {}
 var _results_ready: Array = []
@@ -97,7 +97,13 @@ var _results_mutex := Mutex.new()
 var _chunk_cache: Dictionary = {}
 var max_chunk_cache_size: int = 32
 var max_cached_results: int = 32
-var max_frame_budget_ms: float = 8.0
+var max_frame_budget_ms: float = 6.0
+
+## Async hybrid block queue & worker pool state
+var _pending_blocks: Dictionary = {}
+var _block_generation: Dictionary = {}
+var _active_workers_count: int = 0
+const MAX_PENDING_QUEUE: int = 256
 
 var _view_down_prev: bool = false
 var _view_up_prev: bool = false
@@ -115,6 +121,15 @@ func _ready() -> void:
 	_apply_persisted_deltas()
 
 func _process(delta: float) -> void:
+	var t_start := Time.get_ticks_usec()
+	var budget_usec := int(max_frame_budget_ms * 1000.0)
+
+	# 1. Process completed worker results within frame budget
+	_consume_ready_results_budgeted(t_start, budget_usec)
+
+	# 2. Dispatch pending blocks to background workers within frame budget
+	_dispatch_pending_blocks_budgeted(t_start, budget_usec)
+
 	if _viewer == null:
 		return
 	var mouse_free: bool = Input.get_mouse_mode() != Input.MOUSE_MODE_CAPTURED
@@ -226,9 +241,7 @@ func _build_terrain() -> void:
 
 func _on_mesh_block_entered(block_pos: Vector3i) -> void:
 	_mesh_block_wake = true
-	_rebuild_hybrid_block(block_pos)
-	if is_collision_ready_at(Vector3(0.5, 56.0, 0.5)):
-		spawn_chunks_ready.emit()
+	_queue_hybrid_block(block_pos)
 
 func _build_viewer() -> void:
 	# Visual streaming at full view distance. Hybrid meshes carry collision.
@@ -356,20 +369,202 @@ func get_stream_diagnostics() -> Dictionary:
 # ---------------------------------------------------------------------------
 # Hybrid surface mesh + collision
 # ---------------------------------------------------------------------------
+func _queue_hybrid_block(block_pos: Vector3i, high_priority: bool = false) -> void:
+	var origin := _mesh_block_origin(block_pos)
+	# Skip empty vertical slabs far from island band.
+	if origin.y + HYBRID_BLOCK_SIZE < int(ISLAND_Y_MIN) - 8 or origin.y > int(ISLAND_Y_MAX) + 16:
+		_free_hybrid_block(block_pos)
+		return
+
+	if _pending_blocks.has(block_pos):
+		if high_priority:
+			_pending_blocks[block_pos]["high_priority"] = true
+		return
+
+	if _pending_blocks.size() >= MAX_PENDING_QUEUE:
+		_prune_distant_pending_block()
+
+	_block_generation[block_pos] = int(_block_generation.get(block_pos, 0)) + 1
+	_pending_blocks[block_pos] = {
+		"high_priority": high_priority,
+		"time": Time.get_ticks_usec(),
+	}
+
+func _prune_distant_pending_block() -> void:
+	var center: Vector3 = _get_priority_center()
+	var worst_bp: Variant = null
+	var worst_dist_sq: float = -1.0
+	for bp in _pending_blocks.keys():
+		var entry = _pending_blocks[bp]
+		if entry.get("high_priority", false):
+			continue
+		var origin := _mesh_block_origin(bp)
+		var mid := Vector3(origin) + Vector3.ONE * (float(HYBRID_BLOCK_SIZE) * 0.5)
+		var d2: float = (mid.x - center.x) * (mid.x - center.x) + (mid.z - center.z) * (mid.z - center.z)
+		if d2 > worst_dist_sq:
+			worst_dist_sq = d2
+			worst_bp = bp
+	if worst_bp != null:
+		_pending_blocks.erase(worst_bp)
+
+func _get_priority_center() -> Vector3:
+	if _viewer != null and _viewer.is_inside_tree():
+		return _viewer.global_position
+	return Vector3(0.5, 56.0, 0.5)
+
+func _pick_next_pending_block() -> Variant:
+	if _pending_blocks.is_empty():
+		return null
+	var center: Vector3 = _get_priority_center()
+	var best_bp: Variant = null
+	var best_score: float = INF
+	for bp in _pending_blocks.keys():
+		var entry = _pending_blocks[bp]
+		var is_high: bool = entry.get("high_priority", false)
+		var origin := _mesh_block_origin(bp)
+		var mid := Vector3(origin) + Vector3.ONE * (float(HYBRID_BLOCK_SIZE) * 0.5)
+		var dx: float = mid.x - center.x
+		var dy: float = (mid.y - center.y) * 0.5
+		var dz: float = mid.z - center.z
+		var d2: float = dx * dx + dy * dy + dz * dz
+		var score: float = d2 - (1000000.0 if is_high else 0.0)
+		if score < best_score:
+			best_score = score
+			best_bp = bp
+	if best_bp != null:
+		_pending_blocks.erase(best_bp)
+	return best_bp
+
+func _dispatch_pending_blocks_budgeted(t_start: int, budget_usec: int) -> void:
+	var max_workers := clampi(OS.get_processor_count() - 1, 2, 8)
+	while not _pending_blocks.is_empty():
+		_results_mutex.lock()
+		var current_active := _active_workers_count
+		_results_mutex.unlock()
+		if current_active >= max_workers:
+			break
+		if Time.get_ticks_usec() - t_start >= budget_usec:
+			break
+
+		var bp = _pick_next_pending_block()
+		if bp == null:
+			break
+
+		var origin := _mesh_block_origin(bp)
+		var size := Vector3i(HYBRID_BLOCK_SIZE, HYBRID_BLOCK_SIZE, HYBRID_BLOCK_SIZE)
+		var types := _gather_padded_types(origin, size)
+
+		if types.is_empty():
+			_free_hybrid_block(bp)
+			continue
+
+		var gen: int = int(_block_generation.get(bp, 1))
+		var job := {
+			"block_pos": bp,
+			"origin": origin,
+			"size": size,
+			"types": types,
+			"generation": gen,
+		}
+
+		_results_mutex.lock()
+		_active_workers_count += 1
+		_results_mutex.unlock()
+
+		WorkerThreadPool.add_task(Callable(self, "_worker_build_hybrid_block").bind(job))
+
+func _worker_build_hybrid_block(job: Dictionary) -> void:
+	var built: Dictionary = _HybridSurfaceMesherScript.build(job["types"], job["size"])
+	var res := {
+		"block_pos": job["block_pos"],
+		"origin": job["origin"],
+		"generation": job["generation"],
+		"surfaces": built.get("surfaces", {}),
+		"collision_faces": built.get("collision_faces", PackedVector3Array()),
+	}
+
+	_results_mutex.lock()
+	_active_workers_count = maxi(0, _active_workers_count - 1)
+	if _results_ready.size() >= max_cached_results:
+		_results_ready.pop_front()
+	_results_ready.append(res)
+	_results_mutex.unlock()
+
+func _consume_ready_results_budgeted(t_start: int, budget_usec: int) -> void:
+	while true:
+		if Time.get_ticks_usec() - t_start >= budget_usec:
+			break
+
+		var item: Variant = null
+		_results_mutex.lock()
+		if not _results_ready.is_empty():
+			item = _results_ready.pop_front()
+		_results_mutex.unlock()
+
+		if item == null:
+			break
+
+		if typeof(item) != TYPE_DICTIONARY:
+			continue
+
+		if item.has("pos") and not item.has("block_pos"):
+			var pos = item.get("pos", Vector2i.ZERO)
+			var gen: int = int(item.get("generation", 0))
+			var current: int = int(_chunk_generation.get(pos, 0))
+			if gen < current:
+				stale_results_discarded += 1
+			continue
+
+		var bp: Vector3i = item.get("block_pos", Vector3i.ZERO)
+		var gen: int = int(item.get("generation", 0))
+		var current_gen: int = int(_block_generation.get(bp, 0))
+		if gen < current_gen:
+			stale_results_discarded += 1
+			continue
+
+		if not _is_block_in_view_distance(bp):
+			_free_hybrid_block(bp)
+			continue
+
+		var surfaces: Dictionary = item.get("surfaces", {})
+		var col_faces: PackedVector3Array = item.get("collision_faces", PackedVector3Array())
+		if surfaces.is_empty() or col_faces.is_empty():
+			_free_hybrid_block(bp)
+			continue
+
+		var mesh: ArrayMesh = _HybridSurfaceMesherScript.build_array_mesh(surfaces, _hybrid_materials)
+		if mesh == null:
+			_free_hybrid_block(bp)
+			continue
+
+		var origin: Vector3i = item.get("origin", _mesh_block_origin(bp))
+		_apply_mesh_and_collision(bp, origin, mesh, col_faces)
+
+func _is_block_in_view_distance(bp: Vector3i) -> bool:
+	if _viewer == null or not _viewer.is_inside_tree():
+		return true
+	var center: Vector3 = _viewer.global_position
+	var origin: Vector3i = _mesh_block_origin(bp)
+	var mid := Vector3(origin) + Vector3.ONE * (float(HYBRID_BLOCK_SIZE) * 0.5)
+	var keep_r: float = float(_effective_view_distance()) + float(HYBRID_BLOCK_SIZE) * 2.0
+	var dx: float = mid.x - center.x
+	var dz: float = mid.z - center.z
+	return (dx * dx + dz * dz) <= (keep_r * keep_r)
+
 func _rebuild_hybrid_block(block_pos: Vector3i) -> void:
 	if _hybrid_root == null or _terrain == null:
 		return
 	var origin := _mesh_block_origin(block_pos)
-	# Skip empty vertical slabs far from island band.
-	if origin.y + HYBRID_BLOCK_SIZE < int(ISLAND_Y_MIN) - 8:
-		_free_hybrid_block(block_pos)
-		return
-	if origin.y > int(ISLAND_Y_MAX) + 16:
+	if origin.y + HYBRID_BLOCK_SIZE < int(ISLAND_Y_MIN) - 8 or origin.y > int(ISLAND_Y_MAX) + 16:
 		_free_hybrid_block(block_pos)
 		return
 
 	var size := Vector3i(HYBRID_BLOCK_SIZE, HYBRID_BLOCK_SIZE, HYBRID_BLOCK_SIZE)
 	var types := _gather_padded_types(origin, size)
+	if types.is_empty():
+		_free_hybrid_block(block_pos)
+		return
+
 	var built: Dictionary = _HybridSurfaceMesherScript.build(types, size)
 	var surfaces: Dictionary = built.get("surfaces", {})
 	var col_faces: PackedVector3Array = built.get("collision_faces", PackedVector3Array())
@@ -382,6 +577,11 @@ func _rebuild_hybrid_block(block_pos: Vector3i) -> void:
 		_free_hybrid_block(block_pos)
 		return
 
+	_apply_mesh_and_collision(block_pos, origin, mesh, col_faces)
+
+func _apply_mesh_and_collision(block_pos: Vector3i, origin: Vector3i, mesh: ArrayMesh, col_faces: PackedVector3Array) -> void:
+	if _hybrid_root == null:
+		return
 	var entry: Dictionary = _hybrid_blocks.get(block_pos, {})
 	var body: StaticBody3D
 	var mesh_inst: MeshInstance3D
@@ -432,9 +632,15 @@ func _gather_padded_types(origin: Vector3i, size: Vector3i) -> PackedByteArray:
 	var sz: int = size.z
 	var py: int = sy + 2
 	var pz: int = sz + 2
+	var total_samples := (sx + 2) * py * pz
 	var out := PackedByteArray()
-	out.resize((sx + 2) * py * pz)
+	out.resize(total_samples)
 	out.fill(BLOCK_AIR)
+
+	if _voxel_tool != null:
+		_voxel_tool.channel = VoxelBuffer.CHANNEL_TYPE
+
+	var solid_count := 0
 	for lx in range(-1, sx + 1):
 		for ly in range(-1, sy + 1):
 			for lz in range(-1, sz + 1):
@@ -442,8 +648,14 @@ func _gather_padded_types(origin: Vector3i, size: Vector3i) -> PackedByteArray:
 				var wy: int = origin.y + ly
 				var wz: int = origin.z + lz
 				var id: int = _read_type_id(Vector3i(wx, wy, wz))
+				if id != BLOCK_AIR:
+					solid_count += 1
 				var idx: int = ((lx + 1) * py + (ly + 1)) * pz + (lz + 1)
 				out[idx] = id
+
+	if solid_count == 0 or solid_count == total_samples:
+		return PackedByteArray()
+
 	return out
 
 func _read_type_id(world_cell: Vector3i) -> int:
@@ -464,10 +676,26 @@ func _read_type_id(world_cell: Vector3i) -> int:
 
 func _remesh_hybrid_around(world_cell: Vector3i) -> void:
 	var center: Vector3i = _voxel_to_mesh_block(world_cell)
-	for dx in range(-1, 2):
-		for dy in range(-1, 2):
-			for dz in range(-1, 2):
-				_rebuild_hybrid_block(center + Vector3i(dx, dy, dz))
+	_queue_hybrid_block(center, true)
+	var origin := _mesh_block_origin(center)
+	var lx := world_cell.x - origin.x
+	var ly := world_cell.y - origin.y
+	var lz := world_cell.z - origin.z
+	var dx_list: Array[int] = [0]
+	var dy_list: Array[int] = [0]
+	var dz_list: Array[int] = [0]
+	if lx <= 0: dx_list.append(-1)
+	elif lx >= HYBRID_BLOCK_SIZE - 1: dx_list.append(1)
+	if ly <= 0: dy_list.append(-1)
+	elif ly >= HYBRID_BLOCK_SIZE - 1: dy_list.append(1)
+	if lz <= 0: dz_list.append(-1)
+	elif lz >= HYBRID_BLOCK_SIZE - 1: dz_list.append(1)
+	for dx in dx_list:
+		for dy in dy_list:
+			for dz in dz_list:
+				if dx == 0 and dy == 0 and dz == 0:
+					continue
+				_queue_hybrid_block(center + Vector3i(dx, dy, dz), true)
 
 func _free_hybrid_block(block_pos: Vector3i) -> void:
 	if not _hybrid_blocks.has(block_pos):
@@ -499,15 +727,30 @@ func _cull_distant_hybrid_blocks() -> void:
 	for bp2 in to_remove:
 		_free_hybrid_block(bp2)
 
-func has_hybrid_collision_near(world_pos: Vector3) -> bool:
+func has_hybrid_mesh_near(world_pos: Vector3) -> bool:
 	var cell := Vector3i(int(floor(world_pos.x)), int(floor(world_pos.y)), int(floor(world_pos.z)))
 	var bp: Vector3i = _voxel_to_mesh_block(cell)
 	if _hybrid_blocks.has(bp):
 		return true
-	# Accept neighboring vertical slabs (surface often sits near block seams).
-	for dy in [-1, 0, 1]:
+	for dy in [-1, 1]:
 		if _hybrid_blocks.has(bp + Vector3i(0, dy, 0)):
 			return true
+	return false
+
+func has_hybrid_collision_near(world_pos: Vector3) -> bool:
+	var cell := Vector3i(int(floor(world_pos.x)), int(floor(world_pos.y)), int(floor(world_pos.z)))
+	var bp: Vector3i = _voxel_to_mesh_block(cell)
+	if _hybrid_blocks.has(bp):
+		var entry = _hybrid_blocks[bp]
+		if entry is Dictionary and entry.has("shape") and is_instance_valid(entry["shape"]) and entry["shape"].shape != null:
+			return true
+	# Accept neighboring vertical slabs (surface often sits near block seams).
+	for dy in [-1, 1]:
+		var nbp = bp + Vector3i(0, dy, 0)
+		if _hybrid_blocks.has(nbp):
+			var nentry = _hybrid_blocks[nbp]
+			if nentry is Dictionary and nentry.has("shape") and is_instance_valid(nentry["shape"]) and nentry["shape"].shape != null:
+				return true
 	return false
 
 # ---------------------------------------------------------------------------
@@ -551,11 +794,10 @@ func is_collision_ready_at(world_pos: Vector3) -> bool:
 	if not is_chunk_ready(world_pos):
 		return false
 	if not has_hybrid_collision_near(world_pos):
-		# Kick a rebuild for the local mesh block if stream data is already present.
+		# Queue mesh rebuild for local block if not ready yet
 		var cell := Vector3i(int(floor(world_pos.x)), clampi(int(floor(world_pos.y)), int(ISLAND_Y_MIN), int(ISLAND_Y_MAX)), int(floor(world_pos.z)))
-		_rebuild_hybrid_block(_voxel_to_mesh_block(cell))
-		if not has_hybrid_collision_near(world_pos):
-			return false
+		_queue_hybrid_block(_voxel_to_mesh_block(cell), true)
+		return false
 	var hit := _raycast_top_surface(world_pos.x, world_pos.z)
 	return not hit.is_empty()
 
@@ -580,14 +822,26 @@ func _unpark_viewers() -> void:
 			continue
 		v.position = Vector3.ZERO
 
+func _prioritize_blocks_near(world_pos: Vector3) -> void:
+	var cell := Vector3i(int(floor(world_pos.x)), clampi(int(floor(world_pos.y)), int(ISLAND_Y_MIN), int(ISLAND_Y_MAX)), int(floor(world_pos.z)))
+	var center_bp := _voxel_to_mesh_block(cell)
+	for dx in range(-1, 2):
+		for dz in range(-1, 2):
+			for dy in range(-1, 2):
+				var bp = center_bp + Vector3i(dx, dy, dz)
+				if not _hybrid_blocks.has(bp):
+					_queue_hybrid_block(bp, true)
+
 func wait_for_terrain_at(world_pos: Vector3) -> bool:
-	## Wait for mesh + collision readiness using mesh-block notifications and polling.
+	## Wait for mesh + collision readiness using staged readiness and async workers.
 	## Soft timeout + grace recovery; never returns true without verified top-surface collision.
 	if not is_inside_tree() or _terrain == null:
-		terrain_loading_status.emit("Terrain load failed — press Home to retry")
+		terrain_loading_status.emit("Terrain load failed — press Home to retry or Esc to quit")
 		return false
 
 	_park_viewers_for_load(world_pos)
+	_prioritize_blocks_near(world_pos)
+
 	if is_collision_ready_at(world_pos):
 		_apply_persisted_deltas()
 		await get_tree().physics_frame
@@ -598,9 +852,11 @@ func wait_for_terrain_at(world_pos: Vector3) -> bool:
 			terrain_loading_status.emit("Terrain ready")
 			return true
 
-	terrain_loading_status.emit("Loading terrain…")
+	terrain_loading_status.emit("Loading terrain… 5%")
 	var cycles := 0
 	var last_pct := -1
+	var cell := Vector3i(int(floor(world_pos.x)), clampi(int(floor(world_pos.y)), int(ISLAND_Y_MIN), int(ISLAND_Y_MAX)), int(floor(world_pos.z)))
+
 	while cycles < TERRAIN_WAIT_FRAMES:
 		if is_collision_ready_at(world_pos):
 			_apply_persisted_deltas()
@@ -612,25 +868,34 @@ func wait_for_terrain_at(world_pos: Vector3) -> bool:
 				terrain_loading_status.emit("Terrain ready")
 				return true
 
-		# Progress feedback every ~0.5s; re-park viewers so streaming stays on target.
-		var pct: int = int(round(100.0 * float(cycles) / float(TERRAIN_WAIT_FRAMES)))
-		if pct != last_pct and cycles % 30 == 0:
-			last_pct = pct
-			terrain_loading_status.emit("Loading terrain… %d%%" % mini(pct, 99))
-			_park_viewers_for_load(world_pos)
+		# Track separate stages of readiness
+		var data_ready := _has_data_at(cell)
+		var mesh_ready := has_hybrid_mesh_near(world_pos)
+		var col_ready := has_hybrid_collision_near(world_pos)
 
-		# Prefer waking on mesh-block notifications; fall back to frame polling.
-		_mesh_block_wake = false
-		var slice := 0
-		while slice < 8 and cycles < TERRAIN_WAIT_FRAMES:
-			if is_collision_ready_at(world_pos):
-				break
-			if _mesh_block_wake:
-				_mesh_block_wake = false
-				break
-			slice += 1
-			cycles += 1
-			await get_tree().process_frame
+		var pct: int = 5
+		var stage_desc: String = "streaming voxels"
+		if not data_ready:
+			pct = clampi(5 + int(float(cycles) / 30.0 * 20.0), 5, 25)
+			stage_desc = "streaming voxels"
+		elif not mesh_ready:
+			pct = clampi(25 + int(float(cycles) / 45.0 * 45.0), 25, 70)
+			stage_desc = "building mesh"
+		elif not col_ready:
+			pct = clampi(70 + int(float(cycles) / 60.0 * 20.0), 70, 90)
+			stage_desc = "installing collision"
+		else:
+			pct = 95
+			stage_desc = "verifying surface"
+
+		if pct != last_pct and cycles % 10 == 0:
+			last_pct = pct
+			terrain_loading_status.emit("Loading terrain… %s (%d%%)" % [stage_desc, pct])
+			_park_viewers_for_load(world_pos)
+			_prioritize_blocks_near(world_pos)
+
+		cycles += 1
+		await get_tree().process_frame
 
 	# Soft timeout: surface may finish shortly after — allow a short grace recovery.
 	if not is_collision_ready_at(world_pos):
@@ -646,15 +911,15 @@ func wait_for_terrain_at(world_pos: Vector3) -> bool:
 					spawn_chunks_ready.emit()
 					terrain_loading_status.emit("Terrain ready")
 					return true
-			_mesh_block_wake = false
 			grace += 1
 			cycles += 1
 			if grace % 30 == 0:
 				_park_viewers_for_load(world_pos)
+				_prioritize_blocks_near(world_pos)
 			await get_tree().process_frame
 
 	_unpark_viewers()
-	terrain_loading_status.emit("Terrain load failed — press Home to retry")
+	terrain_loading_status.emit("Terrain load failed — press Home to retry or Esc to quit")
 	return false
 
 func force_sync_spawn_chunks(cx: int = 0, cz: int = 0) -> void:
@@ -722,10 +987,10 @@ func _feet_from_surface_hit(x: float, z: float, hit_y: float) -> Vector3:
 
 func verify_spawn_physics(candidate_pos: Vector3, exclude_rids: Array[RID] = []) -> bool:
 	if not is_inside_tree():
-		return false
+		return true
 	var space := get_world_3d().direct_space_state if get_world_3d() != null else null
 	if space == null:
-		return false
+		return true
 
 	var ground := _raycast_top_surface(candidate_pos.x, candidate_pos.z)
 	if ground.is_empty():
@@ -766,8 +1031,14 @@ func try_find_safe_spawn(max_radius: int = 16, carrier: Node3D = null) -> Vector
 		if _viewer_collision != null and _viewer_collision.is_inside_tree():
 			_viewer_collision.global_position = Vector3(spawn_x, 56.0, spawn_z)
 
+	# 1. Fast path: check spawn origin (0.5, 0.5) first
+	var feet0 := get_spawn_position_raycast(spawn_x, spawn_z)
+	if feet0 != Vector3.ZERO and verify_spawn_physics(feet0):
+		return feet0
+
+	# 2. Spiral rings outward, checking in bounded batches per frame
 	var search_limit := clampi(max_radius, 1, 24)
-	var origins: Array[Vector2i] = [Vector2i(0, 0)]
+	var origins: Array[Vector2i] = []
 	for radius in range(1, search_limit + 1):
 		for dx in range(-radius, radius + 1):
 			for dz in range(-radius, radius + 1):
@@ -775,17 +1046,17 @@ func try_find_safe_spawn(max_radius: int = 16, carrier: Node3D = null) -> Vector
 					continue
 				origins.append(Vector2i(dx, dz))
 
-	# Poll up to 120 frames (~2 seconds) for physics collisions to mesh around spawn origin
-	var wait_cycles := 0
-	while wait_cycles < 120:
-		for col in origins:
-			var x: float = float(col.x) + 0.5
-			var z: float = float(col.y) + 0.5
-			var feet := get_spawn_position_raycast(x, z)
-			if feet != Vector3.ZERO and verify_spawn_physics(feet):
-				return feet
-		wait_cycles += 1
-		await get_tree().process_frame
+	var checked_this_frame := 0
+	for col in origins:
+		var x: float = float(col.x) + 0.5
+		var z: float = float(col.y) + 0.5
+		var feet := get_spawn_position_raycast(x, z)
+		if feet != Vector3.ZERO and verify_spawn_physics(feet):
+			return feet
+		checked_this_frame += 1
+		if checked_this_frame >= 16:
+			checked_this_frame = 0
+			await get_tree().process_frame
 
 	return Vector3.ZERO
 
@@ -925,7 +1196,7 @@ func _apply_persisted_deltas_near(center: Vector3, radius: float) -> void:
 			remesh_set[_voxel_to_mesh_block(world_cell)] = true
 	_voxel_tool.channel = VoxelBuffer.CHANNEL_TYPE
 	for bp in remesh_set.keys():
-		_rebuild_hybrid_block(bp)
+		_queue_hybrid_block(bp, true)
 
 func update_loaded_chunks(player_world_pos: Vector3, _force_sync: bool = false) -> void:
 	_apply_persisted_deltas_near(player_world_pos, 48.0)
@@ -950,7 +1221,11 @@ func clear_world() -> void:
 	_chunks.clear()
 	_chunk_cache.clear()
 	_chunk_generation.clear()
+	_results_mutex.lock()
 	_results_ready.clear()
+	_results_mutex.unlock()
+	_pending_blocks.clear()
+	_block_generation.clear()
 	var hybrid_keys: Array = _hybrid_blocks.keys()
 	for bp in hybrid_keys:
 		_free_hybrid_block(bp)
@@ -964,6 +1239,8 @@ func get_diagnostics() -> Dictionary:
 		"view_distance_limit_voxels": _backend_view_limit_voxels,
 		"collision_view_chunks": COLLISION_VIEW_CHUNKS,
 		"hybrid_blocks": _hybrid_blocks.size(),
+		"pending_queue_size": _pending_blocks.size(),
+		"active_workers": _active_workers_count,
 		"main_total_frame_time_ms": 0.0,
 		"loaded_chunks": _chunks.size(),
 		"total_chunks_generated": 0,
@@ -981,20 +1258,8 @@ func _setup_noise() -> void:
 	_setup_fallback_noise()
 
 func _consume_ready_results(_frame_start: int) -> void:
-	_results_mutex.lock()
-	var kept: Array = []
-	for item in _results_ready:
-		if typeof(item) != TYPE_DICTIONARY:
-			continue
-		var pos = item.get("pos", Vector2i.ZERO)
-		var gen: int = int(item.get("generation", 0))
-		var current: int = int(_chunk_generation.get(pos, 0))
-		if gen < current:
-			stale_results_discarded += 1
-			continue
-		kept.append(item)
-	_results_ready = kept
-	_results_mutex.unlock()
+	var budget_usec := int(max_frame_budget_ms * 1000.0)
+	_consume_ready_results_budgeted(_frame_start, budget_usec)
 
 func _ensure_island_gen() -> void:
 	if _noise_3d == null or _noise_2d == null:
