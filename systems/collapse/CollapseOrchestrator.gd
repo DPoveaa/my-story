@@ -127,6 +127,38 @@ func trigger_collapse(unsupported_cells: Array[Vector3i]) -> Array[DebrisIsland]
 
 	return spawned_islands
 
+## Spawns dynamic physics debris island(s) for a set of cell positions and BlockData map.
+func spawn_debris_for_cells(cells: Array, block_data_map: Dictionary) -> Array[DebrisIsland]:
+	var grid := grid_system
+	if grid == null and has_node("/root/GridSystem"):
+		grid = get_node("/root/GridSystem")
+	var cs := grid.cell_size if grid != null else 1.0
+
+	var island_groups: Array = IslandBuilder.group_islands(cells)
+	var spawned_islands: Array[DebrisIsland] = []
+
+	for group_var in island_groups:
+		var cell_group: Array = group_var
+		if cell_group.is_empty():
+			continue
+
+		var island := DebrisIsland.new()
+		island.orchestrator = self
+		var container: Node = debris_container if debris_container != null else self
+		container.add_child(island)
+		island.setup_island(cell_group, block_data_map, cs, [])
+
+		island.island_settled.connect(_on_island_settled)
+		island.island_fell_out_of_world.connect(_on_island_destroyed)
+
+		_active_debris.append(island)
+		spawned_islands.append(island)
+
+	if not spawned_islands.is_empty():
+		_wake_all_active_debris_except(spawned_islands)
+
+	return spawned_islands
+
 ## Splits an existing debris island into independent bodies after block removal disconnects it.
 func split_debris_island(original: DebrisIsland, groups: Array) -> Array[DebrisIsland]:
 	var spawned_islands: Array[DebrisIsland] = []

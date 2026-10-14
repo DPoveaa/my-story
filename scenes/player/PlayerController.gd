@@ -641,7 +641,8 @@ func _spawn_mined_terrain_debris(pos: Vector3i, block_type: StringName) -> void:
 		return
 	var b_data := BlockData.new(block_type)
 	var dict: Dictionary = {pos: b_data}
-	orchestrator.spawn_debris_for_cells([pos], dict)
+	var cell_arr: Array = [pos]
+	orchestrator.spawn_debris_for_cells(cell_arr, dict)
 
 func _handle_minecraft_break_action() -> void:
 	if area_selection_step != AreaSelectionStep.NONE:
@@ -676,10 +677,9 @@ func _handle_minecraft_break_action() -> void:
 		var hit = _perform_voxel_raycast()
 		if hit != null:
 			var cell_pos: Vector3i = hit.position
-			var mined_type: StringName = vox_world.get_voxel_at(cell_pos)
+			var mined_type: StringName = vox_world.mine_voxel(cell_pos)
 			if mined_type.is_empty():
 				mined_type = &"stone"
-			vt.set_voxel(cell_pos, 0)
 			_spawn_mined_terrain_debris(cell_pos, mined_type)
 			var inv_mgr := _get_inventory_manager()
 			if inv_mgr != null:
