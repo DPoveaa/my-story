@@ -652,8 +652,8 @@ func _eval_in_column(
 	var near_edge: bool = footprint < 0.40
 	var cliffish: bool = steep >= CLIFF_SLOPE or (steep > 0.70 and near_edge)
 
-	# Grass on gentle walkable tops only.
-	if depth < 1.0 and steep < CLIFF_SLOPE and not cliffish:
+	# Grass layer at least 2-3 blocks deep so blocks directly underneath Grass slopes are Grass, not Dirt.
+	if depth < 3.0 and steep < CLIFF_SLOPE and not cliffish:
 		return BLOCK_GRASS
 
 	# Dirt mantle under grass and across cliff faces.

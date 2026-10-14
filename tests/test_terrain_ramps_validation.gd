@@ -27,7 +27,7 @@ func _init() -> void:
 		var verts: PackedVector3Array = arrays[Mesh.ARRAY_VERTEX]
 		var norms: PackedVector3Array = arrays[Mesh.ARRAY_NORMAL]
 		var indices: PackedInt32Array = arrays[Mesh.ARRAY_INDEX]
-		
+
 		# First two triangles are the top surface
 		var n0 = norms[indices[0]]
 		var n1 = norms[indices[3]]
@@ -113,7 +113,7 @@ func _init() -> void:
 	buf.set_voxel(TerrainBlockyLibrary.BLOCK_GRASS_RAMP_PX, 2, 2, 2, VoxelBuffer.CHANNEL_TYPE)
 	var mats: Array[Material] = []
 	var mesh_test = mesher.build_mesh(buf, mats, {})
-	
+
 	var dirt_top_face_rendered := false
 	if mesh_test != null:
 		for s in range(mesh_test.get_surface_count()):

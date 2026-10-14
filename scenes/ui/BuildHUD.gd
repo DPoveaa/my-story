@@ -349,21 +349,6 @@ func _create_mining_hud() -> void:
 	vbox.add_theme_constant_override("separation", 4)
 	_mine_panel.add_child(vbox)
 
-	_mine_label = Label.new()
-	_mine_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	_mine_label.add_theme_font_size_override("font_size", 15)
-	_mine_label.add_theme_color_override("font_color", Color(0.95, 0.95, 0.9))
-	_mine_label.text = "Target: —"
-	vbox.add_child(_mine_label)
-
-	_mine_bar = ProgressBar.new()
-	_mine_bar.min_value = 0.0
-	_mine_bar.max_value = 100.0
-	_mine_bar.value = 0.0
-	_mine_bar.show_percentage = true
-	_mine_bar.custom_minimum_size = Vector2(280, 18)
-	vbox.add_child(_mine_bar)
-
 	_mine_feedback_label = Label.new()
 	_mine_feedback_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	_mine_feedback_label.add_theme_font_size_override("font_size", 14)
@@ -380,23 +365,8 @@ func _create_mining_hud() -> void:
 	_mine_feedback_label.offset_bottom = -118.0
 	add_child(_mine_feedback_label)
 
-func set_mining_progress(active: bool, block_name: String, percent: int) -> void:
-	if _mine_panel == null:
-		return
-	if not active:
-		_mine_panel.visible = false
-		if _mine_bar != null:
-			_mine_bar.value = 0.0
-		return
-	_mine_panel.visible = true
-	var pct: int = clampi(percent, 0, 100)
-	if _mine_label != null:
-		if pct > 0:
-			_mine_label.text = "Mining %s [%d%%]" % [block_name, pct]
-		else:
-			_mine_label.text = "Target: %s" % block_name
-	if _mine_bar != null:
-		_mine_bar.value = float(pct)
+func set_mining_progress(_active: bool, _block_name: String, _percent: int) -> void:
+	pass
 
 func show_mine_feedback(block_type: StringName, amount: int = 1) -> void:
 	if _mine_feedback_label == null:

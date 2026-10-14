@@ -100,9 +100,14 @@ var _backend_view_limit_voxels: int = 0
 var _mesh_block_wake: bool = false
 
 func _ready() -> void:
+	randomize()
+	seed_value = randi()
 	_setup_fallback_noise()
 	load_terrain_deltas()
 	_build_terrain()
+	if _terrain != null:
+		if "stream" in _terrain:
+			_terrain.stream = null
 	_build_viewer()
 	_apply_persisted_deltas()
 

@@ -54,7 +54,7 @@ signal load_blueprint_requested(anchor: Vector3i)
 
 @export_group("Building Interaction")
 @export var max_ray_distance: float = 80.0
-@export var available_types: Array[StringName] = [&"stone", &"wood", &"brick", &"gold"]
+@export var available_types: Array[StringName] = [&"grass", &"dirt", &"stone", &"brick", &"wood", &"gold"]
 @export var mine_duration_seconds: float = 1.2
 
 # System References
@@ -300,13 +300,12 @@ func get_debug_target_info() -> Dictionary:
 			if b != null:
 				material = String(b.block_type)
 				durability = "%.0f%%" % (clampf(b.durability, 0.0, 1.0) * 100.0)
-	var mine_pct := int((mining_progress / MINE_TIME) * 100.0) if mining_progress > 0.0 else 0
 	return {
 		"category": category,
 		"material": material,
 		"cell": cell,
 		"durability": durability,
-		"mining": mine_pct if category == "terrain" else "N/A",
+		"mining": "N/A",
 		"can_place": can_place_target,
 	}
 
@@ -506,17 +505,16 @@ func _unhandled_input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 		return
 
-	# Mouse clicks for building / recovery
+	# Mouse clicks for building / recovery (LMB = instant BREAK, RMB = instant PLACE)
 	if event is InputEventMouseButton and event.pressed:
 		if _mouse_captured:
 			if event.button_index == MOUSE_BUTTON_LEFT:
-				_handle_place_action()
+				_handle_minecraft_break_action()
 				get_viewport().set_input_as_handled()
 				return
 			elif event.button_index == MOUSE_BUTTON_RIGHT:
-				if not target_is_terrain:
-					_handle_remove_action()
-					get_viewport().set_input_as_handled()
+				_handle_minecraft_place_action()
+				get_viewport().set_input_as_handled()
 				return
 			elif event.button_index == MOUSE_BUTTON_WHEEL_UP:
 				_cycle_block_type(-1)
@@ -601,6 +599,82 @@ func _get_build_hud() -> Node:
 				build_hud = found
 				return build_hud
 	return null
+
+func _get_voxel_tool() -> VoxelTool:
+	var vox_world := _get_voxel_world()
+	if vox_world == null:
+		return null
+	var terrain: Node = vox_world.get_node_or_null("VoxelTerrain")
+	if terrain == null or not terrain.has_method("get_voxel_tool"):
+		return null
+	var vt: VoxelTool = terrain.get_voxel_tool()
+	if vt != null:
+		vt.channel = VoxelBuffer.CHANNEL_TYPE
+	return vt
+
+func _perform_voxel_raycast() -> Variant:
+	var vt := _get_voxel_tool()
+	if vt == null:
+		return null
+	var cam := get_active_camera()
+	if cam == null:
+		return null
+	var ray_dir := -cam.global_transform.basis.z
+	var hit = vt.raycast(cam.global_position, ray_dir, max_ray_distance)
+	return hit
+
+func _get_selected_block_id() -> int:
+	var t := get_selected_type()
+	match t:
+		&"grass": return 1
+		&"dirt":  return 2
+		&"stone": return 3
+		&"coal":  return 4
+		&"iron":  return 5
+		&"gold":  return 6
+		_:        return 3
+
+func _handle_minecraft_break_action() -> void:
+	if area_selection_step != AreaSelectionStep.NONE:
+		if area_selection_step == AreaSelectionStep.CORNER_1:
+			_confirm_area_corner_1()
+		elif area_selection_step == AreaSelectionStep.CORNER_2:
+			_confirm_area_corner_2()
+		return
+
+	if debris_grabber != null and debris_grabber.is_grabbing:
+		debris_grabber.try_place_to_grid()
+		return
+
+	# Instant break via voxel_tool
+	var vt := _get_voxel_tool()
+	if vt != null:
+		var hit = _perform_voxel_raycast()
+		if hit != null:
+			vt.set_voxel(hit.position, 0)
+			return
+
+	_handle_remove_action()
+
+func _handle_minecraft_place_action() -> void:
+	if area_selection_step != AreaSelectionStep.NONE:
+		cancel_area_selection()
+		return
+
+	if debris_grabber != null and debris_grabber.is_grabbing:
+		debris_grabber.release()
+		return
+
+	# Instant place via voxel_tool
+	var vt := _get_voxel_tool()
+	if vt != null:
+		var hit = _perform_voxel_raycast()
+		if hit != null:
+			var block_id := _get_selected_block_id()
+			vt.set_voxel(hit.previous_position, block_id)
+			return
+
+	_handle_place_action()
 
 func _handle_save_blueprint_action() -> void:
 	save_blueprint_requested.emit()
@@ -714,44 +788,6 @@ func _physics_process(delta: float) -> void:
 			pass
 
 	_update_raycast()
-
-	# Hold-to-mine (RMB / remove_block) — only VoxelWorld.mine_voxel() mutates terrain.
-	var is_rmb_pressed := (
-		Input.is_mouse_button_pressed(MOUSE_BUTTON_RIGHT)
-		or (InputMap.has_action(&"remove_block") and Input.is_action_pressed(&"remove_block"))
-	)
-	if is_rmb_pressed and _mouse_captured and current_state != State.DEBUG_FLIGHT:
-		var hit_voxel := false
-		var hit_pos := Vector3i.ZERO
-		var vox_world := _get_voxel_world()
-		if vox_world != null:
-			var resolved: Variant = _raycast_terrain_voxel(vox_world)
-			if resolved != null:
-				hit_voxel = true
-				hit_pos = resolved as Vector3i
-		if not hit_voxel and target_is_terrain:
-			hit_voxel = true
-			hit_pos = target_terrain_cell
-
-		if hit_voxel:
-			if hit_pos == target_voxel_pos:
-				mining_progress += delta
-			else:
-				mining_progress = 0.0
-				target_voxel_pos = hit_pos
-				_last_mined_cell = hit_pos
-			_update_terrain_target_visuals(hit_pos, mining_progress / MINE_TIME)
-			if mining_progress >= MINE_TIME:
-				_complete_mining_action()
-		else:
-			_reset_mining_state()
-	else:
-		if mining_progress > 0.0 or target_voxel_pos != _INVALID_VOXEL:
-			_reset_mining_state()
-		elif target_is_terrain:
-			_update_terrain_target_visuals(target_terrain_cell, 0.0)
-		else:
-			_hide_terrain_target_visuals()
 
 	if (Input.is_action_pressed(&"apply_cement") or Input.is_key_pressed(KEY_G)) and current_state != State.DEBUG_FLIGHT:
 		if debris_grabber == null or not debris_grabber.is_grabbing:
@@ -1293,15 +1329,7 @@ func _update_raycast() -> void:
 
 		if target_is_terrain:
 			var mat_disp := BlockTypeCatalog.get_display_name(target_terrain_type)
-			var pct: int = int((mining_progress / MINE_TIME) * 100.0)
-			if mining_progress > 0.0:
-				target_face_status = "Mining %s [%d%%]" % [mat_disp, pct]
-			else:
-				target_face_status = "Natural %s (Hold RMB: Mine)" % mat_disp
-			if build_hud != null and build_hud.has_method("set_mining_progress"):
-				build_hud.set_mining_progress(true, mat_disp, pct if mining_progress > 0.0 else 0)
-			if mining_progress <= 0.0:
-				_update_terrain_target_visuals(target_terrain_cell, 0.0)
+			target_face_status = "Natural %s (LMB: Break, RMB: Place)" % mat_disp
 		else:
 			var joint_sys: Node = null
 			if has_node("/root/JointSystem"):
@@ -1393,9 +1421,7 @@ func _update_raycast() -> void:
 			target_terrain_type = vox_world2.get_voxel_at(target_remove_cell)
 			can_place_target = false
 			var mat_disp2 := BlockTypeCatalog.get_display_name(target_terrain_type)
-			target_face_status = "Natural %s (Hold RMB: Mine)" % mat_disp2
-			if build_hud != null and build_hud.has_method("set_mining_progress"):
-				build_hud.set_mining_progress(true, mat_disp2, 0)
+			target_face_status = "Natural %s (LMB: Break, RMB: Place)" % mat_disp2
 			_update_terrain_target_visuals(target_terrain_cell, 0.0)
 			target_face_changed.emit(true, target_remove_cell, target_face_dir, target_face_status)
 		else:
