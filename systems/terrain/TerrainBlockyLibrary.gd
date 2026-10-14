@@ -308,8 +308,9 @@ static func _make_stepped_aabbs_inner(dir_x: int, dir_z: int, steps: int = 8) ->
 ##   high edge at x=0 (y=1, touching the upper plateau),
 ##   low edge at x=1 (y=0, touching the lower terrace).
 ##
-## The top is a single inclined quad; sides are right-triangle wedges;
-## underside is a flat quad at y=0.
+## Top-surface vertices are manually assigned Vector3.UP normals so the
+## lighting blends seamlessly with adjacent flat grass blocks (no "pillow" seam).
+## Side wedges and the underside receive cardinal / DOWN normals explicitly.
 static func _build_ramp_mesh(dir_x: int, dir_z: int) -> ArrayMesh:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
@@ -338,15 +339,13 @@ static func _build_ramp_mesh(dir_x: int, dir_z: int) -> ArrayMesh:
 	var vc := Vector3(1.0, y_c, 1.0)
 	var vd := Vector3(0.0, y_d, 1.0)
 
-	# Slope normal pointing UP and away from the drop direction (winding hint for _tri).
-	var slope_n: Vector3 = Vector3(float(dir_x), 1.0, float(dir_z)).normalized()
+	# Inclined top surface — all four corners use Vector3.UP so lighting at the
+	# high edge (y=1) is identical to the neighbouring flat grass block and the
+	# low edge (y=0) blends smoothly with the lower terrace.
+	_tri_up(st, va, vb, vc)
+	_tri_up(st, va, vc, vd)
 
-
-	# Inclined top surface.
-	_tri(st, va, vb, vc, slope_n)
-	_tri(st, va, vc, vd, slope_n)
-
-	# Flat underside (separated slightly from y=0 to prevent normal averaging with slope).
+	# Flat underside.
 	_quad(st,
 		Vector3(0, -0.0001, 0), Vector3(1, -0.0001, 0), Vector3(1, -0.0001, 1), Vector3(0, -0.0001, 1),
 		Vector3.DOWN)
@@ -357,8 +356,9 @@ static func _build_ramp_mesh(dir_x: int, dir_z: int) -> ArrayMesh:
 	_side_wedge(st, va, vd, Vector3(0, 0, 0), Vector3(0, 0, 1), Vector3.LEFT)    # x=0 side
 	_side_wedge(st, vb, vc, Vector3(1, 0, 0), Vector3(1, 0, 1), Vector3.RIGHT)   # x=1 side
 
+	# index() welds shared border vertices; normals are already set manually so
+	# generate_normals() is intentionally NOT called here.
 	st.index()
-	st.generate_normals()
 	return st.commit()
 
 
@@ -396,6 +396,7 @@ static func _side_wedge(
 ## The high corner is at y = 1.0. The other three corners are at y = 0.0,
 ## seamlessly continuing the adjoining straight ramps with zero height mismatch
 ## or exposed vertical walls.
+## All top-surface vertices are manually set to Vector3.UP to prevent pillow shading.
 static func _build_corner_mesh(dir_x: int, dir_z: int) -> ArrayMesh:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
@@ -424,11 +425,11 @@ static func _build_corner_mesh(dir_x: int, dir_z: int) -> ArrayMesh:
 	var side2_pos := Vector3(float(hx), 0.0, float(lz))
 	var low_pos   := Vector3(float(lx), 0.0, float(lz))
 
-	var slope_n := Vector3(float(dir_x), 1.0, float(dir_z)).normalized()
-	_tri(st, high_pos, side1_pos, side2_pos, slope_n)
-	_tri(st, side1_pos, low_pos, side2_pos, Vector3.UP)
+	# Top surface: diagonal wedge triangles, all vertices get Vector3.UP normals.
+	_tri_up(st, high_pos, side1_pos, side2_pos)
+	_tri_up(st, side1_pos, low_pos, side2_pos)
 
-	# Flat underside (separated slightly from y=0 to prevent normal averaging with slope).
+	# Flat underside.
 	_quad(st,
 		Vector3(0, -0.0001, 0), Vector3(1, -0.0001, 0), Vector3(1, -0.0001, 1), Vector3(0, -0.0001, 1),
 		Vector3.DOWN)
@@ -440,7 +441,6 @@ static func _build_corner_mesh(dir_x: int, dir_z: int) -> ArrayMesh:
 	_side_wedge(st, vb, vc, Vector3(1, 0, 0), Vector3(1, 0, 1), Vector3.RIGHT)
 
 	st.index()
-	st.generate_normals()
 	return st.commit()
 
 
@@ -449,6 +449,7 @@ static func _build_corner_mesh(dir_x: int, dir_z: int) -> ArrayMesh:
 ##
 ## Three corners are high (y = 1.0) flush with the upper plateau/slopes,
 ## and one corner is low (y = 0.0) descending to match the valley drop.
+## All top-surface vertices are manually set to Vector3.UP to prevent pillow shading.
 static func _build_inner_corner_mesh(dir_x: int, dir_z: int) -> ArrayMesh:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
@@ -474,12 +475,12 @@ static func _build_inner_corner_mesh(dir_x: int, dir_z: int) -> ArrayMesh:
 	var side1_pos := Vector3(float(lx), 1.0, float(hz))
 	var side2_pos := Vector3(float(hx), 1.0, float(lz))
 
-	# Split along high-to-low diagonal into two inclined triangles
-	var up := Vector3.UP
-	_tri(st, high_pos, side1_pos, low_pos, up)
-	_tri(st, high_pos, low_pos, side2_pos, up)
+	# Split along high-to-low diagonal into two inclined triangles.
+	# All top-surface vertices get Vector3.UP normals for seamless lighting.
+	_tri_up(st, high_pos, side1_pos, low_pos)
+	_tri_up(st, high_pos, low_pos, side2_pos)
 
-	# Flat underside (separated slightly from y=0 to prevent normal averaging with slope).
+	# Flat underside.
 	_quad(st,
 		Vector3(0, -0.0001, 0), Vector3(1, -0.0001, 0), Vector3(1, -0.0001, 1), Vector3(0, -0.0001, 1),
 		Vector3.DOWN)
@@ -491,7 +492,6 @@ static func _build_inner_corner_mesh(dir_x: int, dir_z: int) -> ArrayMesh:
 	_side_wedge(st, vb, vc, Vector3(1, 0, 0), Vector3(1, 0, 1), Vector3.RIGHT)
 
 	st.index()
-	st.generate_normals()
 	return st.commit()
 
 
@@ -502,6 +502,8 @@ static func _quad(
 	_tri(st, a, c, d, n)
 
 
+## Emit a triangle with a single flat normal n applied to every vertex.
+## Used for side wedges and the underside where flat / angular shading is correct.
 static func _tri(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, n: Vector3) -> void:
 	var area: Vector3 = (c - a).cross(b - a)
 	if area.length_squared() < 1e-12:
@@ -511,9 +513,36 @@ static func _tri(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, n: Vector3
 	if area.dot(n) < 0.0:
 		pb = c
 		pc = b
+	st.set_normal(n)
 	st.set_uv(Vector2(a.x, a.z))
 	st.add_vertex(a)
+	st.set_normal(n)
 	st.set_uv(Vector2(pb.x, pb.z))
 	st.add_vertex(pb)
+	st.set_normal(n)
+	st.set_uv(Vector2(pc.x, pc.z))
+	st.add_vertex(pc)
+
+
+## Emit a triangle for the WALKABLE TOP SURFACE with Vector3.UP normals on every
+## vertex. This forces lighting at the high edge to be identical to the adjacent
+## flat grass block, eliminating the "pillow" shading seam.
+## Winding is fixed by testing against Vector3.UP (the expected outward direction).
+static func _tri_up(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3) -> void:
+	var area: Vector3 = (c - a).cross(b - a)
+	if area.length_squared() < 1e-12:
+		return
+	var pb := b
+	var pc := c
+	if area.dot(Vector3.UP) < 0.0:
+		pb = c
+		pc = b
+	st.set_normal(Vector3.UP)
+	st.set_uv(Vector2(a.x, a.z))
+	st.add_vertex(a)
+	st.set_normal(Vector3.UP)
+	st.set_uv(Vector2(pb.x, pb.z))
+	st.add_vertex(pb)
+	st.set_normal(Vector3.UP)
 	st.set_uv(Vector2(pc.x, pc.z))
 	st.add_vertex(pc)
