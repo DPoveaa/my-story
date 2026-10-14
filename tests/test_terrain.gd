@@ -81,7 +81,7 @@ func test_chunk_material_cull_mode() -> void:
 	var grass_mat: StandardMaterial3D = mats.get(&"grass", null)
 	_assert(grass_mat != null, "Grass material exists")
 	if grass_mat != null:
-		_assert(grass_mat.cull_mode == BaseMaterial3D.CULL_BACK, "Grass material has CULL_BACK set for solid rendering")
+		_assert(grass_mat.cull_mode == BaseMaterial3D.CULL_DISABLED, "Grass material has CULL_DISABLED set for double-sided rendering")
 
 func test_chunk_single_block_faces_and_collision() -> void:
 	var chunk: VoxelChunk = VoxelChunkScript.new()

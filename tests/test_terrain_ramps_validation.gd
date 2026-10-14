@@ -93,14 +93,19 @@ func _init() -> void:
 		if not m.is_mesh_collision_enabled(0):
 			printerr("FAIL: Model %d does not have mesh collision enabled" % i)
 			failures += 1
-		if not m.get_culls_neighbors():
-			printerr("FAIL: Model %d does not have culls_neighbors enabled" % i)
+		if m.get_culls_neighbors():
+			printerr("FAIL: Model %d should have culls_neighbors = false to avoid invisible gaps" % i)
 			failures += 1
+		if m.collision_aabbs.is_empty():
+			printerr("FAIL: Model %d does not have collision_aabbs set" % i)
+			failures += 1
+		else:
+			print("  [PASS] Model %d: culls_neighbors=false and collision_aabbs configured" % i)
 
 	var mesher := VoxelMesherBlocky.new()
 	mesher.library = lib
 
-	# Verify dirt top face is culled beneath ramp
+	# Verify solid neighbor faces render without occlusion gaps
 	var buf := VoxelBuffer.new()
 	buf.create(5, 5, 5)
 	buf.fill(TerrainBlockyLibrary.BLOCK_AIR, VoxelBuffer.CHANNEL_TYPE)
@@ -111,7 +116,6 @@ func _init() -> void:
 	
 	var dirt_top_face_rendered := false
 	if mesh_test != null:
-		# Check surface for dirt (surface 1)
 		for s in range(mesh_test.get_surface_count()):
 			var arrays = mesh_test.surface_get_arrays(s)
 			var norms: PackedVector3Array = arrays[Mesh.ARRAY_NORMAL]
@@ -120,15 +124,14 @@ func _init() -> void:
 			for t in range(indices.size() / 3):
 				var n0 = norms[indices[t*3]]
 				var v0 = verts[indices[t*3]]
-				# If dirt emits a normal pointing UP (Y=1) at interface Y=1.0
 				if s == 1 and n0.y > 0.9 and absf(v0.y - 1.0) < 0.01:
 					dirt_top_face_rendered = true
 
-	if dirt_top_face_rendered:
-		printerr("FAIL: Dirt top face was emitted under the ramp (exposed dirt bug)!")
+	if not dirt_top_face_rendered:
+		printerr("FAIL: Solid dirt face was culled causing invisible gaps!")
 		failures += 1
 	else:
-		print("  [PASS] Dirt top face is cleanly culled beneath the ramp underside (no exposed dirt)")
+		print("  [PASS] Solid dirt face renders behind/under ramp (no invisible occlusion gaps)")
 
 	# 5. Physics Collision Shape continuous elevation test
 	print("\n--- 5. Testing Continuous Slope Collision Geometry ---")

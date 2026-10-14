@@ -160,11 +160,22 @@ func _build_terrain() -> void:
 			_terrain.format = fmt
 
 	_blocky_library = _TerrainBlockyLibraryScript.build_library()
+	if _blocky_library != null:
+		var model_count: int = _blocky_library.get_model_count() if _blocky_library.has_method("get_model_count") else (_blocky_library.models.size() if "models" in _blocky_library and _blocky_library.models != null else 0)
+		for i in range(model_count):
+			var model = _blocky_library.get_model(i) if _blocky_library.has_method("get_model") else (_blocky_library.models[i] if "models" in _blocky_library else null)
+			if model != null and model.has_method("get_material_override"):
+				var mat = model.get_material_override(0)
+				if mat != null and mat is BaseMaterial3D:
+					mat.cull_mode = BaseMaterial3D.CULL_DISABLED
+
 	var mesher := VoxelMesherBlocky.new()
 	mesher.library = _blocky_library
 	if "occlusion_enabled" in mesher:
 		mesher.occlusion_enabled = true
 	_terrain.mesher = mesher
+	if "material_override" in _terrain and _terrain.material_override is BaseMaterial3D:
+		_terrain.material_override.cull_mode = BaseMaterial3D.CULL_DISABLED
 
 	_island_gen = _IslandGeneratorScript.new()
 	_island_gen.noise_island = _noise_3d

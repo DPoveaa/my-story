@@ -121,6 +121,7 @@ func _generate_chunk(chunk_pos: Vector2i) -> void:
 		var mat := StandardMaterial3D.new()
 		mat.albedo_color = Color(0.45, 0.50, 0.40) # Natural terrain albedo
 		mat.roughness = 0.9
+		mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 		mesh_inst.material_override = mat
 		chunk_node.add_child(mesh_inst)
 

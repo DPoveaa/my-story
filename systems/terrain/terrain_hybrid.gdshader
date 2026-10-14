@@ -1,5 +1,5 @@
 shader_type spatial;
-render_mode cull_back, diffuse_burley, specular_schlick_ggx;
+render_mode cull_disabled, diffuse_burley, specular_schlick_ggx;
 
 /// Castle Story hybrid terrain: clean per-material albedo, correct normal spaces.
 /// Walkable tops keep smooth interpolated normals; cliffs/undersides use flat face normals.

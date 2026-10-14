@@ -79,39 +79,39 @@ static func _init_materials() -> void:
 	var mat_grass := StandardMaterial3D.new()
 	mat_grass.albedo_color = Color(0.28, 0.62, 0.24)
 	mat_grass.roughness = 0.85
-	mat_grass.cull_mode = BaseMaterial3D.CULL_BACK
+	mat_grass.cull_mode = BaseMaterial3D.CULL_DISABLED
 	_materials[&"grass"] = mat_grass
 
 	var mat_dirt := StandardMaterial3D.new()
 	mat_dirt.albedo_color = Color(0.42, 0.30, 0.20)
 	mat_dirt.roughness = 0.90
-	mat_dirt.cull_mode = BaseMaterial3D.CULL_BACK
+	mat_dirt.cull_mode = BaseMaterial3D.CULL_DISABLED
 	_materials[&"dirt"] = mat_dirt
 
 	var mat_stone := StandardMaterial3D.new()
 	mat_stone.albedo_color = Color(0.52, 0.54, 0.58)
 	mat_stone.roughness = 0.80
-	mat_stone.cull_mode = BaseMaterial3D.CULL_BACK
+	mat_stone.cull_mode = BaseMaterial3D.CULL_DISABLED
 	_materials[&"stone"] = mat_stone
 
 	var mat_coal := StandardMaterial3D.new()
 	mat_coal.albedo_color = Color(0.22, 0.22, 0.24)
 	mat_coal.roughness = 0.90
-	mat_coal.cull_mode = BaseMaterial3D.CULL_BACK
+	mat_coal.cull_mode = BaseMaterial3D.CULL_DISABLED
 	_materials[&"coal"] = mat_coal
 
 	var mat_iron := StandardMaterial3D.new()
 	mat_iron.albedo_color = Color(0.72, 0.74, 0.78)
 	mat_iron.roughness = 0.50
 	mat_iron.metallic = 0.60
-	mat_iron.cull_mode = BaseMaterial3D.CULL_BACK
+	mat_iron.cull_mode = BaseMaterial3D.CULL_DISABLED
 	_materials[&"iron"] = mat_iron
 
 	var mat_gold := StandardMaterial3D.new()
 	mat_gold.albedo_color = Color(0.95, 0.78, 0.22)
 	mat_gold.roughness = 0.30
 	mat_gold.metallic = 0.80
-	mat_gold.cull_mode = BaseMaterial3D.CULL_BACK
+	mat_gold.cull_mode = BaseMaterial3D.CULL_DISABLED
 	_materials[&"gold"] = mat_gold
 
 # ============================================================

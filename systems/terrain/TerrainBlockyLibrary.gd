@@ -112,18 +112,18 @@ static func build_library() -> VoxelBlockyLibrary:
 	models[BLOCK_GOLD]  = _make_cube(mats[&"gold"])
 
 	var grass_mat: Material = mats[&"grass"]
-	models[BLOCK_GRASS_RAMP_PX]      = _make_mesh_model(_build_ramp_mesh(+1,  0), grass_mat)
-	models[BLOCK_GRASS_RAMP_NX]      = _make_mesh_model(_build_ramp_mesh(-1,  0), grass_mat)
-	models[BLOCK_GRASS_RAMP_PZ]      = _make_mesh_model(_build_ramp_mesh( 0, +1), grass_mat)
-	models[BLOCK_GRASS_RAMP_NZ]      = _make_mesh_model(_build_ramp_mesh( 0, -1), grass_mat)
-	models[BLOCK_GRASS_CORNER_PX_PZ] = _make_mesh_model(_build_corner_mesh(+1, +1), grass_mat)
-	models[BLOCK_GRASS_CORNER_PX_NZ] = _make_mesh_model(_build_corner_mesh(+1, -1), grass_mat)
-	models[BLOCK_GRASS_CORNER_NX_PZ] = _make_mesh_model(_build_corner_mesh(-1, +1), grass_mat)
-	models[BLOCK_GRASS_CORNER_NX_NZ] = _make_mesh_model(_build_corner_mesh(-1, -1), grass_mat)
-	models[BLOCK_GRASS_INNER_PX_PZ]  = _make_mesh_model(_build_inner_corner_mesh(+1, +1), grass_mat)
-	models[BLOCK_GRASS_INNER_PX_NZ]  = _make_mesh_model(_build_inner_corner_mesh(+1, -1), grass_mat)
-	models[BLOCK_GRASS_INNER_NX_PZ]  = _make_mesh_model(_build_inner_corner_mesh(-1, +1), grass_mat)
-	models[BLOCK_GRASS_INNER_NX_NZ]  = _make_mesh_model(_build_inner_corner_mesh(-1, -1), grass_mat)
+	models[BLOCK_GRASS_RAMP_PX]      = _make_mesh_model(_build_ramp_mesh(+1,  0), grass_mat, _make_stepped_aabbs_ramp(+1,  0))
+	models[BLOCK_GRASS_RAMP_NX]      = _make_mesh_model(_build_ramp_mesh(-1,  0), grass_mat, _make_stepped_aabbs_ramp(-1,  0))
+	models[BLOCK_GRASS_RAMP_PZ]      = _make_mesh_model(_build_ramp_mesh( 0, +1), grass_mat, _make_stepped_aabbs_ramp( 0, +1))
+	models[BLOCK_GRASS_RAMP_NZ]      = _make_mesh_model(_build_ramp_mesh( 0, -1), grass_mat, _make_stepped_aabbs_ramp( 0, -1))
+	models[BLOCK_GRASS_CORNER_PX_PZ] = _make_mesh_model(_build_corner_mesh(+1, +1), grass_mat, _make_stepped_aabbs_corner(+1, +1))
+	models[BLOCK_GRASS_CORNER_PX_NZ] = _make_mesh_model(_build_corner_mesh(+1, -1), grass_mat, _make_stepped_aabbs_corner(+1, -1))
+	models[BLOCK_GRASS_CORNER_NX_PZ] = _make_mesh_model(_build_corner_mesh(-1, +1), grass_mat, _make_stepped_aabbs_corner(-1, +1))
+	models[BLOCK_GRASS_CORNER_NX_NZ] = _make_mesh_model(_build_corner_mesh(-1, -1), grass_mat, _make_stepped_aabbs_corner(-1, -1))
+	models[BLOCK_GRASS_INNER_PX_PZ]  = _make_mesh_model(_build_inner_corner_mesh(+1, +1), grass_mat, _make_stepped_aabbs_inner(+1, +1))
+	models[BLOCK_GRASS_INNER_PX_NZ]  = _make_mesh_model(_build_inner_corner_mesh(+1, -1), grass_mat, _make_stepped_aabbs_inner(+1, -1))
+	models[BLOCK_GRASS_INNER_NX_PZ]  = _make_mesh_model(_build_inner_corner_mesh(-1, +1), grass_mat, _make_stepped_aabbs_inner(-1, +1))
+	models[BLOCK_GRASS_INNER_NX_NZ]  = _make_mesh_model(_build_inner_corner_mesh(-1, -1), grass_mat, _make_stepped_aabbs_inner(-1, -1))
 
 	var lib := VoxelBlockyLibrary.new()
 	# Untextured hybrid shader does not need tangents; keeps bake reliable.
@@ -139,6 +139,7 @@ static func build_library() -> VoxelBlockyLibrary:
 				lib.add_model(models[i])
 			elif lib.has_method("set_model"):
 				lib.set_model(i, models[i])
+
 
 	if lib.has_method("bake"):
 		lib.bake()
@@ -226,7 +227,7 @@ static func _make_cube(mat: Material) -> VoxelBlockyModelCube:
 	return model
 
 
-static func _make_mesh_model(mesh: ArrayMesh, mat: Material) -> VoxelBlockyModelMesh:
+static func _make_mesh_model(mesh: ArrayMesh, mat: Material, aabbs: Array[AABB] = []) -> VoxelBlockyModelMesh:
 	var model := VoxelBlockyModelMesh.new()
 	# Assign mesh first so surface_count is valid before other overrides.
 	if model.has_method("set_mesh"):
@@ -237,13 +238,68 @@ static func _make_mesh_model(mesh: ArrayMesh, mat: Material) -> VoxelBlockyModel
 	# Enable mesh-based physics collision (CharacterBody3D path through VoxelTerrain).
 	if model.has_method("set_mesh_collision_enabled"):
 		model.set_mesh_collision_enabled(0, true)
-	# Do NOT set collision_aabbs: that is the VoxelBoxMover path and would give a
-	# full-cube collider mismatching the inclined geometry.
-	# culls_neighbors = true allows VoxelMesherBlocky to cull the top face of the dirt
-	# cube directly beneath the ramp/corner's flat underside.
-	model.culls_neighbors = true
+	if not aabbs.is_empty():
+		model.collision_aabbs = aabbs
+	else:
+		model.collision_aabbs = [AABB(Vector3(0, 0, 0), Vector3(1, 1, 1))]
+	model.culls_neighbors = false
 	model.transparency_index = 0
 	return model
+
+
+static func _make_stepped_aabbs_ramp(dir_x: int, dir_z: int, steps: int = 8) -> Array[AABB]:
+	var aabbs: Array[AABB] = []
+	var step_size := 1.0 / float(steps)
+	for s in range(steps):
+		var h := (s + 1.0) * step_size
+		if dir_x > 0:
+			var x := 1.0 - (s + 1.0) * step_size
+			aabbs.append(AABB(Vector3(x, 0.0, 0.0), Vector3(step_size, h, 1.0)))
+		elif dir_x < 0:
+			var x := s * step_size
+			aabbs.append(AABB(Vector3(x, 0.0, 0.0), Vector3(step_size, h, 1.0)))
+		elif dir_z > 0:
+			var z := 1.0 - (s + 1.0) * step_size
+			aabbs.append(AABB(Vector3(0.0, 0.0, z), Vector3(1.0, h, step_size)))
+		else:
+			var z := s * step_size
+			aabbs.append(AABB(Vector3(0.0, 0.0, z), Vector3(1.0, h, step_size)))
+	return aabbs
+
+
+static func _make_stepped_aabbs_corner(dir_x: int, dir_z: int, steps: int = 8) -> Array[AABB]:
+	var aabbs: Array[AABB] = []
+	var step_size := 1.0 / float(steps)
+	var hx: int = 0 if dir_x > 0 else 1
+	var hz: int = 0 if dir_z > 0 else 1
+	for s in range(steps):
+		var h := (s + 1.0) * step_size
+		var k := steps - 1 - s
+		var size_xz := (k + 1.0) * step_size
+		var x := 0.0 if hx == 0 else (1.0 - size_xz)
+		var z := 0.0 if hz == 0 else (1.0 - size_xz)
+		aabbs.append(AABB(Vector3(x, 0.0, z), Vector3(size_xz, h, size_xz)))
+	return aabbs
+
+
+static func _make_stepped_aabbs_inner(dir_x: int, dir_z: int, steps: int = 8) -> Array[AABB]:
+	var aabbs: Array[AABB] = []
+	var hx: int = 0 if dir_x > 0 else 1
+	var hz: int = 0 if dir_z > 0 else 1
+	var hz_start := 0.0 if hz == 0 else 0.5
+	aabbs.append(AABB(Vector3(0.0, 0.0, hz_start), Vector3(1.0, 1.0, 0.5)))
+	var remaining_z := 0.5 if hz == 0 else 0.0
+	var ramp_steps := steps - 1
+	var step_size := 1.0 / float(ramp_steps)
+	for s in range(ramp_steps):
+		var h := (s + 1.0) * step_size
+		var x: float
+		if dir_x > 0:
+			x = 1.0 - (s + 1.0) * step_size
+		else:
+			x = s * step_size
+		aabbs.append(AABB(Vector3(x, 0.0, remaining_z), Vector3(step_size, h, 0.5)))
+	return aabbs
 
 
 ## Build a continuous inclined ramp mesh.
@@ -290,9 +346,9 @@ static func _build_ramp_mesh(dir_x: int, dir_z: int) -> ArrayMesh:
 	_tri(st, va, vb, vc, slope_n)
 	_tri(st, va, vc, vd, slope_n)
 
-	# Flat underside.
+	# Flat underside (separated slightly from y=0 to prevent normal averaging with slope).
 	_quad(st,
-		Vector3(0, 0, 0), Vector3(1, 0, 0), Vector3(1, 0, 1), Vector3(0, 0, 1),
+		Vector3(0, -0.0001, 0), Vector3(1, -0.0001, 0), Vector3(1, -0.0001, 1), Vector3(0, -0.0001, 1),
 		Vector3.DOWN)
 
 	# Side wedges (triangulated walls connecting top corners to y=0 base).
@@ -302,6 +358,7 @@ static func _build_ramp_mesh(dir_x: int, dir_z: int) -> ArrayMesh:
 	_side_wedge(st, vb, vc, Vector3(1, 0, 0), Vector3(1, 0, 1), Vector3.RIGHT)   # x=1 side
 
 	st.index()
+	st.generate_normals()
 	return st.commit()
 
 
@@ -371,9 +428,9 @@ static func _build_corner_mesh(dir_x: int, dir_z: int) -> ArrayMesh:
 	_tri(st, high_pos, side1_pos, side2_pos, slope_n)
 	_tri(st, side1_pos, low_pos, side2_pos, Vector3.UP)
 
-	# Flat underside.
+	# Flat underside (separated slightly from y=0 to prevent normal averaging with slope).
 	_quad(st,
-		Vector3(0, 0, 0), Vector3(1, 0, 0), Vector3(1, 0, 1), Vector3(0, 0, 1),
+		Vector3(0, -0.0001, 0), Vector3(1, -0.0001, 0), Vector3(1, -0.0001, 1), Vector3(0, -0.0001, 1),
 		Vector3.DOWN)
 
 	# Side wedges using the same corner heights as the top surface.
@@ -383,6 +440,7 @@ static func _build_corner_mesh(dir_x: int, dir_z: int) -> ArrayMesh:
 	_side_wedge(st, vb, vc, Vector3(1, 0, 0), Vector3(1, 0, 1), Vector3.RIGHT)
 
 	st.index()
+	st.generate_normals()
 	return st.commit()
 
 
@@ -421,9 +479,9 @@ static func _build_inner_corner_mesh(dir_x: int, dir_z: int) -> ArrayMesh:
 	_tri(st, high_pos, side1_pos, low_pos, up)
 	_tri(st, high_pos, low_pos, side2_pos, up)
 
-	# Flat underside.
+	# Flat underside (separated slightly from y=0 to prevent normal averaging with slope).
 	_quad(st,
-		Vector3(0, 0, 0), Vector3(1, 0, 0), Vector3(1, 0, 1), Vector3(0, 0, 1),
+		Vector3(0, -0.0001, 0), Vector3(1, -0.0001, 0), Vector3(1, -0.0001, 1), Vector3(0, -0.0001, 1),
 		Vector3.DOWN)
 
 	# Side wedges using the same corner heights as the top surface.
@@ -433,6 +491,7 @@ static func _build_inner_corner_mesh(dir_x: int, dir_z: int) -> ArrayMesh:
 	_side_wedge(st, vb, vc, Vector3(1, 0, 0), Vector3(1, 0, 1), Vector3.RIGHT)
 
 	st.index()
+	st.generate_normals()
 	return st.commit()
 
 
@@ -444,7 +503,7 @@ static func _quad(
 
 
 static func _tri(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, n: Vector3) -> void:
-	var area: Vector3 = (b - a).cross(c - a)
+	var area: Vector3 = (c - a).cross(b - a)
 	if area.length_squared() < 1e-12:
 		return
 	var pb := b
@@ -452,14 +511,9 @@ static func _tri(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, n: Vector3
 	if area.dot(n) < 0.0:
 		pb = c
 		pc = b
-		area = -area
-	var geo_n: Vector3 = area.normalized()
-	st.set_normal(geo_n)
 	st.set_uv(Vector2(a.x, a.z))
 	st.add_vertex(a)
-	st.set_normal(geo_n)
 	st.set_uv(Vector2(pb.x, pb.z))
 	st.add_vertex(pb)
-	st.set_normal(geo_n)
 	st.set_uv(Vector2(pc.x, pc.z))
 	st.add_vertex(pc)

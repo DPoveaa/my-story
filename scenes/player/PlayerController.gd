@@ -158,6 +158,8 @@ func _ensure_nodes() -> void:
 		debris_grabber = get_node_or_null("DebrisGrabber")
 
 func _ready() -> void:
+	floor_max_angle = deg_to_rad(46.0)
+	floor_snap_length = 0.3
 	_ensure_nodes()
 	if grid_system == null and has_node("/root/GridSystem"):
 		grid_system = get_node("/root/GridSystem")
