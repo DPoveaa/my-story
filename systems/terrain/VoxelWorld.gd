@@ -174,9 +174,12 @@ func _build_terrain() -> void:
 	_island_gen.vertical_scale = island_vertical_scale
 	_terrain.generator = _island_gen
 
+	# Classic mesh colliders from VoxelMesherBlocky (ramps/corners included).
 	_terrain.generate_collisions = true
 	_terrain.collision_layer = 1
 	_terrain.collision_mask = 0
+	if "collision_margin" in _terrain:
+		_terrain.collision_margin = 0.04
 	_terrain.mesh_block_size = MESH_BLOCK_SIZE
 	_terrain.automatic_loading_enabled = true
 	_terrain.block_enter_notification_enabled = true

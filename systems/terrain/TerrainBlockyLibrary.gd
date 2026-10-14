@@ -2,9 +2,9 @@ class_name TerrainBlockyLibrary
 extends RefCounted
 
 ## Builds a VoxelBlockyLibrary for VoxelMesherBlocky.
-## Full cubes keep rocky sides/undersides angular. Only walkable tops use ramp /
-## corner models for 1-voxel height steps. Voxel Tools does not auto-pick
-## neighbor-dependent shapes — orientations are separate TYPE ids chosen at generation.
+## Full cubes keep rocky sides/undersides angular. Walkable tops use stair-style
+## ramp / corner models (horizontal treads + risers) so VoxelMesherBlocky mesh
+## collision matches visuals. Orientations are separate TYPE ids chosen at generation.
 
 const BLOCK_AIR: int = 0
 const BLOCK_GRASS: int = 1
@@ -19,13 +19,14 @@ const BLOCK_GRASS_RAMP_PX: int = 10
 const BLOCK_GRASS_RAMP_NX: int = 11
 const BLOCK_GRASS_RAMP_PZ: int = 12
 const BLOCK_GRASS_RAMP_NZ: int = 13
-## Outer corners: high at the opposite corner, low toward +X/+Z variants.
+## Outer corners: low toward the named axes (high L opposite).
 const BLOCK_GRASS_CORNER_PX_PZ: int = 14
 const BLOCK_GRASS_CORNER_PX_NZ: int = 15
 const BLOCK_GRASS_CORNER_NX_PZ: int = 16
 const BLOCK_GRASS_CORNER_NX_NZ: int = 17
 
 const MODEL_COUNT: int = 18
+const _STEP_Y: float = 0.5
 
 const _HYBRID_SHADER = preload("res://systems/terrain/terrain_hybrid.gdshader")
 
@@ -94,7 +95,6 @@ static func build_library() -> VoxelBlockyLibrary:
 	var mats: Dictionary = make_materials()
 	var models: Array = []
 	models.resize(MODEL_COUNT)
-	# Fill unused slots with empty so bake never sees null entries.
 	for i in range(MODEL_COUNT):
 		models[i] = VoxelBlockyModelEmpty.new()
 
@@ -117,6 +117,9 @@ static func build_library() -> VoxelBlockyLibrary:
 	models[BLOCK_GRASS_CORNER_NX_NZ] = _make_mesh_model(_build_corner_mesh(-1, -1), grass_mat)
 
 	var lib := VoxelBlockyLibrary.new()
+	# Untextured hybrid shader does not need tangents; keeps bake reliable.
+	if "bake_tangents" in lib:
+		lib.bake_tangents = false
 	if "models" in lib:
 		lib.models = models
 	elif lib.has_method("set_models"):
@@ -141,7 +144,6 @@ static func surface_model_for_drops(base_id: int, drop_px: int, drop_nx: int, dr
 	if base_id != BLOCK_GRASS:
 		return base_id
 
-	# Solid cliff neighbor (steeper than 1) → angular cube. Air (>=90) ignored here.
 	if _is_solid_cliff(drop_px) or _is_solid_cliff(drop_nx) or _is_solid_cliff(drop_pz) or _is_solid_cliff(drop_nz):
 		return BLOCK_GRASS
 
@@ -161,7 +163,6 @@ static func surface_model_for_drops(base_id: int, drop_px: int, drop_nx: int, dr
 			return BLOCK_GRASS_RAMP_PZ
 		return BLOCK_GRASS_RAMP_NZ
 	if count == 2:
-		# Adjacent pair → outer corner; opposite pair → flat cube (ridge).
 		if dpx and dpz and not dnx and not dnz:
 			return BLOCK_GRASS_CORNER_PX_PZ
 		if dpx and dnz and not dnx and not dpz:
@@ -191,12 +192,17 @@ static func _make_cube(mat: Material) -> VoxelBlockyModelCube:
 
 static func _make_mesh_model(mesh: ArrayMesh, mat: Material) -> VoxelBlockyModelMesh:
 	var model := VoxelBlockyModelMesh.new()
-	model.mesh = mesh
+	# Mesh first so surface_count is valid before collision / material overrides.
+	if model.has_method("set_mesh"):
+		model.set_mesh(mesh)
+	else:
+		model.mesh = mesh
 	model.set_material_override(0, mat)
+	# Mesh-based physics for CharacterBody3D (collision_aabbs are VoxelBoxMover only).
 	if model.has_method("set_mesh_collision_enabled"):
 		model.set_mesh_collision_enabled(0, true)
-	# Conservative AABB so VoxelBoxMover / tool raycasts treat slopes as solid.
 	model.collision_aabbs = [AABB(Vector3.ZERO, Vector3.ONE)]
+	# Full unit sides still cull; partial stair sides won't match cube patterns.
 	model.culls_neighbors = true
 	model.transparency_index = 0
 	model.side_vertex_tolerance = 0.001
@@ -204,124 +210,250 @@ static func _make_mesh_model(mesh: ArrayMesh, mat: Material) -> VoxelBlockyModel
 
 
 static func _build_ramp_mesh(dir_x: int, dir_z: int) -> ArrayMesh:
-	## Wedge: high on the face opposite the drop; low edge flush with neighbor top.
-	var h00: float = 1.0
-	var h10: float = 1.0
-	var h01: float = 1.0
-	var h11: float = 1.0
-	if dir_x > 0:
-		h00 = 1.0
-		h01 = 1.0
-		h10 = 0.0
-		h11 = 0.0
-	elif dir_x < 0:
-		h00 = 0.0
-		h01 = 0.0
-		h10 = 1.0
-		h11 = 1.0
-	elif dir_z > 0:
-		h00 = 1.0
-		h10 = 1.0
-		h01 = 0.0
-		h11 = 0.0
-	else:
-		h00 = 0.0
-		h10 = 0.0
-		h01 = 1.0
-		h11 = 1.0
-	return _mesh_from_heights(h00, h10, h01, h11)
-
-
-static func _build_corner_mesh(dir_x: int, dir_z: int) -> ArrayMesh:
-	## Outer corner: only the far corner stays high; drops toward (dir_x, dir_z).
-	var h00: float = 1.0
-	var h10: float = 1.0
-	var h01: float = 1.0
-	var h11: float = 1.0
-	# Low three corners toward the drop; high at the opposite corner.
-	if dir_x > 0 and dir_z > 0:
-		h00 = 1.0
-		h10 = 0.0
-		h01 = 0.0
-		h11 = 0.0
-	elif dir_x > 0 and dir_z < 0:
-		h01 = 1.0
-		h00 = 0.0
-		h10 = 0.0
-		h11 = 0.0
-	elif dir_x < 0 and dir_z > 0:
-		h10 = 1.0
-		h00 = 0.0
-		h01 = 0.0
-		h11 = 0.0
-	else:
-		h11 = 1.0
-		h00 = 0.0
-		h10 = 0.0
-		h01 = 0.0
-	return _mesh_from_heights(h00, h10, h01, h11)
-
-
-static func _mesh_from_heights(h00: float, h10: float, h01: float, h11: float) -> ArrayMesh:
+	## Two-step stair: high tread opposite the drop, low tread toward it.
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 
-	# Bottom face (underside) — unit-cube side; winding yields geometric -Y.
+	# Unit underside (side-cullable against the dirt below).
 	_quad(st,
 		Vector3(0, 0, 0), Vector3(1, 0, 0), Vector3(1, 0, 1), Vector3(0, 0, 1),
 		Vector3.DOWN)
 
-	# Top slope (CCW from above so normals point outward / +Y).
-	var v00 := Vector3(0, h00, 0)
-	var v10 := Vector3(1, h10, 0)
-	var v01 := Vector3(0, h01, 1)
-	var v11 := Vector3(1, h11, 1)
-	var n0 := _tri_n(v00, v01, v11)
-	var n1 := _tri_n(v00, v11, v10)
-	_tri(st, v00, v01, v11, n0)
-	_tri(st, v00, v11, v10, n1)
-
-	# ±X sides — only emit geometry that sits on the unit face for culling.
-	_side_x(st, 0.0, h00, h01, Vector3.LEFT)
-	_side_x(st, 1.0, h10, h11, Vector3.RIGHT)
-	# ±Z sides
-	_side_z(st, 0.0, h00, h10, Vector3.FORWARD)
-	_side_z(st, 1.0, h01, h11, Vector3.BACK)
+	if dir_x > 0:
+		_emit_straight_stair(st, true, true)
+	elif dir_x < 0:
+		_emit_straight_stair(st, true, false)
+	elif dir_z > 0:
+		_emit_straight_stair(st, false, true)
+	else:
+		_emit_straight_stair(st, false, false)
 
 	st.index()
 	return st.commit()
 
 
-static func _side_x(st: SurfaceTool, x: float, hy0: float, hy1: float, outward: Vector3) -> void:
-	## Vertical face at x from y=0 up to the slope edge (hy0 at z=0, hy1 at z=1).
-	## Winding matches unit-cube neighbors so Blocky side culling stays reliable.
-	if hy0 <= 1e-4 and hy1 <= 1e-4:
-		return
-	if outward.x > 0.0:
+static func _emit_straight_stair(st: SurfaceTool, along_x: bool, low_positive: bool) -> void:
+	## along_x: step across X; else across Z. low_positive: low tread on + axis side.
+	var mid: float = 0.5
+	# Outer shell of lower slab (y=0..0.5), skipping top under the upper tread.
+	_quad(st,
+		Vector3(0, 0, 0), Vector3(0, 0, 1), Vector3(0, _STEP_Y, 1), Vector3(0, _STEP_Y, 0),
+		Vector3.LEFT)
+	_quad(st,
+		Vector3(1, 0, 0), Vector3(1, _STEP_Y, 0), Vector3(1, _STEP_Y, 1), Vector3(1, 0, 1),
+		Vector3.RIGHT)
+	_quad(st,
+		Vector3(0, 0, 0), Vector3(0, _STEP_Y, 0), Vector3(1, _STEP_Y, 0), Vector3(1, 0, 0),
+		Vector3.FORWARD)
+	_quad(st,
+		Vector3(0, 0, 1), Vector3(1, 0, 1), Vector3(1, _STEP_Y, 1), Vector3(0, _STEP_Y, 1),
+		Vector3.BACK)
+
+	if along_x:
+		var high_x0: float = 0.0 if low_positive else mid
+		var high_x1: float = mid if low_positive else 1.0
+		var low_x0: float = mid if low_positive else 0.0
+		var low_x1: float = 1.0 if low_positive else mid
+		# Low tread top.
 		_quad(st,
-			Vector3(x, 0.0, 0.0), Vector3(x, 0.0, 1.0),
-			Vector3(x, hy1, 1.0), Vector3(x, hy0, 0.0),
-			outward)
+			Vector3(low_x0, _STEP_Y, 0), Vector3(low_x1, _STEP_Y, 0),
+			Vector3(low_x1, _STEP_Y, 1), Vector3(low_x0, _STEP_Y, 1),
+			Vector3.UP)
+		# Upper tread volume (exposed faces only).
+		_quad(st,
+			Vector3(high_x0, 1.0, 0), Vector3(high_x0, 1.0, 1),
+			Vector3(high_x1, 1.0, 1), Vector3(high_x1, 1.0, 0),
+			Vector3.UP)
+		# Riser between treads.
+		if low_positive:
+			_quad(st,
+				Vector3(mid, _STEP_Y, 0), Vector3(mid, _STEP_Y, 1),
+				Vector3(mid, 1.0, 1), Vector3(mid, 1.0, 0),
+				Vector3.RIGHT)
+			_quad(st,
+				Vector3(high_x0, _STEP_Y, 0), Vector3(high_x0, 1.0, 0),
+				Vector3(high_x0, 1.0, 1), Vector3(high_x0, _STEP_Y, 1),
+				Vector3.LEFT)
+		else:
+			_quad(st,
+				Vector3(mid, _STEP_Y, 1), Vector3(mid, _STEP_Y, 0),
+				Vector3(mid, 1.0, 0), Vector3(mid, 1.0, 1),
+				Vector3.LEFT)
+			_quad(st,
+				Vector3(high_x1, _STEP_Y, 0), Vector3(high_x1, _STEP_Y, 1),
+				Vector3(high_x1, 1.0, 1), Vector3(high_x1, 1.0, 0),
+				Vector3.RIGHT)
+		# Upper ±Z sides.
+		_quad(st,
+			Vector3(high_x0, _STEP_Y, 0), Vector3(high_x1, _STEP_Y, 0),
+			Vector3(high_x1, 1.0, 0), Vector3(high_x0, 1.0, 0),
+			Vector3.FORWARD)
+		_quad(st,
+			Vector3(high_x0, _STEP_Y, 1), Vector3(high_x0, 1.0, 1),
+			Vector3(high_x1, 1.0, 1), Vector3(high_x1, _STEP_Y, 1),
+			Vector3.BACK)
 	else:
+		var high_z0: float = 0.0 if low_positive else mid
+		var high_z1: float = mid if low_positive else 1.0
+		var low_z0: float = mid if low_positive else 0.0
+		var low_z1: float = 1.0 if low_positive else mid
 		_quad(st,
-			Vector3(x, 0.0, 1.0), Vector3(x, 0.0, 0.0),
-			Vector3(x, hy0, 0.0), Vector3(x, hy1, 1.0),
-			outward)
+			Vector3(0, _STEP_Y, low_z0), Vector3(1, _STEP_Y, low_z0),
+			Vector3(1, _STEP_Y, low_z1), Vector3(0, _STEP_Y, low_z1),
+			Vector3.UP)
+		_quad(st,
+			Vector3(0, 1.0, high_z0), Vector3(0, 1.0, high_z1),
+			Vector3(1, 1.0, high_z1), Vector3(1, 1.0, high_z0),
+			Vector3.UP)
+		if low_positive:
+			_quad(st,
+				Vector3(0, _STEP_Y, mid), Vector3(1, _STEP_Y, mid),
+				Vector3(1, 1.0, mid), Vector3(0, 1.0, mid),
+				Vector3.BACK)
+			_quad(st,
+				Vector3(0, _STEP_Y, high_z0), Vector3(0, 1.0, high_z0),
+				Vector3(1, 1.0, high_z0), Vector3(1, _STEP_Y, high_z0),
+				Vector3.FORWARD)
+		else:
+			_quad(st,
+				Vector3(1, _STEP_Y, mid), Vector3(0, _STEP_Y, mid),
+				Vector3(0, 1.0, mid), Vector3(1, 1.0, mid),
+				Vector3.FORWARD)
+			_quad(st,
+				Vector3(0, _STEP_Y, high_z1), Vector3(1, _STEP_Y, high_z1),
+				Vector3(1, 1.0, high_z1), Vector3(0, 1.0, high_z1),
+				Vector3.BACK)
+		_quad(st,
+			Vector3(0, _STEP_Y, high_z0), Vector3(0, _STEP_Y, high_z1),
+			Vector3(0, 1.0, high_z1), Vector3(0, 1.0, high_z0),
+			Vector3.LEFT)
+		_quad(st,
+			Vector3(1, _STEP_Y, high_z0), Vector3(1, 1.0, high_z0),
+			Vector3(1, 1.0, high_z1), Vector3(1, _STEP_Y, high_z1),
+			Vector3.RIGHT)
 
 
-static func _side_z(st: SurfaceTool, z: float, hx0: float, hx1: float, outward: Vector3) -> void:
-	if hx0 <= 1e-4 and hx1 <= 1e-4:
-		return
-	if outward.z > 0.0:
+static func _build_corner_mesh(dir_x: int, dir_z: int) -> ArrayMesh:
+	## Outer-corner stair: high L opposite (dir_x, dir_z), low quadrant toward drops.
+	## Compatible with adjacent straight ramps (shared half-edges at mid-height / full).
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+
+	_quad(st,
+		Vector3(0, 0, 0), Vector3(1, 0, 0), Vector3(1, 0, 1), Vector3(0, 0, 1),
+		Vector3.DOWN)
+
+	# Lower slab outer sides.
+	_quad(st,
+		Vector3(0, 0, 0), Vector3(0, 0, 1), Vector3(0, _STEP_Y, 1), Vector3(0, _STEP_Y, 0),
+		Vector3.LEFT)
+	_quad(st,
+		Vector3(1, 0, 0), Vector3(1, _STEP_Y, 0), Vector3(1, _STEP_Y, 1), Vector3(1, 0, 1),
+		Vector3.RIGHT)
+	_quad(st,
+		Vector3(0, 0, 0), Vector3(0, _STEP_Y, 0), Vector3(1, _STEP_Y, 0), Vector3(1, 0, 0),
+		Vector3.FORWARD)
+	_quad(st,
+		Vector3(0, 0, 1), Vector3(1, 0, 1), Vector3(1, _STEP_Y, 1), Vector3(0, _STEP_Y, 1),
+		Vector3.BACK)
+
+	# Low tread = outer quadrant toward drops.
+	var lx0: float = 0.5 if dir_x > 0 else 0.0
+	var lx1: float = 1.0 if dir_x > 0 else 0.5
+	var lz0: float = 0.5 if dir_z > 0 else 0.0
+	var lz1: float = 1.0 if dir_z > 0 else 0.5
+	_quad(st,
+		Vector3(lx0, _STEP_Y, lz0), Vector3(lx1, _STEP_Y, lz0),
+		Vector3(lx1, _STEP_Y, lz1), Vector3(lx0, _STEP_Y, lz1),
+		Vector3.UP)
+
+	# High L = two rectangles that share the inner corner (no overlap).
+	# 1) Full strip opposite dir_x.
+	var hx0: float = 0.0 if dir_x > 0 else 0.5
+	var hx1: float = 0.5 if dir_x > 0 else 1.0
+	_quad(st,
+		Vector3(hx0, 1.0, 0.0), Vector3(hx0, 1.0, 1.0),
+		Vector3(hx1, 1.0, 1.0), Vector3(hx1, 1.0, 0.0),
+		Vector3.UP)
+	# 2) Remaining stub opposite dir_z on the low-x half only.
+	var sx0: float = lx0
+	var sx1: float = lx1
+	var sz0: float = 0.0 if dir_z > 0 else 0.5
+	var sz1: float = 0.5 if dir_z > 0 else 1.0
+	_quad(st,
+		Vector3(sx0, 1.0, sz0), Vector3(sx0, 1.0, sz1),
+		Vector3(sx1, 1.0, sz1), Vector3(sx1, 1.0, sz0),
+		Vector3.UP)
+
+	# Risers into the low quadrant.
+	# Facing dir_x at x=mid, only over low-z span.
+	var mx: float = 0.5
+	var mz: float = 0.5
+	if dir_x > 0:
 		_quad(st,
-			Vector3(0.0, 0.0, z), Vector3(1.0, 0.0, z),
-			Vector3(1.0, hx1, z), Vector3(0.0, hx0, z),
-			outward)
+			Vector3(mx, _STEP_Y, lz0), Vector3(mx, _STEP_Y, lz1),
+			Vector3(mx, 1.0, lz1), Vector3(mx, 1.0, lz0),
+			Vector3.RIGHT)
 	else:
 		_quad(st,
-			Vector3(1.0, 0.0, z), Vector3(0.0, 0.0, z),
-			Vector3(0.0, hx0, z), Vector3(1.0, hx1, z),
-			outward)
+			Vector3(mx, _STEP_Y, lz1), Vector3(mx, _STEP_Y, lz0),
+			Vector3(mx, 1.0, lz0), Vector3(mx, 1.0, lz1),
+			Vector3.LEFT)
+	if dir_z > 0:
+		_quad(st,
+			Vector3(lx0, _STEP_Y, mz), Vector3(lx1, _STEP_Y, mz),
+			Vector3(lx1, 1.0, mz), Vector3(lx0, 1.0, mz),
+			Vector3.BACK)
+	else:
+		_quad(st,
+			Vector3(lx1, _STEP_Y, mz), Vector3(lx0, _STEP_Y, mz),
+			Vector3(lx0, 1.0, mz), Vector3(lx1, 1.0, mz),
+			Vector3.FORWARD)
+
+	# Outer high sides (unit-cell faces for neighbor matching).
+	if dir_x > 0:
+		_quad(st,
+			Vector3(0.0, _STEP_Y, 0.0), Vector3(0.0, 1.0, 0.0),
+			Vector3(0.0, 1.0, 1.0), Vector3(0.0, _STEP_Y, 1.0),
+			Vector3.LEFT)
+	else:
+		_quad(st,
+			Vector3(1.0, _STEP_Y, 0.0), Vector3(1.0, _STEP_Y, 1.0),
+			Vector3(1.0, 1.0, 1.0), Vector3(1.0, 1.0, 0.0),
+			Vector3.RIGHT)
+	if dir_z > 0:
+		_quad(st,
+			Vector3(0.0, _STEP_Y, 0.0), Vector3(1.0, _STEP_Y, 0.0),
+			Vector3(1.0, 1.0, 0.0), Vector3(0.0, 1.0, 0.0),
+			Vector3.FORWARD)
+	else:
+		_quad(st,
+			Vector3(0.0, _STEP_Y, 1.0), Vector3(0.0, 1.0, 1.0),
+			Vector3(1.0, 1.0, 1.0), Vector3(1.0, _STEP_Y, 1.0),
+			Vector3.BACK)
+
+	# High strip end-cap on the drop Z side (only over hx span).
+	var strip_z_cap: float = 1.0 if dir_z > 0 else 0.0
+	var strip_z_n: Vector3 = Vector3.BACK if dir_z > 0 else Vector3.FORWARD
+	_quad(st,
+		Vector3(hx0, _STEP_Y, strip_z_cap), Vector3(hx1, _STEP_Y, strip_z_cap),
+		Vector3(hx1, 1.0, strip_z_cap), Vector3(hx0, 1.0, strip_z_cap),
+		strip_z_n)
+
+	# High stub outer wall on the drop-X side (half Z span).
+	if dir_x > 0:
+		_quad(st,
+			Vector3(1.0, _STEP_Y, sz0), Vector3(1.0, _STEP_Y, sz1),
+			Vector3(1.0, 1.0, sz1), Vector3(1.0, 1.0, sz0),
+			Vector3.RIGHT)
+	else:
+		_quad(st,
+			Vector3(0.0, _STEP_Y, sz1), Vector3(0.0, _STEP_Y, sz0),
+			Vector3(0.0, 1.0, sz0), Vector3(0.0, 1.0, sz1),
+			Vector3.LEFT)
+
+	st.index()
+	return st.commit()
 
 
 static func _quad(
@@ -335,19 +467,19 @@ static func _tri(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, n: Vector3
 	var area: Vector3 = (b - a).cross(c - a)
 	if area.length_squared() < 1e-12:
 		return
-	st.set_normal(n)
+	var pb := b
+	var pc := c
+	if area.dot(n) < 0.0:
+		pb = c
+		pc = b
+		area = -area
+	var geo_n: Vector3 = area.normalized()
+	st.set_normal(geo_n)
 	st.set_uv(Vector2(a.x, a.z))
 	st.add_vertex(a)
-	st.set_normal(n)
-	st.set_uv(Vector2(b.x, b.z))
-	st.add_vertex(b)
-	st.set_normal(n)
-	st.set_uv(Vector2(c.x, c.z))
-	st.add_vertex(c)
-
-
-static func _tri_n(a: Vector3, b: Vector3, c: Vector3) -> Vector3:
-	var n: Vector3 = (b - a).cross(c - a)
-	if n.length_squared() < 1e-12:
-		return Vector3.UP
-	return n.normalized()
+	st.set_normal(geo_n)
+	st.set_uv(Vector2(pb.x, pb.z))
+	st.add_vertex(pb)
+	st.set_normal(geo_n)
+	st.set_uv(Vector2(pc.x, pc.z))
+	st.add_vertex(pc)

@@ -64,6 +64,8 @@ func _generate_block(out_buffer: VoxelBuffer, origin_in_voxels: Vector3i, lod: i
 	_fill_tiny_surface_holes(profiles, size.x, size.z, origin_in_voxels, step)
 	_refine_slope_from_neighbors(profiles, size.x, size.z, step)
 	_cull_isolated_spikes(profiles, size.x, size.z)
+	# Spread multi-voxel walkable drops into 1-step terraces so ramp models can connect.
+	_terrace_walkable_surface(profiles, size.x, size.z, origin_in_voxels, step)
 
 	for z in range(size.z):
 		var gz: int = origin_in_voxels.z + z * step
@@ -155,9 +157,8 @@ func _surface_slope_id(gx: int, gz: int, top_i: int, base_id: int) -> int:
 func _apply_surface_slope_models(
 	out_buffer: VoxelBuffer, profiles: Array, origin_in_voxels: Vector3i, size: Vector3i, step: int
 ) -> void:
-	## Limitation: VoxelMesherBlocky models are fixed meshes (no automatic neighbor
-	## geometry). We only swap grass tops for pre-oriented ramps/corners when the
-	## surrounding column tops differ by exactly one voxel.
+	## VoxelMesherBlocky models are fixed meshes. After terracing, swap grass tops
+	## for pre-oriented ramps/corners when surrounding column tops differ by one voxel.
 	for z in range(size.z):
 		var gz: int = origin_in_voxels.z + z * step
 		for x in range(size.x):
@@ -165,21 +166,120 @@ func _apply_surface_slope_models(
 			var profile: Vector4 = profiles[z * size.x + x]
 			if profile.w < 0.5:
 				continue
+			# Prefer terraced profile top (may differ from raw noise column).
 			var top_i: int = int(floor(profile.x))
 			var ly: int = -1
 			if step == 1:
 				ly = top_i - origin_in_voxels.y
 			else:
-				# LOD: map world top into this block's local cells.
 				ly = int(floor(float(top_i - origin_in_voxels.y) / float(step)))
 			if ly < 0 or ly >= size.y:
 				continue
 			var base_id: int = int(out_buffer.get_voxel(x, ly, z, VoxelBuffer.CHANNEL_TYPE))
 			if base_id != BLOCK_GRASS:
 				continue
-			var slope_id: int = _surface_slope_id(gx, gz, top_i, base_id)
+			var slope_id: int = _surface_slope_id_from_profiles(
+				profiles, size.x, size.z, x, z, top_i, base_id, origin_in_voxels, step
+			)
 			if slope_id != base_id:
 				out_buffer.set_voxel(slope_id, x, ly, z, VoxelBuffer.CHANNEL_TYPE)
+
+
+func _surface_slope_id_from_profiles(
+	profiles: Array, width: int, depth: int,
+	lx: int, lz: int, top_i: int, base_id: int,
+	origin_in_voxels: Vector3i, step: int
+) -> int:
+	## Use terraced profile tops inside the block; sample generator at edges.
+	var te: int = _profile_top_i(profiles, width, depth, lx + 1, lz, origin_in_voxels, step)
+	var tw: int = _profile_top_i(profiles, width, depth, lx - 1, lz, origin_in_voxels, step)
+	var tn: int = _profile_top_i(profiles, width, depth, lx, lz - 1, origin_in_voxels, step)
+	var ts: int = _profile_top_i(profiles, width, depth, lx, lz + 1, origin_in_voxels, step)
+	var drop_px: int = 99 if te < 0 else top_i - te
+	var drop_nx: int = 99 if tw < 0 else top_i - tw
+	var drop_nz: int = 99 if tn < 0 else top_i - tn
+	var drop_pz: int = 99 if ts < 0 else top_i - ts
+	return _TerrainBlockyLibraryScript.surface_model_for_drops(base_id, drop_px, drop_nx, drop_pz, drop_nz)
+
+
+func _profile_top_i(
+	profiles: Array, width: int, depth: int,
+	lx: int, lz: int, origin_in_voxels: Vector3i, step: int
+) -> int:
+	if lx < 0 or lz < 0 or lx >= width or lz >= depth:
+		return _column_top_i(origin_in_voxels.x + lx * step, origin_in_voxels.z + lz * step)
+	var p: Vector4 = profiles[lz * width + lx]
+	if p.w < 0.5:
+		return -1
+	return int(floor(p.x))
+
+
+func _terrace_walkable_surface(
+	profiles: Array, width: int, depth: int,
+	origin_in_voxels: Vector3i, step: int
+) -> void:
+	## On gentle tops only, collapse height jumps > 1 into 1-voxel steps so ramps
+	## can form chains. Cliff / air-edge columns are left angular.
+	const MAX_PASSES: int = 3
+	const MAX_ADJUST: float = 1.0
+	for _pass in range(MAX_PASSES):
+		var changed := false
+		var next: Array = profiles.duplicate()
+		for z in range(depth):
+			for x in range(width):
+				var idx: int = z * width + x
+				var p: Vector4 = profiles[idx]
+				if p.w < 0.5:
+					continue
+				var steep: float = p.w - 1.0
+				if steep >= CLIFF_SLOPE:
+					continue
+				var top: float = p.x
+				var adjust: float = 0.0
+				var samples: int = 0
+				for d in [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, -1)]:
+					var nx: int = x + d.x
+					var nz: int = z + d.y
+					var np: Vector4
+					if nx < 0 or nz < 0 or nx >= width or nz >= depth:
+						np = _sample_column(
+							origin_in_voxels.x + nx * step,
+							origin_in_voxels.z + nz * step
+						)
+					else:
+						np = profiles[nz * width + nx]
+					if np.w < 0.5:
+						# Air edge — keep rocky silhouette; do not terrace outward.
+						adjust = 0.0
+						samples = 0
+						break
+					var n_steep: float = np.w - 1.0
+					if n_steep >= CLIFF_SLOPE:
+						continue
+					var diff: float = top - np.x
+					if diff > 1.0 + 0.001:
+						# Lower ourselves toward neighbor + 1 (one-step terrace).
+						adjust += (np.x + 1.0) - top
+						samples += 1
+					elif diff < -1.0 - 0.001:
+						# Raise ourselves toward neighbor - 1 (fill a walkable step).
+						adjust += (np.x - 1.0) - top
+						samples += 1
+				if samples <= 0:
+					continue
+				var delta: float = clampf(adjust / float(samples), -MAX_ADJUST, MAX_ADJUST)
+				if absf(delta) < 0.001:
+					continue
+				var new_top: float = top + delta
+				# Keep minimum thickness.
+				if new_top - p.y < MIN_COLUMN_THICKNESS:
+					continue
+				next[idx] = Vector4(new_top, p.y, p.z, p.w)
+				changed = true
+		for i in range(profiles.size()):
+			profiles[i] = next[i]
+		if not changed:
+			break
 
 func _land_mask(fx: float, fz: float) -> float:
 	var bias: float = density_threshold - MASK_CUTOFF
