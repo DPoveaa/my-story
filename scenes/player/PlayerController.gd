@@ -634,6 +634,15 @@ func _get_selected_block_id() -> int:
 		&"gold":  return 6
 		_:        return 3
 
+func _spawn_mined_terrain_debris(pos: Vector3i, block_type: StringName) -> void:
+	if orchestrator == null and get_parent() != null and get_parent().has_node("CollapseOrchestrator"):
+		orchestrator = get_parent().get_node("CollapseOrchestrator") as CollapseOrchestrator
+	if orchestrator == null:
+		return
+	var b_data := BlockData.new(block_type)
+	var dict: Dictionary = {pos: b_data}
+	orchestrator.spawn_debris_for_cells([pos], dict)
+
 func _handle_minecraft_break_action() -> void:
 	if area_selection_step != AreaSelectionStep.NONE:
 		if area_selection_step == AreaSelectionStep.CORNER_1:
@@ -646,15 +655,44 @@ func _handle_minecraft_break_action() -> void:
 		debris_grabber.try_place_to_grid()
 		return
 
-	# Instant break via voxel_tool
-	var vt := _get_voxel_tool()
-	if vt != null:
-		var hit = _perform_voxel_raycast()
-		if hit != null:
-			vt.set_voxel(hit.position, 0)
+	# 1. Check if targeting a physics block or debris
+	var grid := grid_system
+	if grid == null and has_node("/root/GridSystem"):
+		grid = get_node("/root/GridSystem")
+
+	if has_target:
+		if target_is_debris:
+			if is_instance_valid(target_debris_island) and target_debris_cell != null:
+				target_debris_island.remove_block(target_debris_cell)
+				return
+		elif grid != null and grid.has_block(target_remove_cell):
+			_handle_remove_action()
 			return
 
-	_handle_remove_action()
+	# 2. If looking at voxel terrain, break voxel AND spawn physics debris item
+	var vt := _get_voxel_tool()
+	var vox_world := _get_voxel_world()
+	if vt != null and vox_world != null:
+		var hit = _perform_voxel_raycast()
+		if hit != null:
+			var cell_pos: Vector3i = hit.position
+			var mined_type: StringName = vox_world.get_voxel_at(cell_pos)
+			if mined_type.is_empty():
+				mined_type = &"stone"
+			vt.set_voxel(cell_pos, 0)
+			_spawn_mined_terrain_debris(cell_pos, mined_type)
+			var inv_mgr := _get_inventory_manager()
+			if inv_mgr != null:
+				inv_mgr.add_material(mined_type, 1)
+			return
+
+	if target_is_terrain and vox_world != null:
+		var mined_type: StringName = vox_world.get_voxel_at(target_terrain_cell)
+		if mined_type.is_empty():
+			mined_type = &"stone"
+		vox_world.mine_voxel(target_terrain_cell)
+		_spawn_mined_terrain_debris(target_terrain_cell, mined_type)
+		return
 
 func _handle_minecraft_place_action() -> void:
 	if area_selection_step != AreaSelectionStep.NONE:
@@ -665,15 +703,7 @@ func _handle_minecraft_place_action() -> void:
 		debris_grabber.release()
 		return
 
-	# Instant place via voxel_tool
-	var vt := _get_voxel_tool()
-	if vt != null:
-		var hit = _perform_voxel_raycast()
-		if hit != null:
-			var block_id := _get_selected_block_id()
-			vt.set_voxel(hit.previous_position, block_id)
-			return
-
+	# Place physics/structural block via grid_system
 	_handle_place_action()
 
 func _handle_save_blueprint_action() -> void:
@@ -1493,10 +1523,6 @@ func _handle_place_action() -> void:
 
 	if debris_grabber != null and debris_grabber.is_grabbing:
 		debris_grabber.try_place_to_grid()
-		return
-
-	# Terrain is mined via RMB hold-to-mine only (see _physics_process).
-	if target_is_terrain:
 		return
 
 	if not has_target:
