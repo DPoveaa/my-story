@@ -152,7 +152,20 @@ func _surface_slope_id(gx: int, gz: int, top_i: int, base_id: int) -> int:
 	var drop_nx: int = 99 if tw < 0 else top_i - tw
 	var drop_nz: int = 99 if tn < 0 else top_i - tn
 	var drop_pz: int = 99 if ts < 0 else top_i - ts
-	return _TerrainBlockyLibraryScript.surface_model_for_drops(base_id, drop_px, drop_nx, drop_pz, drop_nz)
+
+	var tse: int = _column_top_i(gx + 1, gz + 1)
+	var tne: int = _column_top_i(gx + 1, gz - 1)
+	var tsw: int = _column_top_i(gx - 1, gz + 1)
+	var tnw: int = _column_top_i(gx - 1, gz - 1)
+	var drop_px_pz: int = 99 if tse < 0 else top_i - tse
+	var drop_px_nz: int = 99 if tne < 0 else top_i - tne
+	var drop_nx_pz: int = 99 if tsw < 0 else top_i - tsw
+	var drop_nx_nz: int = 99 if tnw < 0 else top_i - tnw
+
+	return _TerrainBlockyLibraryScript.surface_model_for_drops(
+		base_id, drop_px, drop_nx, drop_pz, drop_nz,
+		drop_px_pz, drop_px_nz, drop_nx_pz, drop_nx_nz
+	)
 
 func _apply_surface_slope_models(
 	out_buffer: VoxelBuffer, profiles: Array, origin_in_voxels: Vector3i, size: Vector3i, step: int
@@ -199,7 +212,20 @@ func _surface_slope_id_from_profiles(
 	var drop_nx: int = 99 if tw < 0 else top_i - tw
 	var drop_nz: int = 99 if tn < 0 else top_i - tn
 	var drop_pz: int = 99 if ts < 0 else top_i - ts
-	return _TerrainBlockyLibraryScript.surface_model_for_drops(base_id, drop_px, drop_nx, drop_pz, drop_nz)
+
+	var tse: int = _profile_top_i(profiles, width, depth, lx + 1, lz + 1, origin_in_voxels, step)
+	var tne: int = _profile_top_i(profiles, width, depth, lx + 1, lz - 1, origin_in_voxels, step)
+	var tsw: int = _profile_top_i(profiles, width, depth, lx - 1, lz + 1, origin_in_voxels, step)
+	var tnw: int = _profile_top_i(profiles, width, depth, lx - 1, lz - 1, origin_in_voxels, step)
+	var drop_px_pz: int = 99 if tse < 0 else top_i - tse
+	var drop_px_nz: int = 99 if tne < 0 else top_i - tne
+	var drop_nx_pz: int = 99 if tsw < 0 else top_i - tsw
+	var drop_nx_nz: int = 99 if tnw < 0 else top_i - tnw
+
+	return _TerrainBlockyLibraryScript.surface_model_for_drops(
+		base_id, drop_px, drop_nx, drop_pz, drop_nz,
+		drop_px_pz, drop_px_nz, drop_nx_pz, drop_nx_nz
+	)
 
 
 func _profile_top_i(

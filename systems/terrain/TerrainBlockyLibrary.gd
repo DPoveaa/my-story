@@ -1,4 +1,4 @@
-﻿class_name TerrainBlockyLibrary
+class_name TerrainBlockyLibrary
 extends RefCounted
 
 ## Builds a VoxelBlockyLibrary for VoxelMesherBlocky.
@@ -24,15 +24,21 @@ const BLOCK_GRASS_CORNER_PX_PZ: int = 14
 const BLOCK_GRASS_CORNER_PX_NZ: int = 15
 const BLOCK_GRASS_CORNER_NX_PZ: int = 16
 const BLOCK_GRASS_CORNER_NX_NZ: int = 17
+## Inner corners: low corner toward (dir_x, dir_z), three high corners opposite/adjacent.
+const BLOCK_GRASS_INNER_PX_PZ: int = 18
+const BLOCK_GRASS_INNER_PX_NZ: int = 19
+const BLOCK_GRASS_INNER_NX_PZ: int = 20
+const BLOCK_GRASS_INNER_NX_NZ: int = 21
 
-const MODEL_COUNT: int = 18
+const MODEL_COUNT: int = 22
 
 const _HYBRID_SHADER = preload("res://systems/terrain/terrain_hybrid.gdshader")
 
 static func material_id_of(type_id: int) -> int:
 	match type_id:
 		BLOCK_GRASS, BLOCK_GRASS_RAMP_PX, BLOCK_GRASS_RAMP_NX, BLOCK_GRASS_RAMP_PZ, BLOCK_GRASS_RAMP_NZ, \
-		BLOCK_GRASS_CORNER_PX_PZ, BLOCK_GRASS_CORNER_PX_NZ, BLOCK_GRASS_CORNER_NX_PZ, BLOCK_GRASS_CORNER_NX_NZ:
+		BLOCK_GRASS_CORNER_PX_PZ, BLOCK_GRASS_CORNER_PX_NZ, BLOCK_GRASS_CORNER_NX_PZ, BLOCK_GRASS_CORNER_NX_NZ, \
+		BLOCK_GRASS_INNER_PX_PZ, BLOCK_GRASS_INNER_PX_NZ, BLOCK_GRASS_INNER_NX_PZ, BLOCK_GRASS_INNER_NX_NZ:
 			return BLOCK_GRASS
 		BLOCK_DIRT:
 			return BLOCK_DIRT
@@ -114,6 +120,10 @@ static func build_library() -> VoxelBlockyLibrary:
 	models[BLOCK_GRASS_CORNER_PX_NZ] = _make_mesh_model(_build_corner_mesh(+1, -1), grass_mat)
 	models[BLOCK_GRASS_CORNER_NX_PZ] = _make_mesh_model(_build_corner_mesh(-1, +1), grass_mat)
 	models[BLOCK_GRASS_CORNER_NX_NZ] = _make_mesh_model(_build_corner_mesh(-1, -1), grass_mat)
+	models[BLOCK_GRASS_INNER_PX_PZ]  = _make_mesh_model(_build_inner_corner_mesh(+1, +1), grass_mat)
+	models[BLOCK_GRASS_INNER_PX_NZ]  = _make_mesh_model(_build_inner_corner_mesh(+1, -1), grass_mat)
+	models[BLOCK_GRASS_INNER_NX_PZ]  = _make_mesh_model(_build_inner_corner_mesh(-1, +1), grass_mat)
+	models[BLOCK_GRASS_INNER_NX_NZ]  = _make_mesh_model(_build_inner_corner_mesh(-1, -1), grass_mat)
 
 	var lib := VoxelBlockyLibrary.new()
 	# Untextured hybrid shader does not need tangents; keeps bake reliable.
@@ -135,11 +145,17 @@ static func build_library() -> VoxelBlockyLibrary:
 	return lib
 
 
-## Pick a surface model from cardinal height drops of exactly 1.
+## Pick a surface model from cardinal (and optional diagonal) height drops of exactly 1.
 ## Drops > 1 (solid cliff neighbors) stay cubes. Air neighbors (encoded as >= 90)
 ## do not block ramps toward other solid 1-step neighbors.
-## Ambiguous multi-axis cases use corners only for exactly two adjacent 1-steps.
-static func surface_model_for_drops(base_id: int, drop_px: int, drop_nx: int, drop_pz: int, drop_nz: int) -> int:
+## Straight slopes: exactly one cardinal drop of 1.
+## Convex corners: exactly two adjacent cardinal drops of 1.
+## Concave corners: zero cardinal drops, exactly one diagonal drop of 1.
+static func surface_model_for_drops(
+	base_id: int,
+	drop_px: int, drop_nx: int, drop_pz: int, drop_nz: int,
+	drop_px_pz: int = 0, drop_px_nz: int = 0, drop_nx_pz: int = 0, drop_nx_nz: int = 0
+) -> int:
 	if base_id != BLOCK_GRASS:
 		return base_id
 
@@ -151,8 +167,26 @@ static func surface_model_for_drops(base_id: int, drop_px: int, drop_nx: int, dr
 	var dpz: bool = drop_pz == 1
 	var dnz: bool = drop_nz == 1
 	var count: int = int(dpx) + int(dnx) + int(dpz) + int(dnz)
+
 	if count == 0:
+		# Check for concave (inner) corners where cardinal terrain matches height
+		# and a single diagonal corner drops by 1 to connect the slopes.
+		var c_px_pz: bool = drop_px_pz == 1
+		var c_px_nz: bool = drop_px_nz == 1
+		var c_nx_pz: bool = drop_nx_pz == 1
+		var c_nx_nz: bool = drop_nx_nz == 1
+		var diag_count: int = int(c_px_pz) + int(c_px_nz) + int(c_nx_pz) + int(c_nx_nz)
+		if diag_count == 1:
+			if c_px_pz:
+				return BLOCK_GRASS_INNER_PX_PZ
+			if c_px_nz:
+				return BLOCK_GRASS_INNER_PX_NZ
+			if c_nx_pz:
+				return BLOCK_GRASS_INNER_NX_PZ
+			if c_nx_nz:
+				return BLOCK_GRASS_INNER_NX_NZ
 		return BLOCK_GRASS
+
 	if count == 1:
 		if dpx:
 			return BLOCK_GRASS_RAMP_PX
@@ -161,7 +195,9 @@ static func surface_model_for_drops(base_id: int, drop_px: int, drop_nx: int, dr
 		if dpz:
 			return BLOCK_GRASS_RAMP_PZ
 		return BLOCK_GRASS_RAMP_NZ
+
 	if count == 2:
+		# Convex (outer) corners: low corner towards the two dropping axes
 		if dpx and dpz and not dnx and not dnz:
 			return BLOCK_GRASS_CORNER_PX_PZ
 		if dpx and dnz and not dnx and not dpz:
@@ -171,6 +207,7 @@ static func surface_model_for_drops(base_id: int, drop_px: int, drop_nx: int, dr
 		if dnx and dnz and not dpx and not dpz:
 			return BLOCK_GRASS_CORNER_NX_NZ
 		return BLOCK_GRASS
+
 	return BLOCK_GRASS
 
 
@@ -202,16 +239,18 @@ static func _make_mesh_model(mesh: ArrayMesh, mat: Material) -> VoxelBlockyModel
 		model.set_mesh_collision_enabled(0, true)
 	# Do NOT set collision_aabbs: that is the VoxelBoxMover path and would give a
 	# full-cube collider mismatching the inclined geometry.
-	# Ramp/corner side coverage is partial so neighbor-face culling would remove
-	# required visible faces. Disable it so all generated faces render.
-	model.culls_neighbors = false
+	# culls_neighbors = true allows VoxelMesherBlocky to cull the top face of the dirt
+	# cube directly beneath the ramp/corner's flat underside.
+	model.culls_neighbors = true
 	model.transparency_index = 0
 	return model
 
 
 ## Build a continuous inclined ramp mesh.
 ## dir_x / dir_z: which axis carries the LOW edge (the drop direction).
-## e.g. dir_x=+1 means the low edge is at x=1 (y=0 there), high at x=0 (y=1).
+## e.g. dir_x=+1 means the ramp block sits above a 1-step drop toward +X:
+##   high edge at x=0 (y=1, touching the upper plateau),
+##   low edge at x=1 (y=0, touching the lower terrace).
 ##
 ## The top is a single inclined quad; sides are right-triangle wedges;
 ## underside is a flat quad at y=0.
@@ -226,16 +265,16 @@ static func _build_ramp_mesh(dir_x: int, dir_z: int) -> ArrayMesh:
 	var y_d: float  # corner (x=0, z=1)
 
 	if dir_x > 0:
-		# Low at x=1, high at x=0.
+		# Drop toward +X: high at x=0, low at x=1.
 		y_a = 1.0; y_b = 0.0; y_c = 0.0; y_d = 1.0
 	elif dir_x < 0:
-		# Low at x=0, high at x=1.
+		# Drop toward -X: high at x=1, low at x=0.
 		y_a = 0.0; y_b = 1.0; y_c = 1.0; y_d = 0.0
 	elif dir_z > 0:
-		# Low at z=1, high at z=0.
+		# Drop toward +Z: high at z=0, low at z=1.
 		y_a = 1.0; y_b = 1.0; y_c = 0.0; y_d = 0.0
 	else:
-		# Low at z=0, high at z=1.
+		# Drop toward -Z: high at z=1, low at z=0.
 		y_a = 0.0; y_b = 0.0; y_c = 1.0; y_d = 1.0
 
 	var va := Vector3(0.0, y_a, 0.0)
@@ -243,12 +282,9 @@ static func _build_ramp_mesh(dir_x: int, dir_z: int) -> ArrayMesh:
 	var vc := Vector3(1.0, y_c, 1.0)
 	var vd := Vector3(0.0, y_d, 1.0)
 
-	# Slope normal (hint for winding correction in _tri).
-	var slope_n: Vector3
-	if dir_x != 0:
-		slope_n = Vector3(-float(dir_x), 1.0, 0.0).normalized()
-	else:
-		slope_n = Vector3(0.0, 1.0, -float(dir_z)).normalized()
+	# Slope normal pointing UP and away from the drop direction (winding hint for _tri).
+	var slope_n: Vector3 = Vector3(float(dir_x), 1.0, float(dir_z)).normalized()
+
 
 	# Inclined top surface.
 	_tri(st, va, vb, vc, slope_n)
@@ -297,14 +333,12 @@ static func _side_wedge(
 		_tri(st, top_a, bot_b, bot_a, n)
 
 
-## Build a continuous inclined corner mesh.
+## Build a continuous inclined convex (outer) corner mesh.
 ## dir_x / dir_z: axes toward the LOW corner (both neighboring drops equal 1).
 ##
-## Corner heights are set so the surface smoothly blends the two adjacent ramps:
-##   low corner  (dir_x, dir_z)   -> y = 0.0
-##   high corner (-dir_x, -dir_z) -> y = 1.0
-##   two intermediate corners     -> y = 0.5
-## The top is split diagonally (high-to-low) into two triangles.
+## The high corner is at y = 1.0. The other three corners are at y = 0.0,
+## seamlessly continuing the adjoining straight ramps with zero height mismatch
+## or exposed vertical walls.
 static func _build_corner_mesh(dir_x: int, dir_z: int) -> ArrayMesh:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
@@ -319,8 +353,8 @@ static func _build_corner_mesh(dir_x: int, dir_z: int) -> ArrayMesh:
 	var heights: Array[float] = [0.0, 0.0, 0.0, 0.0]
 	heights[lx + lz * 2] = 0.0   # low corner
 	heights[hx + hz * 2] = 1.0   # high corner
-	heights[lx + hz * 2] = 0.5   # mid (same X as low, same Z as high)
-	heights[hx + lz * 2] = 0.5   # mid (same X as high, same Z as low)
+	heights[lx + hz * 2] = 0.0   # side corner 1 (matches adjacent ramp low edge)
+	heights[hx + lz * 2] = 0.0   # side corner 2 (matches adjacent ramp low edge)
 
 	# Corner vectors: A=(0,0), B=(1,0), C=(1,1), D=(0,1).
 	var va := Vector3(0.0, heights[0], 0.0)
@@ -328,15 +362,64 @@ static func _build_corner_mesh(dir_x: int, dir_z: int) -> ArrayMesh:
 	var vc := Vector3(1.0, heights[3], 1.0)
 	var vd := Vector3(0.0, heights[2], 1.0)
 
-	# Inclined top: split along the high-to-low diagonal.
-	var high_pos := Vector3(float(hx), 1.0, float(hz))
-	var low_pos  := Vector3(float(lx), 0.0, float(lz))
-	var mid1_pos := Vector3(float(lx), 0.5, float(hz))  # same X as low, Z as high
-	var mid2_pos := Vector3(float(hx), 0.5, float(lz))  # same X as high, Z as low
+	var high_pos  := Vector3(float(hx), 1.0, float(hz))
+	var side1_pos := Vector3(float(lx), 0.0, float(hz))
+	var side2_pos := Vector3(float(hx), 0.0, float(lz))
+	var low_pos   := Vector3(float(lx), 0.0, float(lz))
 
+	var slope_n := Vector3(float(dir_x), 1.0, float(dir_z)).normalized()
+	_tri(st, high_pos, side1_pos, side2_pos, slope_n)
+	_tri(st, side1_pos, low_pos, side2_pos, Vector3.UP)
+
+	# Flat underside.
+	_quad(st,
+		Vector3(0, 0, 0), Vector3(1, 0, 0), Vector3(1, 0, 1), Vector3(0, 0, 1),
+		Vector3.DOWN)
+
+	# Side wedges using the same corner heights as the top surface.
+	_side_wedge(st, va, vb, Vector3(0, 0, 0), Vector3(1, 0, 0), Vector3.FORWARD)
+	_side_wedge(st, vd, vc, Vector3(0, 0, 1), Vector3(1, 0, 1), Vector3.BACK)
+	_side_wedge(st, va, vd, Vector3(0, 0, 0), Vector3(0, 0, 1), Vector3.LEFT)
+	_side_wedge(st, vb, vc, Vector3(1, 0, 0), Vector3(1, 0, 1), Vector3.RIGHT)
+
+	st.index()
+	return st.commit()
+
+
+## Build a continuous inclined concave (inner) corner mesh.
+## dir_x / dir_z: axes toward the single LOW corner.
+##
+## Three corners are high (y = 1.0) flush with the upper plateau/slopes,
+## and one corner is low (y = 0.0) descending to match the valley drop.
+static func _build_inner_corner_mesh(dir_x: int, dir_z: int) -> ArrayMesh:
+	var st := SurfaceTool.new()
+	st.begin(Mesh.PRIMITIVE_TRIANGLES)
+
+	var lx: int = 1 if dir_x > 0 else 0
+	var lz: int = 1 if dir_z > 0 else 0
+	var hx: int = 1 - lx
+	var hz: int = 1 - lz
+
+	var heights: Array[float] = [1.0, 1.0, 1.0, 1.0]
+	heights[lx + lz * 2] = 0.0   # single low corner
+	heights[hx + hz * 2] = 1.0   # high corner
+	heights[lx + hz * 2] = 1.0   # side corner 1 is high
+	heights[hx + lz * 2] = 1.0   # side corner 2 is high
+
+	var va := Vector3(0.0, heights[0], 0.0)
+	var vb := Vector3(1.0, heights[1], 0.0)
+	var vc := Vector3(1.0, heights[3], 1.0)
+	var vd := Vector3(0.0, heights[2], 1.0)
+
+	var high_pos  := Vector3(float(hx), 1.0, float(hz))
+	var low_pos   := Vector3(float(lx), 0.0, float(lz))
+	var side1_pos := Vector3(float(lx), 1.0, float(hz))
+	var side2_pos := Vector3(float(hx), 1.0, float(lz))
+
+	# Split along high-to-low diagonal into two inclined triangles
 	var up := Vector3.UP
-	_tri(st, high_pos, mid1_pos, low_pos,  up)
-	_tri(st, high_pos, low_pos,  mid2_pos, up)
+	_tri(st, high_pos, side1_pos, low_pos, up)
+	_tri(st, high_pos, low_pos, side2_pos, up)
 
 	# Flat underside.
 	_quad(st,
