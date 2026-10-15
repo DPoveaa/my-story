@@ -36,7 +36,6 @@ func _ready() -> void:
 	# Instantiate 3D Chunked Voxel World
 	voxel_world = VoxelWorldScript.new()
 	voxel_world.name = "VoxelWorld"
-	voxel_world.seed_value = 1337
 	add_child(voxel_world)
 	# NOTE: do NOT call update_loaded_chunks or get_spawn_position here.
 	# VoxelChunk StaticBody3D nodes added via add_child() during _ready() have their
@@ -102,7 +101,7 @@ func _ready() -> void:
 
 		if player.has_method("suspend_physics"):
 			player.suspend_physics()
-		player.global_position = Vector3(0.5, 90.0, 0.5)
+		player.global_position = Vector3(0.5, 250.0, 0.5)
 		if build_hud != null and build_hud.has_method("set_loading_overlay"):
 			build_hud.set_loading_overlay(true, "Loading terrain…")
 		_spawn_player_on_terrain.call_deferred()
@@ -124,7 +123,7 @@ func _spawn_player_on_terrain() -> void:
 	if player == null or voxel_world == null:
 		return
 
-	var hold := Vector3(0.5, 90.0, 0.5)
+	var hold := Vector3(0.5, 250.0, 0.5)
 	player.global_position = hold
 	if player.has_method("suspend_physics"):
 		player.suspend_physics()

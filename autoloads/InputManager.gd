@@ -37,9 +37,9 @@ func setup_default_input_actions() -> void:
 	_add_key_action(&"save_blueprint", KEY_K)
 	_add_key_action(&"load_blueprint", KEY_L)
 
-	# Interaction
-	_add_mouse_action(&"place_block", MOUSE_BUTTON_LEFT)
-	_add_mouse_action(&"remove_block", MOUSE_BUTTON_RIGHT)
+	# Interaction — LMB = break/remove, RMB = place
+	_set_mouse_action(&"remove_block", MOUSE_BUTTON_LEFT)
+	_set_mouse_action(&"place_block", MOUSE_BUTTON_RIGHT)
 	_add_key_action(&"toggle_mouse_capture", KEY_TAB)
 	_add_key_action(&"toggle_mouse_capture", KEY_ESCAPE)
 
@@ -79,6 +79,17 @@ func _add_mouse_action(action: StringName, button_index: MouseButton) -> void:
 		if existing is InputEventMouseButton and existing.button_index == button_index:
 			return
 
+	var ev := InputEventMouseButton.new()
+	ev.button_index = button_index
+	InputMap.action_add_event(action, ev)
+
+func _set_mouse_action(action: StringName, button_index: MouseButton) -> void:
+	if not InputMap.has_action(action):
+		InputMap.add_action(action)
+	else:
+		for existing in InputMap.action_get_events(action):
+			if existing is InputEventMouseButton:
+				InputMap.action_erase_event(action, existing)
 	var ev := InputEventMouseButton.new()
 	ev.button_index = button_index
 	InputMap.action_add_event(action, ev)

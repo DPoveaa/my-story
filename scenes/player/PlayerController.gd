@@ -195,7 +195,7 @@ func _ready() -> void:
 		projection_camera.top_level = true
 
 	# Hold above the island band; GameWorld places us after terrain+collision are ready.
-	global_position = Vector3(0.5, 90.0, 0.5)
+	global_position = Vector3(0.5, 250.0, 0.5)
 	_resolved_spawn = global_position
 	_is_spawned = false
 	_gameplay_input_suspended = true
@@ -641,7 +641,7 @@ func _spawn_mined_terrain_debris(pos: Vector3i, block_type: StringName) -> void:
 		return
 	var b_data := BlockData.new(block_type)
 	var dict: Dictionary = {pos: b_data}
-	var cell_arr: Array = [pos]
+	var cell_arr: Array[Vector3i] = [pos]
 	orchestrator.spawn_debris_for_cells(cell_arr, dict)
 
 func _handle_minecraft_break_action() -> void:
@@ -656,7 +656,7 @@ func _handle_minecraft_break_action() -> void:
 		debris_grabber.try_place_to_grid()
 		return
 
-	# 1. Check if targeting a physics block or debris
+	# 1. Physics / grid block → destroy
 	var grid := grid_system
 	if grid == null and has_node("/root/GridSystem"):
 		grid = get_node("/root/GridSystem")
@@ -666,11 +666,11 @@ func _handle_minecraft_break_action() -> void:
 			if is_instance_valid(target_debris_island) and target_debris_cell != null:
 				target_debris_island.remove_block(target_debris_cell)
 				return
-		elif grid != null and grid.has_block(target_remove_cell):
+		elif not target_is_terrain and grid != null and grid.has_block(target_remove_cell):
 			_handle_remove_action()
 			return
 
-	# 2. If looking at voxel terrain, break voxel AND spawn physics debris item
+	# 2. Voxel terrain → clear with set_voxel(hit, 0) via mine_voxel
 	var vt := _get_voxel_tool()
 	var vox_world := _get_voxel_world()
 	if vt != null and vox_world != null:
@@ -679,6 +679,8 @@ func _handle_minecraft_break_action() -> void:
 			var cell_pos: Vector3i = hit.position
 			var mined_type: StringName = vox_world.mine_voxel(cell_pos)
 			if mined_type.is_empty():
+				vt.channel = VoxelBuffer.CHANNEL_TYPE
+				vt.set_voxel(cell_pos, 0)
 				mined_type = &"stone"
 			_spawn_mined_terrain_debris(cell_pos, mined_type)
 			var inv_mgr := _get_inventory_manager()
@@ -687,12 +689,17 @@ func _handle_minecraft_break_action() -> void:
 			return
 
 	if target_is_terrain and vox_world != null:
-		var mined_type: StringName = vox_world.get_voxel_at(target_terrain_cell)
+		var cell_pos: Vector3i = target_terrain_cell
+		var mined_type: StringName = vox_world.mine_voxel(cell_pos)
 		if mined_type.is_empty():
+			if vt != null:
+				vt.channel = VoxelBuffer.CHANNEL_TYPE
+				vt.set_voxel(cell_pos, 0)
 			mined_type = &"stone"
-		vox_world.mine_voxel(target_terrain_cell)
-		_spawn_mined_terrain_debris(target_terrain_cell, mined_type)
-		return
+		_spawn_mined_terrain_debris(cell_pos, mined_type)
+		var inv_mgr2 := _get_inventory_manager()
+		if inv_mgr2 != null:
+			inv_mgr2.add_material(mined_type, 1)
 
 func _handle_minecraft_place_action() -> void:
 	if area_selection_step != AreaSelectionStep.NONE:
@@ -703,7 +710,33 @@ func _handle_minecraft_place_action() -> void:
 		debris_grabber.release()
 		return
 
-	# Place physics/structural block via grid_system
+	# RMB must spawn a real physics/structural block — never just toggle PreviewGhost.
+	var grid := grid_system
+	if grid == null and has_node("/root/GridSystem"):
+		grid = get_node("/root/GridSystem")
+	if grid == null:
+		return
+
+	var place_cell: Vector3i = target_place_cell
+	var resolved := false
+
+	# Prefer VoxelTool previous_position (air cell outside the hit face).
+	var hit = _perform_voxel_raycast()
+	if hit != null and "previous_position" in hit:
+		place_cell = hit.previous_position as Vector3i
+		resolved = true
+	elif has_target:
+		# Physics ray: place_pos = hit.position + hit.normal * 0.5 (snapped).
+		var place_pos: Vector3 = _target_hit_point + (_target_hit_normal.normalized() * (grid.cell_size * 0.5))
+		place_cell = grid.world_to_cell(place_pos)
+		resolved = true
+
+	if not resolved and not has_target:
+		return
+
+	has_target = true
+	target_place_cell = place_cell
+	can_place_target = true
 	_handle_place_action()
 
 func _handle_save_blueprint_action() -> void:
@@ -1449,7 +1482,14 @@ func _update_raycast() -> void:
 			target_is_terrain = true
 			target_terrain_cell = target_remove_cell
 			target_terrain_type = vox_world2.get_voxel_at(target_remove_cell)
-			can_place_target = false
+			# Placement cell is outside the hit face (already offset above).
+			var grid_valid_t: bool = grid.can_place_block(target_place_cell)
+			var blocked_debris_t: bool = false
+			if orchestrator != null:
+				blocked_debris_t = orchestrator.is_cell_blocked_by_debris(target_place_cell, grid.cell_size)
+			var overlaps_t: bool = is_cell_overlapping_player(target_place_cell, grid.cell_size)
+			var blocked_terrain_t: bool = vox_world2.is_solid_block(target_place_cell)
+			can_place_target = grid_valid_t and not blocked_debris_t and not overlaps_t and not blocked_terrain_t
 			var mat_disp2 := BlockTypeCatalog.get_display_name(target_terrain_type)
 			target_face_status = "Natural %s (LMB: Break, RMB: Place)" % mat_disp2
 			_update_terrain_target_visuals(target_terrain_cell, 0.0)
@@ -1474,9 +1514,6 @@ func _update_raycast() -> void:
 			preview_ghost.update_area_preview(min_c, max_c, grid.cell_size)
 		elif debris_grabber != null and debris_grabber.is_grabbing:
 			pass # DebrisGrabber updates the preview ghost for recovery
-		elif target_is_terrain:
-			# Natural terrain uses the subtle outline only — no green placement cube.
-			preview_ghost.hide_preview()
 		elif target_is_debris and target_debris_island != null and target_debris_island.is_moving():
 			preview_ghost.hide_preview()
 		elif can_place_target:

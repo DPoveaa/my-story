@@ -66,9 +66,9 @@ func get_stage_title(stage: Stage) -> String:
 func get_stage_action_text(stage: Stage) -> String:
 	match stage:
 		Stage.GATHER_RESOURCES:
-			return "Mine Natural Voxels [RMB]"
+			return "Mine Natural Voxels [LMB]"
 		Stage.BUILD_STRUCTURE:
-			return "Place Grid Blocks [LMB]"
+			return "Place Grid Blocks [RMB]"
 		Stage.FORTIFY_SURFACES:
 			return "Apply Mortar to Faces [G]"
 	return "Progress Objective"

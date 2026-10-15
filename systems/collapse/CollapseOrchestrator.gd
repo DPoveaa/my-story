@@ -132,9 +132,12 @@ func spawn_debris_for_cells(cells: Array, block_data_map: Dictionary) -> Array[D
 	var grid := grid_system
 	if grid == null and has_node("/root/GridSystem"):
 		grid = get_node("/root/GridSystem")
-	var cs := grid.cell_size if grid != null else 1.0
+	var cs: float = grid.cell_size if grid != null else 1.0
 
-	var island_groups: Array = IslandBuilder.group_islands(cells)
+	var typed_cells: Array[Vector3i] = []
+	for c in cells:
+		typed_cells.append(c as Vector3i)
+	var island_groups: Array = IslandBuilder.group_islands(typed_cells)
 	var spawned_islands: Array[DebrisIsland] = []
 
 	for group_var in island_groups:

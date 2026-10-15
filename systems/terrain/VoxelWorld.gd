@@ -34,9 +34,9 @@ signal spawn_chunks_ready
 signal view_distance_changed(voxels: int, chunks: int)
 signal terrain_loading_status(message: String)
 
-## Soft loading budget (~15s at 60fps) + short grace recovery after timeout.
-const TERRAIN_WAIT_FRAMES: int = 900
-const TERRAIN_GRACE_FRAMES: int = 180
+## Soft loading budget (~30s at 60fps) + extended grace for heavier grass/ore meshing.
+const TERRAIN_WAIT_FRAMES: int = 1800
+const TERRAIN_GRACE_FRAMES: int = 1800
 
 const VIEW_DIST_CHUNKS_MIN: int = 8
 ## LOD backend practical ceiling (chunks). Far rings use lower detail — not full mesh/collision.
@@ -101,15 +101,19 @@ var _mesh_block_wake: bool = false
 
 func _ready() -> void:
 	randomize()
-	seed_value = randi()
-	_setup_fallback_noise()
-	load_terrain_deltas()
+	# Fresh procedural world each session via noise seeds — do not move player or terrain.
+	_randomize_generator_noise()
+	# Do not load disk cache — edits must not persist between sessions.
+	_mined_deltas.clear()
+	_mined_deltas_set.clear()
 	_build_terrain()
+	# Force-disable VoxelTerrain stream so chunk edits are never saved to disk.
+	# Keep terrain at origin so VoxelViewer chunk streaming stays in sync.
 	if _terrain != null:
-		if "stream" in _terrain:
-			_terrain.stream = null
+		_terrain.stream = null
+		_terrain.position = Vector3.ZERO
+		_terrain.global_position = Vector3.ZERO
 	_build_viewer()
-	_apply_persisted_deltas()
 
 func _process(delta: float) -> void:
 	if _viewer == null:
@@ -299,6 +303,19 @@ func _apply_generator_params() -> void:
 		_island_gen.noise_island_2d = _noise_2d
 		_island_gen.noise_ore = _noise_ore
 		_island_gen.density_threshold = island_density_threshold
+
+func _randomize_generator_noise() -> void:
+	## Re-seed FastNoiseLite inputs on the active generator for a new world layout.
+	seed_value = randi()
+	_setup_fallback_noise()
+	if _island_gen != null:
+		_island_gen.noise_island = _noise_3d
+		_island_gen.noise_island_2d = _noise_2d
+		_island_gen.noise_ore = _noise_ore
+		_island_gen.density_threshold = island_density_threshold
+		_island_gen.vertical_scale = island_vertical_scale
+	if _terrain != null and _terrain.generator != _island_gen and _island_gen != null:
+		_terrain.generator = _island_gen
 
 func _setup_fallback_noise() -> void:
 	_noise_2d = FastNoiseLite.new()
@@ -601,7 +618,7 @@ func try_find_safe_spawn(max_radius: int = 16, carrier: Node3D = null) -> Vector
 	var spawn_x := 0.5
 	var spawn_z := 0.5
 	if carrier != null:
-		carrier.global_position = Vector3(spawn_x, 90.0, spawn_z)
+		carrier.global_position = Vector3(spawn_x, 250.0, spawn_z)
 	elif _viewer != null and _viewer.is_inside_tree():
 		_viewer.global_position = Vector3(spawn_x, 56.0, spawn_z)
 		if _viewer_collision != null and _viewer_collision.is_inside_tree():
@@ -910,50 +927,11 @@ func _island_density_to_id(gx: int, gy: int, gz: int) -> int:
 	return BLOCK_AIR
 
 func save_terrain_deltas() -> bool:
-	var dict: Dictionary = {"version": 1, "seed": seed_value, "deltas": {}}
-	for cp in _mined_deltas.keys():
-		var key_str := "%d,%d" % [cp.x, cp.y]
-		var cells_arr: Array = []
-		for cell in _mined_deltas[cp]:
-			cells_arr.append([cell.x, cell.y, cell.z])
-		dict["deltas"][key_str] = cells_arr
-	var file := FileAccess.open(DELTA_SAVE_PATH, FileAccess.WRITE)
-	if file == null:
-		return false
-	file.store_string(JSON.stringify(dict, "\t"))
-	file.close()
+	# World caching disabled — never write chunk edits to disk.
 	return true
 
 func load_terrain_deltas() -> bool:
-	if not FileAccess.file_exists(DELTA_SAVE_PATH):
-		return false
-	var file := FileAccess.open(DELTA_SAVE_PATH, FileAccess.READ)
-	if file == null:
-		return false
-	var content: String = file.get_as_text()
-	file.close()
-	var json := JSON.new()
-	if json.parse(content) != OK or not (json.data is Dictionary):
-		return false
-	var dict: Dictionary = json.data
-	var deltas_dict = dict.get("deltas", null)
-	if not (deltas_dict is Dictionary):
-		return false
+	# World caching disabled — ignore any existing disk cache.
 	_mined_deltas.clear()
 	_mined_deltas_set.clear()
-	for key_str in deltas_dict.keys():
-		var parts = key_str.split(",")
-		if parts.size() == 2:
-			var cp := Vector2i(int(parts[0]), int(parts[1]))
-			var arr = deltas_dict[key_str]
-			if arr is Array:
-				var cells_list: Array[Vector3i] = []
-				var cells_set: Dictionary = {}
-				for item in arr:
-					if item is Array and item.size() == 3:
-						var c := Vector3i(int(item[0]), int(item[1]), int(item[2]))
-						cells_list.append(c)
-						cells_set[c] = true
-				_mined_deltas[cp] = cells_list
-				_mined_deltas_set[cp] = cells_set
-	return true
+	return false

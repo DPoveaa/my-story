@@ -69,12 +69,12 @@ func _unhandled_input(event: InputEvent) -> void:
 			_pitch = clampf(_pitch - event.relative.y * mouse_sensitivity, -1.45, 1.45)
 			_update_rotation()
 
-	# Clicks
+	# Clicks — LMB = break/remove, RMB = place
 	if event is InputEventMouseButton and event.pressed:
 		if event.button_index == MOUSE_BUTTON_LEFT:
-			_handle_place_action()
-		elif event.button_index == MOUSE_BUTTON_RIGHT:
 			_handle_remove_action()
+		elif event.button_index == MOUSE_BUTTON_RIGHT:
+			_handle_place_action()
 		elif event.button_index == MOUSE_BUTTON_WHEEL_UP:
 			_cycle_block_type(-1)
 		elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
