@@ -662,7 +662,7 @@ func _handle_minecraft_break_action() -> void:
 		return
 
 	if debris_grabber != null and debris_grabber.is_grabbing:
-		debris_grabber.try_place_to_grid()
+		debris_grabber.release()
 		return
 
 	# 1. Physics / grid block → destroy
@@ -716,10 +716,43 @@ func _handle_minecraft_place_action() -> void:
 		return
 
 	if debris_grabber != null and debris_grabber.is_grabbing:
-		debris_grabber.release()
+		debris_grabber.try_place_to_grid()
 		return
 
-	# RMB must spawn a real physics/structural block — never just toggle PreviewGhost.
+	var mat_type := get_selected_type()
+	if BlockTypeCatalog.is_natural(mat_type):
+		# Natural terrain placement using Zylann Voxel terrain system
+		var vt := _get_voxel_tool()
+		var hit = _perform_voxel_raycast()
+		if hit != null and vt != null:
+			var selected_block_id := _get_selected_block_id()
+			var target_pos: Vector3i = hit.previous_position
+			vt.channel = VoxelBuffer.CHANNEL_TYPE
+			vt.set_voxel(target_pos, selected_block_id)
+			var inv_mgr := _get_inventory_manager()
+			if game_mode == GameMode.SURVIVAL and inv_mgr != null:
+				inv_mgr.consume_materials({mat_type: 1})
+			return
+		elif has_target and vt != null:
+			var n := _target_hit_normal
+			if n.length_squared() < 0.0001:
+				n = Vector3.UP
+			else:
+				n = n.normalized()
+			var target_pos := Vector3i(
+				floori(_target_hit_point.x + n.x * 0.5),
+				floori(_target_hit_point.y + n.y * 0.5),
+				floori(_target_hit_point.z + n.z * 0.5)
+			)
+			var selected_block_id := _get_selected_block_id()
+			vt.channel = VoxelBuffer.CHANNEL_TYPE
+			vt.set_voxel(target_pos, selected_block_id)
+			var inv_mgr := _get_inventory_manager()
+			if game_mode == GameMode.SURVIVAL and inv_mgr != null:
+				inv_mgr.consume_materials({mat_type: 1})
+			return
+
+	# Structural / Building material placement using the physics grid
 	var grid := grid_system
 	if grid == null and has_node("/root/GridSystem"):
 		grid = get_node("/root/GridSystem")
@@ -730,7 +763,6 @@ func _handle_minecraft_place_action() -> void:
 	var resolved := false
 
 	if has_target and not target_is_terrain:
-		# Physics / grid hit: place_pos = hit.position + hit.normal * 0.5 (snapped to grid).
 		var n := _target_hit_normal
 		if n.length_squared() < 0.0001:
 			n = Vector3.UP
@@ -740,7 +772,6 @@ func _handle_minecraft_place_action() -> void:
 		place_cell = grid.world_to_cell(place_pos)
 		resolved = true
 	else:
-		# Terrain: VoxelTool previous_position is the air cell outside the hit face.
 		var hit = _perform_voxel_raycast()
 		if hit != null:
 			place_cell = hit.previous_position as Vector3i
@@ -760,7 +791,6 @@ func _handle_minecraft_place_action() -> void:
 	has_target = true
 	target_place_cell = place_cell
 	can_place_target = true
-	# Routes through grid_system.place_block with the selected material (Wood/Stone/etc.).
 	_handle_place_action()
 
 func _handle_save_blueprint_action() -> void:
@@ -1540,7 +1570,7 @@ func _update_raycast() -> void:
 			pass # DebrisGrabber updates the preview ghost for recovery
 		elif target_is_debris and target_debris_island != null and target_debris_island.is_moving():
 			preview_ghost.hide_preview()
-		elif can_place_target:
+		elif can_place_target and BlockTypeCatalog.is_structural(get_selected_type()):
 			preview_ghost.update_preview(target_place_cell, true, grid.cell_size)
 		else:
 			preview_ghost.hide_preview()
@@ -1598,6 +1628,9 @@ func _handle_place_action() -> void:
 		grid = get_node("/root/GridSystem")
 
 	if grid != null:
+		var b_type := get_selected_type()
+		if not BlockTypeCatalog.is_structural(b_type):
+			return
 		if is_cell_overlapping_player(target_place_cell, grid.cell_size):
 			return
 		if orchestrator != null and orchestrator.is_cell_blocked_by_debris(target_place_cell, grid.cell_size):
@@ -1606,7 +1639,6 @@ func _handle_place_action() -> void:
 		if vox != null and vox.has_method("is_solid_block") and vox.is_solid_block(target_place_cell):
 			return
 
-		var b_type := get_selected_type()
 		var cost := BlockTypeCatalog.get_cost(b_type)
 		var inv_mgr := _get_inventory_manager()
 

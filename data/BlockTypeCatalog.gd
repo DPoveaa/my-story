@@ -58,3 +58,13 @@ static func get_max_durability(type_id: StringName) -> float:
 
 static func get_cost(type_id: StringName) -> Dictionary:
 	return {type_id: 1}
+
+static func is_natural(type_id: StringName) -> bool:
+	match type_id:
+		&"grass", &"dirt", &"stone", &"coal", &"iron":
+			return true
+		_:
+			return false
+
+static func is_structural(type_id: StringName) -> bool:
+	return not is_natural(type_id)
