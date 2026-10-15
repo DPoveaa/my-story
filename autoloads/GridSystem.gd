@@ -14,8 +14,8 @@ signal grid_cleared()
 
 ## Minimum Y coordinate allowed for block placement (default: 0 = ground level)
 @export var min_y: int = 0
-## Maximum coordinate bounds for sanity limits (can be expanded)
-@export var max_coord_bound: int = 256
+## Maximum coordinate bounds for sanity limits (supports far randomized spawn offsets)
+@export var max_coord_bound: int = 100000
 
 ## Sparse dictionary storing occupied cells: Dictionary[Vector3i, BlockData]
 var _blocks: Dictionary = {}

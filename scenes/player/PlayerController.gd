@@ -194,8 +194,14 @@ func _ready() -> void:
 	if projection_camera != null:
 		projection_camera.top_level = true
 
-	# Hold above the island band; GameWorld places us after terrain+collision are ready.
-	global_position = Vector3(0.5, 250.0, 0.5)
+	# Massive XZ shift each session for a fresh landscape without reseeding the generator.
+	# Hold Y stays within collision viewer range; GameWorld finalizes spawn on terrain.
+	randomize()
+	global_position = Vector3(
+		float(randi_range(-10000, 10000)),
+		90.0,
+		float(randi_range(-10000, 10000))
+	)
 	_resolved_spawn = global_position
 	_is_spawned = false
 	_gameplay_input_suspended = true
@@ -505,23 +511,26 @@ func _unhandled_input(event: InputEvent) -> void:
 		get_viewport().set_input_as_handled()
 		return
 
-	# Mouse clicks for building / recovery (LMB = instant BREAK, RMB = instant PLACE)
-	if event is InputEventMouseButton and event.pressed:
-		if _mouse_captured:
-			if event.button_index == MOUSE_BUTTON_LEFT:
-				_handle_minecraft_break_action()
-				get_viewport().set_input_as_handled()
-				return
-			elif event.button_index == MOUSE_BUTTON_RIGHT:
-				_handle_minecraft_place_action()
-				get_viewport().set_input_as_handled()
-				return
-			elif event.button_index == MOUSE_BUTTON_WHEEL_UP:
-				_cycle_block_type(-1)
-				return
-			elif event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
-				_cycle_block_type(1)
-				return
+	# Mouse — exclusive roles (never both on one click):
+	# LMB / remove_block = BREAK only | RMB / place_block = PLACE only
+	if event is InputEventMouseButton and event.pressed and _mouse_captured:
+		if event.button_index == MOUSE_BUTTON_WHEEL_UP:
+			_cycle_block_type(-1)
+			get_viewport().set_input_as_handled()
+			return
+		if event.button_index == MOUSE_BUTTON_WHEEL_DOWN:
+			_cycle_block_type(1)
+			get_viewport().set_input_as_handled()
+			return
+		# Prefer InputMap actions so LMB/RMB stay consistent with InputManager.
+		if event.is_action_pressed(&"remove_block") or event.button_index == MOUSE_BUTTON_LEFT:
+			_handle_minecraft_break_action()
+			get_viewport().set_input_as_handled()
+			return
+		if event.is_action_pressed(&"place_block") or event.button_index == MOUSE_BUTTON_RIGHT:
+			_handle_minecraft_place_action()
+			get_viewport().set_input_as_handled()
+			return
 
 	# Keyboard hotkeys
 	if event is InputEventKey and event.pressed and not event.echo:
@@ -670,7 +679,7 @@ func _handle_minecraft_break_action() -> void:
 			_handle_remove_action()
 			return
 
-	# 2. Voxel terrain → clear with set_voxel(hit, 0) via mine_voxel
+	# 2. Voxel terrain → clear with voxel_tool.set_voxel(hit_position, 0)
 	var vt := _get_voxel_tool()
 	var vox_world := _get_voxel_world()
 	if vt != null and vox_world != null:
@@ -720,16 +729,30 @@ func _handle_minecraft_place_action() -> void:
 	var place_cell: Vector3i = target_place_cell
 	var resolved := false
 
-	# Prefer VoxelTool previous_position (air cell outside the hit face).
-	var hit = _perform_voxel_raycast()
-	if hit != null and "previous_position" in hit:
-		place_cell = hit.previous_position as Vector3i
-		resolved = true
-	elif has_target:
-		# Physics ray: place_pos = hit.position + hit.normal * 0.5 (snapped).
-		var place_pos: Vector3 = _target_hit_point + (_target_hit_normal.normalized() * (grid.cell_size * 0.5))
+	if has_target and not target_is_terrain:
+		# Physics / grid hit: place_pos = hit.position + hit.normal * 0.5 (snapped to grid).
+		var n := _target_hit_normal
+		if n.length_squared() < 0.0001:
+			n = Vector3.UP
+		else:
+			n = n.normalized()
+		var place_pos: Vector3 = _target_hit_point + (n * 0.5)
 		place_cell = grid.world_to_cell(place_pos)
 		resolved = true
+	else:
+		# Terrain: VoxelTool previous_position is the air cell outside the hit face.
+		var hit = _perform_voxel_raycast()
+		if hit != null:
+			place_cell = hit.previous_position as Vector3i
+			resolved = true
+		elif has_target:
+			var n2 := _target_hit_normal
+			if n2.length_squared() < 0.0001:
+				n2 = Vector3.UP
+			else:
+				n2 = n2.normalized()
+			place_cell = grid.world_to_cell(_target_hit_point + (n2 * 0.5))
+			resolved = true
 
 	if not resolved and not has_target:
 		return
@@ -737,6 +760,7 @@ func _handle_minecraft_place_action() -> void:
 	has_target = true
 	target_place_cell = place_cell
 	can_place_target = true
+	# Routes through grid_system.place_block with the selected material (Wood/Stone/etc.).
 	_handle_place_action()
 
 func _handle_save_blueprint_action() -> void:

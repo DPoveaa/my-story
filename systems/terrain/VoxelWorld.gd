@@ -100,19 +100,16 @@ var _backend_view_limit_voxels: int = 0
 var _mesh_block_wake: bool = false
 
 func _ready() -> void:
-	randomize()
-	# Fresh procedural world each session via noise seeds — do not move player or terrain.
-	_randomize_generator_noise()
+	# Stable startup: fixed editor seed/noise only — never randomize or replace the generator at runtime.
+	# Fresh feel comes from shifting the player far in XZ (see GameWorld), not reseeding the graph.
+	_setup_fallback_noise()
 	# Do not load disk cache — edits must not persist between sessions.
 	_mined_deltas.clear()
 	_mined_deltas_set.clear()
 	_build_terrain()
 	# Force-disable VoxelTerrain stream so chunk edits are never saved to disk.
-	# Keep terrain at origin so VoxelViewer chunk streaming stays in sync.
 	if _terrain != null:
 		_terrain.stream = null
-		_terrain.position = Vector3.ZERO
-		_terrain.global_position = Vector3.ZERO
 	_build_viewer()
 
 func _process(delta: float) -> void:
@@ -303,19 +300,6 @@ func _apply_generator_params() -> void:
 		_island_gen.noise_island_2d = _noise_2d
 		_island_gen.noise_ore = _noise_ore
 		_island_gen.density_threshold = island_density_threshold
-
-func _randomize_generator_noise() -> void:
-	## Re-seed FastNoiseLite inputs on the active generator for a new world layout.
-	seed_value = randi()
-	_setup_fallback_noise()
-	if _island_gen != null:
-		_island_gen.noise_island = _noise_3d
-		_island_gen.noise_island_2d = _noise_2d
-		_island_gen.noise_ore = _noise_ore
-		_island_gen.density_threshold = island_density_threshold
-		_island_gen.vertical_scale = island_vertical_scale
-	if _terrain != null and _terrain.generator != _island_gen and _island_gen != null:
-		_terrain.generator = _island_gen
 
 func _setup_fallback_noise() -> void:
 	_noise_2d = FastNoiseLite.new()
@@ -612,32 +596,64 @@ func get_spawn_position_raycast(x: float = 0.5, z: float = 0.5) -> Vector3:
 			return feet
 	return Vector3.ZERO
 
+func find_nearby_land_column(center_x: float, center_z: float, max_radius: int = 256) -> Vector2:
+	## Procedural probe (no streamed mesh required) for a solid surface near a session offset.
+	_ensure_island_gen()
+	var cx := floori(center_x)
+	var cz := floori(center_z)
+	if get_highest_solid_y(cx, cz) >= 0:
+		return Vector2(float(cx) + 0.5, float(cz) + 0.5)
+	var limit := clampi(max_radius, 1, 512)
+	# Coarse spiral first (step 4), then refine locally if needed.
+	for radius in range(4, limit + 1, 4):
+		for dx in range(-radius, radius + 1, 4):
+			for dz in range(-radius, radius + 1, 4):
+				if absi(dx) != radius and absi(dz) != radius:
+					continue
+				if get_highest_solid_y(cx + dx, cz + dz) >= 0:
+					return Vector2(float(cx + dx) + 0.5, float(cz + dz) + 0.5)
+	for radius in range(1, mini(32, limit) + 1):
+		for dx in range(-radius, radius + 1):
+			for dz in range(-radius, radius + 1):
+				if absi(dx) != radius and absi(dz) != radius:
+					continue
+				if get_highest_solid_y(cx + dx, cz + dz) >= 0:
+					return Vector2(float(cx + dx) + 0.5, float(cz + dz) + 0.5)
+	return Vector2.ZERO
+
 func try_find_safe_spawn(max_radius: int = 16, carrier: Node3D = null) -> Vector3:
-	## Search starter-island columns for a validated top-surface spawn with real collision.
+	## Search columns near the carrier (or origin) for a validated top-surface spawn.
 	## Returns Vector3.ZERO if no confirmed physics surface exists.
 	var spawn_x := 0.5
 	var spawn_z := 0.5
 	if carrier != null:
-		carrier.global_position = Vector3(spawn_x, 250.0, spawn_z)
+		spawn_x = carrier.global_position.x
+		spawn_z = carrier.global_position.z
+	# Keep carrier/viewers near the island band so the collision viewer (≤96 vx)
+	# can keep mesh colliders loaded while we raycast for a safe spawn.
+	if carrier != null:
+		carrier.global_position = Vector3(spawn_x, 90.0, spawn_z)
 	elif _viewer != null and _viewer.is_inside_tree():
 		_viewer.global_position = Vector3(spawn_x, 56.0, spawn_z)
 		if _viewer_collision != null and _viewer_collision.is_inside_tree():
 			_viewer_collision.global_position = Vector3(spawn_x, 56.0, spawn_z)
 
-	# 1. Fast path: check spawn origin (0.5, 0.5) first
+	# 1. Fast path: check the requested column first
 	var feet0 := get_spawn_position_raycast(spawn_x, spawn_z)
 	if feet0 != Vector3.ZERO and verify_spawn_physics(feet0):
 		return feet0
 
 	# 2. Spiral rings outward, checking in bounded batches per frame
-	var search_limit := clampi(max_radius, 1, 24)
+	var search_limit := clampi(max_radius, 1, 64)
+	var base_ix := floori(spawn_x)
+	var base_iz := floori(spawn_z)
 	var origins: Array[Vector2i] = []
 	for radius in range(1, search_limit + 1):
 		for dx in range(-radius, radius + 1):
 			for dz in range(-radius, radius + 1):
 				if absi(dx) != radius and absi(dz) != radius:
 					continue
-				origins.append(Vector2i(dx, dz))
+				origins.append(Vector2i(base_ix + dx, base_iz + dz))
 
 	var checked_this_frame := 0
 	for col in origins:

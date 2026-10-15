@@ -26,6 +26,8 @@ var stability_system: Node
 var voxel_world: VoxelWorld = null
 var _debug_camera_active: bool = false
 var _mortar_overlay_renderer: Node3D = null
+## Large XZ shift each session so the same generator yields a fresh landscape without reseeding.
+var _session_spawn_xz: Vector2 = Vector2(0.5, 0.5)
 
 func _ready() -> void:
 	if grid_system == null and has_node("/root/GridSystem"):
@@ -33,9 +35,16 @@ func _ready() -> void:
 	if stability_system == null and has_node("/root/StabilitySystem"):
 		stability_system = get_node("/root/StabilitySystem")
 
+	randomize()
+	_session_spawn_xz = Vector2(
+		float(randi_range(-10000, 10000)) + 0.5,
+		float(randi_range(-10000, 10000)) + 0.5
+	)
+
 	# Instantiate 3D Chunked Voxel World
 	voxel_world = VoxelWorldScript.new()
 	voxel_world.name = "VoxelWorld"
+	voxel_world.seed_value = 1337
 	add_child(voxel_world)
 	# NOTE: do NOT call update_loaded_chunks or get_spawn_position here.
 	# VoxelChunk StaticBody3D nodes added via add_child() during _ready() have their
@@ -101,7 +110,9 @@ func _ready() -> void:
 
 		if player.has_method("suspend_physics"):
 			player.suspend_physics()
-		player.global_position = Vector3(0.5, 250.0, 0.5)
+		# Hold just above the island band near the randomized session column.
+		# Y stays within collision viewer range (~96 vx); XZ is massively shifted.
+		player.global_position = Vector3(_session_spawn_xz.x, 90.0, _session_spawn_xz.y)
 		if build_hud != null and build_hud.has_method("set_loading_overlay"):
 			build_hud.set_loading_overlay(true, "Loading terrain…")
 		_spawn_player_on_terrain.call_deferred()
@@ -123,7 +134,13 @@ func _spawn_player_on_terrain() -> void:
 	if player == null or voxel_world == null:
 		return
 
-	var hold := Vector3(0.5, 250.0, 0.5)
+	# Snap the session column onto nearby procedural land before streaming collision.
+	if voxel_world.has_method("find_nearby_land_column"):
+		var land: Vector2 = voxel_world.find_nearby_land_column(_session_spawn_xz.x, _session_spawn_xz.y, 256)
+		if land != Vector2.ZERO:
+			_session_spawn_xz = land
+
+	var hold := Vector3(_session_spawn_xz.x, 90.0, _session_spawn_xz.y)
 	player.global_position = hold
 	if player.has_method("suspend_physics"):
 		player.suspend_physics()
@@ -140,10 +157,11 @@ func _spawn_player_on_terrain() -> void:
 			build_hud.set_loading_overlay(true, message)
 	if voxel_world.has_signal("terrain_loading_status"):
 		voxel_world.terrain_loading_status.connect(on_load_status)
+	var probe := Vector3(_session_spawn_xz.x, 56.0, _session_spawn_xz.y)
 	if voxel_world.has_method("wait_for_terrain_at"):
-		loaded_ok = await voxel_world.wait_for_terrain_at(Vector3(0.5, 56.0, 0.5))
+		loaded_ok = await voxel_world.wait_for_terrain_at(probe)
 	else:
-		await voxel_world.force_sync_spawn_chunks(0, 0)
+		await voxel_world.force_sync_spawn_chunks(floori(_session_spawn_xz.x) / 16, floori(_session_spawn_xz.y) / 16)
 		loaded_ok = true
 	if voxel_world.has_signal("terrain_loading_status") and voxel_world.terrain_loading_status.is_connected(on_load_status):
 		voxel_world.terrain_loading_status.disconnect(on_load_status)
@@ -153,9 +171,9 @@ func _spawn_player_on_terrain() -> void:
 		await get_tree().physics_frame
 		await get_tree().physics_frame
 		if voxel_world.has_method("try_find_safe_spawn"):
-			safe_spawn = await voxel_world.try_find_safe_spawn(24, player)
+			safe_spawn = await voxel_world.try_find_safe_spawn(48, player)
 		elif voxel_world.has_method("get_spawn_position_raycast"):
-			safe_spawn = voxel_world.get_spawn_position_raycast(0.5, 0.5)
+			safe_spawn = voxel_world.get_spawn_position_raycast(_session_spawn_xz.x, _session_spawn_xz.y)
 
 	var verified: bool = false
 	if safe_spawn != Vector3.ZERO:
