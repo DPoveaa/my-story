@@ -42,10 +42,9 @@ func _connect_grid_signals() -> void:
 		grid_system.grid_cleared.connect(_on_grid_cleared)
 
 func _create_block_node(cell: Vector3i, data: BlockData) -> void:
-	if not BlockTypeCatalog.is_structural(data.block_type):
-		return
 	if static_body == null:
 		_setup_static_body()
+
 	if _mesh_nodes.has(cell):
 		_remove_block_node(cell)
 

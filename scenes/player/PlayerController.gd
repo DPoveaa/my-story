@@ -522,15 +522,18 @@ func _unhandled_input(event: InputEvent) -> void:
 			_cycle_block_type(1)
 			get_viewport().set_input_as_handled()
 			return
-		# Prefer InputMap actions so LMB/RMB stay consistent with InputManager.
-		if event.is_action_pressed(&"remove_block") or event.button_index == MOUSE_BUTTON_LEFT:
+		# STRICT input separation: LMB = BREAK ONLY, RMB = PLACE ONLY.
+		# Never use is_action_pressed here — action mappings can overlap.
+		# button_index checks are mutually exclusive by the hardware event itself.
+		if event.button_index == MOUSE_BUTTON_LEFT:
 			_handle_minecraft_break_action()
 			get_viewport().set_input_as_handled()
 			return
-		if event.is_action_pressed(&"place_block") or event.button_index == MOUSE_BUTTON_RIGHT:
+		elif event.button_index == MOUSE_BUTTON_RIGHT:
 			_handle_minecraft_place_action()
 			get_viewport().set_input_as_handled()
 			return
+
 
 	# Keyboard hotkeys
 	if event is InputEventKey and event.pressed and not event.echo:
@@ -679,7 +682,7 @@ func _handle_minecraft_break_action() -> void:
 			_handle_remove_action()
 			return
 
-	# 2. Voxel terrain → clear with voxel_tool.set_voxel(hit_position, 0)
+	# 2. Voxel terrain → erase only. Never spawn a physics block in its place.
 	var vt := _get_voxel_tool()
 	var vox_world := _get_voxel_world()
 	if vt != null and vox_world != null:
@@ -691,7 +694,7 @@ func _handle_minecraft_break_action() -> void:
 				vt.channel = VoxelBuffer.CHANNEL_TYPE
 				vt.set_voxel(cell_pos, 0)
 				mined_type = &"stone"
-			_spawn_mined_terrain_debris(cell_pos, mined_type)
+			# Credit inventory only — do NOT spawn a physics debris block here.
 			var inv_mgr := _get_inventory_manager()
 			if inv_mgr != null:
 				inv_mgr.add_material(mined_type, 1)
@@ -705,10 +708,12 @@ func _handle_minecraft_break_action() -> void:
 				vt.channel = VoxelBuffer.CHANNEL_TYPE
 				vt.set_voxel(cell_pos, 0)
 			mined_type = &"stone"
-		_spawn_mined_terrain_debris(cell_pos, mined_type)
+		# Credit inventory only — do NOT spawn a physics debris block here.
 		var inv_mgr2 := _get_inventory_manager()
 		if inv_mgr2 != null:
 			inv_mgr2.add_material(mined_type, 1)
+
+
 
 func _handle_minecraft_place_action() -> void:
 	if area_selection_step != AreaSelectionStep.NONE:
@@ -719,40 +724,8 @@ func _handle_minecraft_place_action() -> void:
 		debris_grabber.try_place_to_grid()
 		return
 
-	var mat_type := get_selected_type()
-	if BlockTypeCatalog.is_natural(mat_type):
-		# Natural terrain placement using Zylann Voxel terrain system
-		var vt := _get_voxel_tool()
-		var hit = _perform_voxel_raycast()
-		if hit != null and vt != null:
-			var selected_block_id := _get_selected_block_id()
-			var target_pos: Vector3i = hit.previous_position
-			vt.channel = VoxelBuffer.CHANNEL_TYPE
-			vt.set_voxel(target_pos, selected_block_id)
-			var inv_mgr := _get_inventory_manager()
-			if game_mode == GameMode.SURVIVAL and inv_mgr != null:
-				inv_mgr.consume_materials({mat_type: 1})
-			return
-		elif has_target and vt != null:
-			var n := _target_hit_normal
-			if n.length_squared() < 0.0001:
-				n = Vector3.UP
-			else:
-				n = n.normalized()
-			var target_pos := Vector3i(
-				floori(_target_hit_point.x + n.x * 0.5),
-				floori(_target_hit_point.y + n.y * 0.5),
-				floori(_target_hit_point.z + n.z * 0.5)
-			)
-			var selected_block_id := _get_selected_block_id()
-			vt.channel = VoxelBuffer.CHANNEL_TYPE
-			vt.set_voxel(target_pos, selected_block_id)
-			var inv_mgr := _get_inventory_manager()
-			if game_mode == GameMode.SURVIVAL and inv_mgr != null:
-				inv_mgr.consume_materials({mat_type: 1})
-			return
-
-	# Structural / Building material placement using the physics grid
+	# ALL block types (natural and structural) are placed as physics grid blocks.
+	# vt.set_voxel() is NEVER used for placement — only for breaking (set to 0).
 	var grid := grid_system
 	if grid == null and has_node("/root/GridSystem"):
 		grid = get_node("/root/GridSystem")
@@ -792,6 +765,8 @@ func _handle_minecraft_place_action() -> void:
 	target_place_cell = place_cell
 	can_place_target = true
 	_handle_place_action()
+
+
 
 func _handle_save_blueprint_action() -> void:
 	save_blueprint_requested.emit()
@@ -1570,7 +1545,7 @@ func _update_raycast() -> void:
 			pass # DebrisGrabber updates the preview ghost for recovery
 		elif target_is_debris and target_debris_island != null and target_debris_island.is_moving():
 			preview_ghost.hide_preview()
-		elif can_place_target and BlockTypeCatalog.is_structural(get_selected_type()):
+		elif can_place_target:
 			preview_ghost.update_preview(target_place_cell, true, grid.cell_size)
 		else:
 			preview_ghost.hide_preview()
@@ -1629,8 +1604,8 @@ func _handle_place_action() -> void:
 
 	if grid != null:
 		var b_type := get_selected_type()
-		if not BlockTypeCatalog.is_structural(b_type):
-			return
+		# All block types (natural and structural alike) are placed as grid physics blocks.
+
 		if is_cell_overlapping_player(target_place_cell, grid.cell_size):
 			return
 		if orchestrator != null and orchestrator.is_cell_blocked_by_debris(target_place_cell, grid.cell_size):
