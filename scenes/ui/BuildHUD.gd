@@ -26,7 +26,6 @@ var voxel_world: Node = null
 
 ## Dynamically created label for raw material counts (no .tscn edit required).
 var _raw_mats_label: Label = null
-var _objective_label: Label = null
 
 ## View-distance controls (− / label / +).
 var _view_panel: PanelContainer = null
@@ -36,8 +35,6 @@ var _view_plus_btn: Button = null
 
 ## Mining feedback + progress.
 var _mine_panel: PanelContainer = null
-var _mine_label: Label = null
-var _mine_bar: ProgressBar = null
 var _mine_feedback_label: Label = null
 var _mine_feedback_timer: float = 0.0
 
@@ -55,6 +52,7 @@ var _loading_retry_btn: Button = null
 var _loading_quit_btn: Button = null
 
 ## F3 debug target overlay.
+var _debug_overlay: CanvasLayer = null
 var _debug_panel: PanelContainer = null
 var _debug_label: Label = null
 var _debug_visible: bool = false
@@ -94,7 +92,23 @@ func _init() -> void:
 func _ready() -> void:
 	if grid_system == null and has_node("/root/GridSystem"):
 		grid_system = get_node("/root/GridSystem")
-	# Create raw materials label dynamically so no .tscn modification is needed.
+	if mode_label != null:
+		mode_label.visible = false
+	if color_rect_badge != null:
+		color_rect_badge.visible = false
+	if selected_type_label != null:
+		selected_type_label.visible = false
+	if cement_label != null:
+		cement_label.visible = false
+	if block_count_label != null:
+		block_count_label.visible = false
+	if debris_count_label != null:
+		debris_count_label.visible = false
+	var top_panel := get_node_or_null("PanelTop") as PanelContainer
+	if top_panel != null:
+		top_panel.visible = false
+
+	# Create raw materials label dynamically so no .tscn edit required.
 	_raw_mats_label = Label.new()
 	_raw_mats_label.name = "RawMatsLabel"
 	_raw_mats_label.text = ""
@@ -102,17 +116,9 @@ func _ready() -> void:
 	_raw_mats_label.add_theme_font_size_override("font_size", 14)
 	_raw_mats_label.add_theme_color_override("font_color", Color(0.95, 0.80, 0.40))
 
-	_objective_label = Label.new()
-	_objective_label.name = "ObjectiveLabel"
-	_objective_label.text = ""
-	_objective_label.visible = false
-	_objective_label.add_theme_font_size_override("font_size", 14)
-	_objective_label.add_theme_color_override("font_color", Color(0.35, 0.85, 1.0))
-
 	var hbox := get_node_or_null("PanelTop/HBox")
 	if hbox != null:
 		hbox.add_child(_raw_mats_label)
-		hbox.add_child(_objective_label)
 
 	_visualizer = BlueprintVisualizerScript.new()
 	_visualizer.name = "BlueprintVisualizer"
@@ -121,53 +127,18 @@ func _ready() -> void:
 	if _save_modal == null:
 		_create_blueprint_dialogs()
 
-	if has_node("/root/InventoryManager"):
-		var inv = get_node("/root/InventoryManager")
-		if not inv.inventory_changed.is_connected(_on_inventory_changed):
-			inv.inventory_changed.connect(_on_inventory_changed)
-		_on_inventory_changed(inv.get_materials())
-
-	if has_node("/root/SurvivalObjectiveManager"):
-		var obj = get_node("/root/SurvivalObjectiveManager")
-		if not obj.objective_updated.is_connected(_on_objective_updated):
-			obj.objective_updated.connect(_on_objective_updated)
-		if not obj.cycle_completed.is_connected(_on_objective_cycle_completed):
-			obj.cycle_completed.connect(_on_objective_cycle_completed)
-		_on_objective_updated(int(obj.current_stage), obj.current_progress, obj.get_target_for_stage(obj.current_stage), obj.get_objective_display_text())
-
 	_create_view_distance_controls()
 	_create_mining_hud()
 	_create_controls_panel()
 	_create_loading_overlay()
 	_create_debug_overlay()
 	_create_respawn_button()
+	if "debug_navigation_hint" in get_tree():
+		get_tree().debug_navigation_hint = false
+	if NavigationServer3D.has_method("set_debug_enabled"):
+		NavigationServer3D.set_debug_enabled(false)
 	if voxel_world != null:
 		bind_voxel_world(voxel_world)
-
-func _on_objective_updated(_stage: int, _cur: int, _target: int, desc: String) -> void:
-	if _objective_label == null:
-		return
-	_objective_label.text = "[Goal: " + desc + "]"
-	_objective_label.visible = true
-
-func _on_objective_cycle_completed(cycle: int, reward_desc: String) -> void:
-	if _objective_label == null:
-		return
-	_objective_label.text = "★ Cycle %d Complete! %s" % [cycle, reward_desc]
-	_objective_label.visible = true
-
-func _on_inventory_changed(materials: Dictionary) -> void:
-	if _raw_mats_label == null:
-		return
-	if materials.is_empty():
-		_raw_mats_label.visible = false
-		return
-	var parts: Array = []
-	for mat in materials.keys():
-		var count: int = int(materials[mat])
-		parts.append("%s: %d" % [BlockTypeCatalog.get_display_name(StringName(mat)), count])
-	_raw_mats_label.text = "Inv: " + " | ".join(parts)
-	_raw_mats_label.visible = true
 
 func bind_voxel_world(world: Node) -> void:
 	voxel_world = world
@@ -305,13 +276,18 @@ func set_selected_block_type(type_id: StringName) -> void:
 func set_carried_block(is_carrying: bool, block_type: StringName) -> void:
 	if prompt_label == null:
 		prompt_label = get_node_or_null("PanelTop/HBox/PromptLabel")
+	var top_panel := get_node_or_null("PanelTop") as PanelContainer
 	if prompt_label != null:
 		if is_carrying:
 			var mat_name := BlockTypeCatalog.get_display_name(block_type)
-			prompt_label.text = "[HOLDING %s] E: Drop  |  F: Throw  |  LMB: Place  |  R: Recover" % mat_name.to_upper()
+			prompt_label.text = "[HOLDING %s] [E] Place on Station | [G] Drop on Floor | F: Throw | R: Recover" % mat_name.to_upper()
 			prompt_label.visible = true
+			if top_panel != null:
+				top_panel.visible = true
 		else:
 			prompt_label.visible = false
+			if top_panel != null and not _debug_visible:
+				top_panel.visible = false
 
 func _process(delta: float) -> void:
 	if grid_system != null and block_count_label != null:
@@ -365,8 +341,20 @@ func _create_mining_hud() -> void:
 	_mine_feedback_label.offset_bottom = -118.0
 	add_child(_mine_feedback_label)
 
-func set_mining_progress(_active: bool, _block_name: String, _percent: int) -> void:
-	pass
+func set_mining_progress(active: bool, block_name: String, percent: int) -> void:
+	if _mine_feedback_label == null:
+		return
+	if not active:
+		_mine_feedback_label.visible = false
+		_mine_feedback_timer = 0.0
+		return
+	var bar := ""
+	var filled := clampi(percent / 10, 0, 10)
+	for i in range(10):
+		bar += "█" if i < filled else "░"
+	_mine_feedback_label.text = "%s [%s] %d%%" % [block_name, bar, percent]
+	_mine_feedback_label.visible = true
+	_mine_feedback_timer = 0.2  # Keep alive while progress is actively being pushed
 
 func show_mine_feedback(block_type: StringName, amount: int = 1) -> void:
 	if _mine_feedback_label == null:
@@ -512,8 +500,14 @@ func _on_loading_quit_pressed() -> void:
 		get_tree().quit()
 
 func _create_debug_overlay() -> void:
-	if _debug_panel != null:
+	if _debug_overlay != null:
 		return
+	_debug_overlay = CanvasLayer.new()
+	_debug_overlay.name = "DebugOverlay"
+	_debug_overlay.layer = 100
+	_debug_overlay.visible = false
+	add_child(_debug_overlay)
+
 	_debug_panel = PanelContainer.new()
 	_debug_panel.name = "DebugTargetPanel"
 	_debug_panel.anchor_left = 0.5
@@ -523,10 +517,10 @@ func _create_debug_overlay() -> void:
 	_debug_panel.offset_left = -220.0
 	_debug_panel.offset_right = 220.0
 	_debug_panel.offset_top = 52.0
-	_debug_panel.offset_bottom = 168.0
+	_debug_panel.offset_bottom = 190.0
 	_debug_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	_debug_panel.visible = false
-	add_child(_debug_panel)
+	_debug_overlay.add_child(_debug_panel)
 
 	_debug_label = Label.new()
 	_debug_label.add_theme_font_size_override("font_size", 13)
@@ -534,11 +528,45 @@ func _create_debug_overlay() -> void:
 	_debug_label.autowrap_mode = TextServer.AUTOWRAP_WORD
 	_debug_panel.add_child(_debug_label)
 
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo:
+		if event.keycode == KEY_F3:
+			set_debug_overlay_visible(not _debug_visible)
+			get_viewport().set_input_as_handled()
+		elif event.keycode == KEY_F4 and _debug_visible:
+			if player != null and player.has_method("spawn_worker_at_cursor"):
+				player.spawn_worker_at_cursor()
+			get_viewport().set_input_as_handled()
+
 func set_debug_overlay_visible(visible_flag: bool) -> void:
 	_debug_visible = visible_flag
-	if _debug_panel == null:
+	if "debug_navigation_hint" in get_tree():
+		get_tree().debug_navigation_hint = visible_flag
+	if NavigationServer3D.has_method("set_debug_enabled"):
+		NavigationServer3D.set_debug_enabled(visible_flag)
+	if _debug_overlay == null:
 		_create_debug_overlay()
-	_debug_panel.visible = visible_flag
+	if _debug_overlay != null:
+		_debug_overlay.visible = visible_flag
+	if _debug_panel != null:
+		_debug_panel.visible = visible_flag
+	var top_panel := get_node_or_null("PanelTop") as PanelContainer
+	if top_panel != null:
+		top_panel.visible = visible_flag or (prompt_label != null and prompt_label.visible)
+	if mode_label != null:
+		mode_label.visible = visible_flag
+	if color_rect_badge != null:
+		color_rect_badge.visible = visible_flag
+	if selected_type_label != null:
+		selected_type_label.visible = visible_flag
+	if cement_label != null:
+		cement_label.visible = visible_flag
+	if block_count_label != null:
+		block_count_label.visible = visible_flag
+	if debris_count_label != null:
+		debris_count_label.visible = visible_flag
+	if _raw_mats_label != null:
+		_raw_mats_label.visible = visible_flag and not _raw_mats_label.text.is_empty()
 	if visible_flag:
 		_refresh_debug_overlay()
 
@@ -564,13 +592,44 @@ func _refresh_debug_overlay() -> void:
 				str(sd.get("updated_blocks", "—")),
 				str(sd.get("collision_chunks", "—")),
 			]
-	_debug_label.text = "F3 Target Debug\nType/Material: %s\nVoxel: (%d, %d, %d)\nCategory: %s\nMining: %s\nDurability: %s%s" % [
+	var block_stat := ""
+	if grid_system != null and grid_system.has_method("get_block_count"):
+		block_stat = "\nGrid Blocks: %d" % grid_system.get_block_count()
+	var debris_stat := ""
+	if orchestrator != null and orchestrator.has_method("get_active_debris_count"):
+		debris_stat = "\nActive Debris: %d" % orchestrator.get_active_debris_count()
+	var workers: Array = get_tree().get_nodes_in_group("workers")
+	var worker_stat := "\nWorkers (Hauler Bots): %d [F4 to Spawn]" % workers.size()
+
+	var mode_name := "Body (1st Person)"
+	if player != null and "current_state" in player:
+		match player.current_state:
+			1: mode_name = "Soul Projection"
+			2: mode_name = "Debug Free Camera"
+	var mode_line := "\nPlayer Mode: %s" % mode_name
+	var mortar_line := ""
+	if player != null and player.has_method("get_cement_count"):
+		mortar_line = "\nMortar: %d/%d" % [player.get_cement_count(), player.max_cement]
+	var bag_line := ""
+	if player != null and "current_slot" in player:
+		var s_name: String = player._slot_display_name() if player.has_method("_slot_display_name") else str(player.current_slot)
+		var b_cnt: int = player.bag_count if "bag_count" in player else 0
+		var b_max: int = player.bag_max_capacity if "bag_max_capacity" in player else 0
+		bag_line = "\nActive Slot: %s | Bag: %d/%d" % [s_name, b_cnt, b_max]
+
+	_debug_label.text = "F3 Target Debug\nType/Material: %s\nVoxel: (%d, %d, %d)\nCategory: %s\nMining: %s\nDurability: %s%s%s%s%s%s%s%s" % [
 		str(info.get("material", "N/A")),
 		cell.x, cell.y, cell.z,
 		str(info.get("category", "none")),
 		str(info.get("mining", "N/A")),
 		str(info.get("durability", "N/A")),
+		mode_line,
+		mortar_line,
+		bag_line,
+		block_stat,
+		debris_stat,
 		stream_line,
+		worker_stat,
 	]
 
 func _create_respawn_button() -> void:

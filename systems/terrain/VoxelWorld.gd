@@ -210,10 +210,68 @@ func _build_terrain() -> void:
 
 	_sync_view_distance()
 	add_child(_terrain)
+	_setup_pine_tree_instancer()
 
 	_voxel_tool = _terrain.get_voxel_tool()
 	if _voxel_tool != null:
 		_voxel_tool.channel = VoxelBuffer.CHANNEL_TYPE
+
+## Procedural pine trees on flat grass tops via VoxelInstancer + SceneItem.
+func _setup_pine_tree_instancer() -> void:
+	if _terrain == null:
+		return
+	if not ClassDB.class_exists("VoxelInstancer"):
+		push_warning("VoxelInstancer unavailable — pine trees will not spawn.")
+		return
+	if not ClassDB.class_exists("VoxelInstanceLibrarySceneItem"):
+		push_warning("VoxelInstanceLibrarySceneItem unavailable — pine trees will not spawn.")
+		return
+
+	var pine_scene: PackedScene = load("res://scenes/world/PineTree.tscn") as PackedScene
+	if pine_scene == null:
+		push_warning("PineTree.tscn missing — pine trees will not spawn.")
+		return
+
+	var instancer = ClassDB.instantiate("VoxelInstancer")
+	instancer.name = "VoxelInstancer"
+
+	var library = ClassDB.instantiate("VoxelInstanceLibrary")
+	var item = ClassDB.instantiate("VoxelInstanceLibrarySceneItem")
+	if item == null or library == null or instancer == null:
+		push_warning("Failed to create VoxelInstancer library items.")
+		return
+	item.scene = pine_scene
+	item.name = "pine_tree"
+	item.lod_index = 0
+	item.persistent = false
+
+	var gen = ClassDB.instantiate("VoxelInstanceGenerator")
+	# Sparse natural spacing on relatively flat surfaces (grass tops).
+	gen.density = 0.012
+	gen.min_scale = 0.85
+	gen.max_scale = 1.25
+	gen.min_slope_degrees = 0.0
+	gen.max_slope_degrees = 22.0
+	gen.min_height = ISLAND_Y_MIN
+	gen.max_height = ISLAND_Y_MAX + 8.0
+	gen.vertical_alignment = 1.0
+	gen.random_rotation = true
+	gen.offset_along_normal = 0.0
+	if "emit_mode" in gen:
+		gen.emit_mode = 2  # EMIT_FROM_FACES
+	var noise := FastNoiseLite.new()
+	noise.seed = seed_value + 91
+	noise.frequency = 0.025
+	noise.fractal_octaves = 2
+	gen.noise = noise
+	if "noise_dimension" in gen:
+		gen.noise_dimension = 0  # DIMENSION_2D
+	gen.noise_threshold = 0.2
+	item.generator = gen
+
+	library.add_item(0, item)
+	instancer.library = library
+	_terrain.add_child(instancer)
 
 func _on_mesh_block_entered(_block_pos: Vector3i) -> void:
 	_mesh_block_wake = true
@@ -761,9 +819,10 @@ func _apply_air_edit(world_cell: Vector3i) -> void:
 			return
 	_voxel_tool.channel = VoxelBuffer.CHANNEL_TYPE
 	_voxel_tool.set_voxel(world_cell, BLOCK_AIR)
-	_voxel_tool.channel = VoxelBuffer.CHANNEL_SDF
-	_voxel_tool.set_voxel_f(world_cell, SDF_AIR)
-	_voxel_tool.channel = VoxelBuffer.CHANNEL_TYPE
+	if _terrain != null and _terrain.mesher != null and not (_terrain.mesher.get_class().find("Blocky") >= 0):
+		_voxel_tool.channel = VoxelBuffer.CHANNEL_SDF
+		_voxel_tool.set_voxel_f(world_cell, SDF_AIR)
+		_voxel_tool.channel = VoxelBuffer.CHANNEL_TYPE
 
 func _record_mine_delta(world_cell: Vector3i) -> void:
 	var cx := floori(float(world_cell.x) / 16.0)

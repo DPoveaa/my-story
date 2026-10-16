@@ -72,14 +72,21 @@ However, because headless automated tests validate logic, data, and physics stru
 * **Evidence:** `systems/terrain/VoxelWorld.gd`, `systems/terrain/VoxelChunk.gd`, `tests/profile_streaming.gd`, `tests/test_terrain.gd`, `tests/test_survival_loop.gd`, `tests/run_tests.gd`.
 
 ### 3. Natural Terrain Mining and Destruction
-* **Status:** `WORKING` (Mechanic & Persistence) / `PARTIAL` (Visual Effects)
-* **What exists:** Crosshair voxel targeting, hold-to-mine progress accumulation (`mining_progress += delta / mine_duration_seconds`), HUD progress display (`Mining Stone [XX%]`), natural voxel removal (`VoxelWorld.mine_voxel`), and session delta persistence (`user://terrain_deltas.json`).
-* **What works:** Holding RMB accumulates mining progress over time; upon reaching 100%, targeted natural voxels are removed, updating local chunk mesh/collision and adjacent boundary chunks, awarding raw material to `InventoryManager`, advancing active survival objectives, and persisting across chunk unloads and game restarts.
-* **Known problems:** Particle emitters and block-breaking crack overlays are not yet implemented.
-* **What's missing:** Visual mining crack decals and block break debris particles.
-* **Dependencies:** `InventoryManager.gd`, `SurvivalObjectiveManager.gd`.
-* **Next action:** Add GPU particle emitters for block mining debris.
-* **Evidence:** `scenes/player/PlayerController.gd`, `systems/terrain/VoxelWorld.gd`, `tests/test_terrain.gd`, `tests/test_survival_loop.gd` (`test_end_to_end_mining_inventory_placement_loop`).
+* **Status:** `WORKING` (Gradual Mining + Fragment Spawn) / `PARTIAL` (Visual Effects, Active Collection)
+* **What exists:**
+  - **Gradual LMB hold-to-mine** (`_process_lmb_mining` in `PlayerController.gd`): holding LMB on terrain accumulates per-cycle damage over `mine_duration_seconds` (default 1.2 s). Single LMB click no longer deletes terrain instantly.
+  - **SDF Boolean Sphere Subtraction** (`_apply_mine_sdf_sphere`): on each completed mine tick, `VoxelTool.do_sphere(center, mine_sdf_radius)` in `MODE_REMOVE` carves a smooth crater at the voxel centre. Radius is inspector-configurable (`mine_sdf_radius = 0.6`). On blocky TYPE-only terrains this is a graceful no-op.
+  - **Physical Fragment Spawn** (`_spawn_voxel_fragment`): a `RigidBody3D` box fragment (0.25–0.45 m, material-coloured) is instantiated at the mined voxel, tagged with `mined_fragment = true` / `fragment_type`, and ejected with a small impulse along the hit normal. Auto-frees after 30 s. Custom scene assignable via `mine_fragment_scene`.
+  - Crack decal (4 stages) and HUD progress bar update in real time during hold.
+  - Releasing LMB cancels in-progress cycle; switching target voxel resets progress.
+  - Grid blocks and debris islands still break instantly on LMB press (unchanged path).
+  - `VoxelWorld.mine_voxel()` remains the authoritative path: clears TYPE + SDF, persists delta.
+* **What works:** Holding LMB on terrain accumulates damage; on cycle completion a voxel is carved, a SDF sphere is subtracted, a fragment pops out, and inventory/HUD are updated.
+* **Known problems:** Particle GPU emitters not yet implemented; `_apply_mine_sdf_sphere` has no effect on purely blocky `CHANNEL_TYPE` terrains (graceful degradation).
+* **What's missing:** Active collection (vacuum mechanic), wood processing (logs → planks), pallet crafting, radial menu, top-down pickup rule — all are future milestones (see `GAME_DESIGN.md §12`).
+* **Dependencies:** `InventoryManager.gd`, `SurvivalObjectiveManager.gd`, `VoxelWorld.gd`.
+* **Next action:** Add GPU particle emitters for mining debris; implement active vacuum collection behind interact button.
+* **Evidence:** `scenes/player/PlayerController.gd` (`_process_lmb_mining`, `_apply_mine_sdf_sphere`, `_spawn_voxel_fragment`), `systems/terrain/VoxelWorld.gd` (`mine_voxel`, `_apply_air_edit`).
 
 ### 4. Player-Built Block Placement and Removal
 * **Status:** `WORKING` (Placement Rules & Cost Validation) / `PARTIAL` (Visual Ghost)

@@ -72,6 +72,9 @@ static func type_to_name(type_id: int) -> StringName:
 			return &""
 
 
+## Shared materials used by terrain meshing AND player-placed 1x1x1 blocks.
+static var _shared_materials: Dictionary = {}
+
 static func make_materials() -> Dictionary:
 	var mats: Dictionary = {}
 	mats[&"grass"] = _mat(Color(0.33, 0.56, 0.27), 0.92, 0.0, 0.08, 0.35)
@@ -81,6 +84,27 @@ static func make_materials() -> Dictionary:
 	mats[&"iron"]  = _mat(Color(0.68, 0.66, 0.62), 0.55, 0.45, 0.35, 1.0)
 	mats[&"gold"]  = _mat(Color(0.86, 0.70, 0.16), 0.40, 0.70, 0.45, 1.0)
 	return mats
+
+
+## Returns the exact Material resource used by natural terrain for `type_name`.
+static func get_shared_material(type_name: StringName) -> Material:
+	if _shared_materials.is_empty():
+		_shared_materials = make_materials()
+	if _shared_materials.has(type_name):
+		return _shared_materials[type_name]
+	# Fallback: dirt-tone generic so unknown types still render.
+	if not _shared_materials.has(&"_fallback"):
+		_shared_materials[&"_fallback"] = _mat(Color(0.55, 0.55, 0.55), 0.9, 0.0, 0.12, 1.0)
+	return _shared_materials[&"_fallback"]
+
+
+## Exact integer grid center: floor(pos) + 0.5 on each axis.
+static func snap_world_to_grid_center(pos: Vector3) -> Vector3:
+	return Vector3(
+		floorf(pos.x) + 0.5,
+		floorf(pos.y) + 0.5,
+		floorf(pos.z) + 0.5
+	)
 
 
 static func _mat(
@@ -97,7 +121,10 @@ static func _mat(
 
 
 static func build_library() -> VoxelBlockyLibrary:
-	var mats: Dictionary = make_materials()
+	# Reuse the shared cache so placed-block meshes match terrain exactly.
+	if _shared_materials.is_empty():
+		_shared_materials = make_materials()
+	var mats: Dictionary = _shared_materials
 	var models: Array = []
 	models.resize(MODEL_COUNT)
 	for i in range(MODEL_COUNT):

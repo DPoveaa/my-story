@@ -173,9 +173,7 @@ func _apply_surface_slope_models(
 	## VoxelMesherBlocky models are fixed meshes. After terracing, swap grass tops
 	## for pre-oriented ramps/corners when surrounding column tops differ by one voxel.
 	for z in range(size.z):
-		var gz: int = origin_in_voxels.z + z * step
 		for x in range(size.x):
-			var gx: int = origin_in_voxels.x + x * step
 			var profile: Vector4 = profiles[z * size.x + x]
 			if profile.w < 0.5:
 				continue
@@ -632,7 +630,7 @@ func _eval_sdf_discrete(gy: int, top_y: float, bot_y: float, block_id: int) -> f
 
 func _eval_in_column(
 	gx: int, gy: int, gz: int,
-	top_y: float, bot_y: float, center_y: float, steep: float
+	top_y: float, bot_y: float, _center_y: float, steep: float
 ) -> int:
 	var fy: float = float(gy)
 	# Discrete occupancy: solid for gy in [floor(bot), floor(top)].

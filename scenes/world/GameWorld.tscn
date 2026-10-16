@@ -7,6 +7,7 @@
 [ext_resource type="Script" uid="uid://cvy5twsgnlv7p" path="res://scenes/player/BuildCamera.gd" id="5_camera"]
 [ext_resource type="PackedScene" path="res://scenes/ui/BuildHUD.tscn" id="6_hud"]
 [ext_resource type="PackedScene" path="res://scenes/player/Player.tscn" id="7_player"]
+[ext_resource type="Script" path="res://scenes/world/DebrisContainer.gd" id="8_debris"]
 
 [sub_resource type="ProceduralSkyMaterial" id="ProceduralSkyMaterial_sky"]
 sky_top_color = Color(0.38, 0.65, 0.95, 1)
@@ -42,6 +43,7 @@ script = ExtResource("2_renderer")
 script = ExtResource("3_ghost")
 
 [node name="DebrisContainer" type="Node3D" parent="." unique_id=1645784641]
+script = ExtResource("8_debris")
 
 [node name="CollapseOrchestrator" type="Node3D" parent="." unique_id=268685607 node_paths=PackedStringArray("debris_container")]
 script = ExtResource("4_collapse")

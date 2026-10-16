@@ -29,6 +29,9 @@ func _ready() -> void:
 func _setup_static_body() -> void:
 	static_body = StaticBody3D.new()
 	static_body.name = "GridStaticBody"
+	# Layer 1 = world/selection raycast (same mask as terrain targeting).
+	static_body.collision_layer = 1
+	static_body.collision_mask = 0
 	add_child(static_body)
 
 func _connect_grid_signals() -> void:
@@ -55,23 +58,21 @@ func _create_block_node(cell: Vector3i, data: BlockData) -> void:
 		(float(cell.z) + 0.5) * cell_size
 	)
 
-	# 1. Visual Box Mesh
+	# 1. Visual Box Mesh — exact 1x1x1 (no inset) so stacked faces meet with zero gaps.
 	var mesh_inst := MeshInstance3D.new()
 	var box_mesh := BoxMesh.new()
-	box_mesh.size = Vector3.ONE * (cell_size * 0.99)
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = BlockTypeCatalog.get_color(data.block_type)
-	mat.roughness = 0.8
-	box_mesh.material = mat
+	box_mesh.size = Vector3(cell_size, cell_size, cell_size)
+	# Share the exact terrain hybrid shader material for matching grass/dirt/stone.
+	box_mesh.material = TerrainBlockyLibrary.get_shared_material(data.block_type)
 	mesh_inst.mesh = box_mesh
 	mesh_inst.position = world_center
 	add_child(mesh_inst)
 	_mesh_nodes[cell] = mesh_inst
 
-	# 2. Static Collision Shape
+	# 2. Static Collision Shape — exact cell size, same center as mesh.
 	var col_shape := CollisionShape3D.new()
 	var shape := BoxShape3D.new()
-	shape.size = Vector3.ONE * cell_size
+	shape.size = Vector3(cell_size, cell_size, cell_size)
 	col_shape.shape = shape
 	col_shape.position = world_center
 	# Store cell coord in metadata for fast raycast lookup

@@ -54,6 +54,9 @@ const TYPES: Dictionary = {
 	}
 }
 
+static func has_type(type_name: StringName) -> bool:
+	return TYPES.has(type_name)
+
 static func get_type_names() -> Array[StringName]:
 	var result: Array[StringName] = []
 	for key in TYPES.keys():

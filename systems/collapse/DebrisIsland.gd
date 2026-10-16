@@ -106,14 +106,11 @@ func setup_island(cells: Array, block_data_map: Dictionary, p_cell_size: float, 
 		add_child(col_shape)
 		_block_col_shapes[c] = col_shape
 
-		# Visual representation with block-type color
+		# Visual representation — exact 1x1x1 + shared terrain material.
 		var mesh_instance := MeshInstance3D.new()
 		var box_mesh := BoxMesh.new()
-		box_mesh.size = Vector3.ONE * (cell_size * 0.98) # Slight edge inset for visual readability
-		var mat := StandardMaterial3D.new()
-		mat.albedo_color = BlockTypeCatalog.get_color(block_data.block_type)
-		mat.roughness = 0.85
-		box_mesh.material = mat
+		box_mesh.size = Vector3(cell_size, cell_size, cell_size)
+		box_mesh.material = TerrainBlockyLibrary.get_shared_material(block_data.block_type)
 		mesh_instance.mesh = box_mesh
 		mesh_instance.position = local_pos
 		add_child(mesh_instance)
@@ -139,7 +136,9 @@ func setup_island(cells: Array, block_data_map: Dictionary, p_cell_size: float, 
 	_awake_frames = 0
 	contact_monitor = true
 	max_contacts_reported = 6
+	continuous_cd = true
 	# Layer 4 = debris (bit 3); mask 7 = layers 1(ground)+2(player)+4(debris)
+	# Kept off world layer 1 so the player locomotion mask can ignore debris piles.
 	collision_layer = 4
 	collision_mask = 7
 
@@ -173,11 +172,8 @@ func setup_island_split(cells: Array, block_data_map: Dictionary, orig_offsets: 
 
 		var mesh_instance := MeshInstance3D.new()
 		var box_mesh := BoxMesh.new()
-		box_mesh.size = Vector3.ONE * (cell_size * 0.98)
-		var mat := StandardMaterial3D.new()
-		mat.albedo_color = BlockTypeCatalog.get_color(block_data.block_type)
-		mat.roughness = 0.85
-		box_mesh.material = mat
+		box_mesh.size = Vector3(cell_size, cell_size, cell_size)
+		box_mesh.material = TerrainBlockyLibrary.get_shared_material(block_data.block_type)
 		mesh_instance.mesh = box_mesh
 		mesh_instance.position = new_local_pos
 		add_child(mesh_instance)
@@ -195,6 +191,7 @@ func setup_island_split(cells: Array, block_data_map: Dictionary, orig_offsets: 
 	_awake_frames = 0
 	contact_monitor = true
 	max_contacts_reported = 6
+	continuous_cd = true
 	collision_layer = 4
 	collision_mask = 7
 
