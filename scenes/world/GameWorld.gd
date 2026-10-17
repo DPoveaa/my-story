@@ -9,6 +9,7 @@ extends Node3D
 const PlayerControllerScript = preload("res://scenes/player/PlayerController.gd")
 const MortarOverlayRendererScript = preload("res://systems/rendering/MortarOverlayRenderer.gd")
 const VoxelWorldScript = preload("res://systems/terrain/VoxelWorld.gd")
+const AStarGridManagerScript = preload("res://systems/terrain/AStarGridManager.gd")
 
 enum GameMode { SURVIVAL, CREATIVE }
 @export var current_game_mode: GameMode = GameMode.SURVIVAL
@@ -24,8 +25,11 @@ enum GameMode { SURVIVAL, CREATIVE }
 var grid_system: Node
 var stability_system: Node
 var voxel_world: VoxelWorld = null
-var nav_region: NavigationRegion3D = null
-var _nav_rebake_pending: bool = false
+## AStar3D grid pathfinder — replaces the unreliable NavigationRegion3D for voxel terrain.
+var astar_grid: Node = null
+var astar_manager: Node:
+	get: return astar_grid
+	set(val): astar_grid = val
 var _debug_camera_active: bool = false
 var _mortar_overlay_renderer: Node3D = null
 ## Large XZ shift each session so the same generator yields a fresh landscape without reseeding.
@@ -131,7 +135,7 @@ func _ready() -> void:
 			build_camera.block_type_changed.connect(build_hud.set_selected_block_type)
 			build_hud.set_selected_block_type(build_camera.get_selected_type())
 
-	_setup_navigation_region()
+	_setup_astar_grid()
 
 ## Async: hold player still with loading UI until a validated top-surface spawn exists.
 func _spawn_player_on_terrain() -> void:
@@ -204,7 +208,15 @@ func _spawn_player_on_terrain() -> void:
 	if build_hud != null and build_hud.has_method("set_loading_overlay"):
 		build_hud.set_loading_overlay(false)
 
-	rebake_navigation.call_deferred()
+	# Trigger AStar graph rebuild around the player's landing position
+	if astar_grid != null:
+		astar_grid.update_center(safe_spawn)
+		astar_grid.rebuild_graph()
+
+func _process(_delta: float) -> void:
+	## Feed the player's current position to AStarGridManager so the graph stays centred on them.
+	if astar_grid != null and player != null and is_instance_valid(player):
+		astar_grid.update_center(player.global_position)
 
 func _unhandled_input(event: InputEvent) -> void:
 	if build_hud != null and build_hud.has_method("is_modal_open") and build_hud.is_modal_open():
@@ -370,73 +382,29 @@ func clear_world() -> void:
 		collapse_orchestrator.clear_all_debris()
 
 # ==============================================================================
-# NAVIGATION MESH / REGION (ROBOT & HELPER LOCOMOTION)
+# ASTAR GRID PATHFINDING  (replaces failed NavigationRegion3D / NavigationAgent3D)
 # ==============================================================================
 
-func _setup_navigation_region() -> void:
-	nav_region = get_node_or_null("NavigationRegion3D") as NavigationRegion3D
-	if nav_region == null:
-		nav_region = NavigationRegion3D.new()
-		nav_region.name = "NavigationRegion3D"
-		add_child(nav_region)
+func _setup_astar_grid() -> void:
+	astar_grid = AStarGridManagerScript.new()
+	astar_grid.name = "AStarGridManager"
+	add_child(astar_grid)
 
-	var nav_mesh: NavigationMesh = nav_region.navigation_mesh
-	if nav_mesh == null:
-		nav_mesh = NavigationMesh.new()
-		nav_region.navigation_mesh = nav_mesh
-
-	# Navigation settings optimized for helper minions, slopes and 1-block steps / workbenches
-	nav_mesh.agent_height = 1.3
-	nav_mesh.agent_radius = 0.35
-	nav_mesh.agent_max_climb = 1.1      # Handles workbenches and 1.0m block steps
-	nav_mesh.agent_max_slope = 60.0     # Supports terrain and structure ramps
-	nav_mesh.cell_size = 0.25
-	nav_mesh.cell_height = 0.25
-	nav_mesh.geometry_parsed_geometry_type = NavigationMesh.PARSED_GEOMETRY_BOTH
-	nav_mesh.geometry_collision_mask = 1
-
-	# Connect GridSystem signals so navmesh is rebaked whenever blocks change
-	if grid_system != null:
-		if not grid_system.block_placed.is_connected(_on_grid_nav_dirty):
-			grid_system.block_placed.connect(_on_grid_nav_dirty)
-		if not grid_system.block_removed.is_connected(_on_grid_nav_dirty):
-			grid_system.block_removed.connect(_on_grid_nav_dirty)
-		if not grid_system.blocks_removed_batch.is_connected(_on_grid_nav_dirty_batch):
-			grid_system.blocks_removed_batch.connect(_on_grid_nav_dirty_batch)
-		if not grid_system.grid_cleared.is_connected(_on_grid_nav_dirty_batch):
-			grid_system.grid_cleared.connect(_on_grid_nav_dirty_batch)
-
-	# Connect VoxelWorld terrain edits so navmesh is rebaked when terrain is modified
+	# Wire VoxelWorld terrain edits so the graph rebuilds when blocks are mined
 	if voxel_world != null:
-		if not voxel_world.voxel_mined.is_connected(_on_grid_nav_dirty):
-			voxel_world.voxel_mined.connect(_on_grid_nav_dirty)
+		if not voxel_world.voxel_mined.is_connected(astar_grid._on_voxel_changed):
+			voxel_world.voxel_mined.connect(astar_grid._on_voxel_changed)
 
-func _on_grid_nav_dirty(_cell: Vector3i, _data: Variant = null) -> void:
-	schedule_nav_rebake()
+	# Wire GridSystem block events so the graph rebuilds when player-placed blocks change
+	if grid_system != null:
+		if grid_system.has_signal("block_placed"):
+			grid_system.block_placed.connect(
+				func(cell: Vector3i, _data: Variant = null) -> void: astar_grid.notify_block_changed(cell)
+			)
+		if grid_system.has_signal("block_removed"):
+			grid_system.block_removed.connect(
+				func(cell: Vector3i, _data: Variant = null) -> void: astar_grid.notify_block_changed(cell)
+			)
 
-func _on_grid_nav_dirty_batch(_a: Variant = null, _b: Variant = null) -> void:
-	schedule_nav_rebake()
-
-func schedule_nav_rebake() -> void:
-	if not is_inside_tree() or nav_region == null:
-		return
-	if _nav_rebake_pending:
-		return
-	_nav_rebake_pending = true
-	# Debounce 0.25s so continuous editing doesn't freeze the main thread
-	get_tree().create_timer(0.25).timeout.connect(func() -> void:
-		_nav_rebake_pending = false
-		rebake_navigation()
-	)
-
-func rebake_navigation() -> void:
-	if nav_region != null and is_instance_valid(nav_region) and nav_region.is_inside_tree():
-		if nav_region.navigation_mesh != null:
-			var nav_mesh: NavigationMesh = nav_region.navigation_mesh
-			nav_mesh.cell_size = 0.25
-			nav_mesh.cell_height = 0.25
-			var map_rid: RID = nav_region.get_navigation_map()
-			if map_rid.is_valid():
-				NavigationServer3D.map_set_cell_size(map_rid, nav_mesh.cell_size)
-				NavigationServer3D.map_set_cell_height(map_rid, nav_mesh.cell_height)
-		nav_region.bake_navigation_mesh(true)
+	# Initial graph built around origin — will shift to player after spawn
+	astar_grid.setup(voxel_world)

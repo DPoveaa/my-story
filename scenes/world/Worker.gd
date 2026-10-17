@@ -1,8 +1,9 @@
 class_name Worker
 extends CharacterBody3D
 
-## Hauler Bot: Autonomous helper entity with 3D Navigation, multi-item carrying,
-## jumping over ledges, structure avoidance, and full-route F3 Debug visualizer.
+## Hauler Bot: Autonomous helper entity with AStar3D grid-based pathfinding,
+## multi-item carrying, jumping over 1-block ledges, and full-route F3 Debug line.
+## NavigationAgent3D has been completely removed in favour of AStarGridManager.
 
 enum State {
 	IDLE,
@@ -15,33 +16,50 @@ enum State {
 
 @export var move_speed: float = 3.6
 @export var search_radius: float = 20.0
-@export var gravity: float = 19.6
+@export var gravity: float = 9.8
+@export var jump_velocity: float = 5.5
 @export var reach_distance: float = 2.5
 @export var step_height: float = 1.05
-## Match player jump strength (approx 5.0) to clear 1-block ledges.
-const JUMP_VELOCITY: float = 5.0
-## Y threshold above which the worker considers a ledge worth jumping.
+## Heavy gravity multiplier to eliminate moon-gravity feel.
+const GRAVITY_MULTIPLIER: float = 2.5
+## Jump velocity tuned for heavy gravity, clears 1.2m: sqrt(2 * 9.8 * 2.5 * 1.2) ≈ 7.67
+const JUMP_VELOCITY: float = 7.7
+## Y threshold above which the bot considers a ledge worth jumping.
 const JUMP_THRESHOLD: float = 0.35
+## How close to a waypoint before advancing to the next one (metres).
+const WAYPOINT_REACH: float = 0.55
+## Cooldown after a path/task failure before returning to IDLE (prevents flickering).
+const TASK_ABORT_COOLDOWN: float = 1.5
 
 ## Capacity limits (mirrors player).
 const MAX_LOGS: int = 2
 const MAX_PLANKS: int = 4
 
-@onready var nav_agent: NavigationAgent3D = $NavigationAgent3D
 @onready var carrier_marker: Marker3D = $CarrierMarker3D
 @onready var debug_label: Label3D = $DebugLabel3D
 @onready var line: Node = get_node_or_null("Line3D")
 
 var current_state: State = State.IDLE
 var target_item: Node3D = null
-var carried_items: Array = []         # Array of Node3D – replaces single carried_item
+var carried_items: Array = []
 var carried_material: String = ""
 var target_station: Node3D = null
 
 var _idle_timer: float = 0.0
-var _safe_velocity: Vector3 = Vector3.ZERO
 var _last_target_pos: Vector3 = Vector3.INF
 var _thought_text: String = "[IDLE] Looking for work..."
+
+## AStar3D path currently being followed.
+var _current_path: PackedVector3Array = PackedVector3Array()
+var _path_index: int = 0
+var _destination: Vector3 = Vector3.INF
+var _repath_timer: float = 0.0
+const REPATH_INTERVAL: float = 0.5
+## Abort cooldown: prevents rapid task flicker after path failure.
+var _abort_cooldown: float = 0.0
+
+## Cached reference to AStarGridManager — resolved lazily.
+var _astar_mgr: Node = null
 
 func _ready() -> void:
 	add_to_group("workers")
@@ -51,69 +69,104 @@ func _ready() -> void:
 	floor_snap_length = 0.4
 	floor_constant_speed = true
 
-	if nav_agent != null:
-		nav_agent.path_desired_distance = 0.5
-		nav_agent.target_desired_distance = reach_distance
-		if "path_height_offset" in nav_agent:
-			nav_agent.path_height_offset = 0.0
-		if "agent_height_offset" in nav_agent:
-			nav_agent.set("agent_height_offset", 0.0)
-		nav_agent.avoidance_enabled = true
-		if "use_3d_avoidance" in nav_agent:
-			nav_agent.use_3d_avoidance = false
-		if not nav_agent.velocity_computed.is_connected(_on_velocity_computed):
-			nav_agent.velocity_computed.connect(_on_velocity_computed)
-
 	if line != null:
 		line.top_level = true
 
-	# Ensure agent starts placed on a valid NavMesh point upon spawn
-	_snap_to_navmesh_deferred.call_deferred()
-
 	_transition_to(State.IDLE)
 
-func _snap_to_navmesh_deferred() -> void:
-	await get_tree().physics_frame
-	if not is_inside_tree():
+# ---------------------------------------------------------------------------
+# AStar helper — lazy lookup
+# ---------------------------------------------------------------------------
+func _get_astar() -> Node:
+	if _astar_mgr != null and is_instance_valid(_astar_mgr):
+		return _astar_mgr
+	# Try GameWorld child first
+	var root: Node = get_tree().root if is_inside_tree() else null
+	if root != null:
+		var gw: Node = root.find_child("GameWorld", true, false)
+		if gw != null:
+			_astar_mgr = gw.get_node_or_null("AStarGridManager")
+			if _astar_mgr != null:
+				return _astar_mgr
+		# Fallback: anywhere in tree
+		_astar_mgr = root.find_child("AStarGridManager", true, false)
+	return _astar_mgr
+
+func _request_path(to: Vector3) -> void:
+	_destination = to
+	var mgr := _get_astar()
+	if mgr == null:
+		# No graph yet — fall back to direct steering
+		_current_path = PackedVector3Array([to])
+		_path_index = 0
 		return
-	var nav_map: RID = get_world_3d().navigation_map if get_world_3d() != null else (nav_agent.get_navigation_map() if nav_agent != null else RID())
-	if nav_map.is_valid():
-		var closest: Vector3 = NavigationServer3D.map_get_closest_point(nav_map, global_position)
-		if closest != Vector3.ZERO and closest.distance_squared_to(global_position) < 36.0:
-			global_position = closest + Vector3.UP * 0.05
+	var path: PackedVector3Array = mgr.find_astar_path(global_position, to)
+	_current_path = path
+	_path_index = 0
 
-func _set_nav_target(target_pos: Vector3) -> void:
-	_last_target_pos = target_pos
-	if nav_agent == null:
-		return
-	var nav_map: RID = nav_agent.get_navigation_map()
-	if nav_map.is_valid():
-		var closest: Vector3 = NavigationServer3D.map_get_closest_point(nav_map, target_pos)
-		if closest != Vector3.ZERO and closest.distance_squared_to(target_pos) < 36.0:
-			nav_agent.target_position = closest
-			return
-	nav_agent.target_position = target_pos
+func _has_valid_path() -> bool:
+	return _path_index < _current_path.size()
 
-func _on_velocity_computed(safe_velocity: Vector3) -> void:
-	_safe_velocity = safe_velocity
+func _current_waypoint() -> Vector3:
+	if _has_valid_path():
+		return _current_path[_path_index]
+	return _destination
 
+func _advance_waypoint() -> void:
+	_path_index += 1
+
+func _recalculate_moving_path() -> void:
+	var target_pos := Vector3.INF
+	if current_state == State.MOVING_TO_ITEM and is_instance_valid(target_item):
+		target_pos = target_item.global_position
+	elif current_state == State.MOVING_TO_STATION and is_instance_valid(target_station):
+		target_pos = target_station.global_position
+
+	if target_pos != Vector3.INF:
+		var astar_manager := _get_astar()
+		if astar_manager != null and astar_manager.has_method("find_astar_path"):
+			var new_path: PackedVector3Array = astar_manager.find_astar_path(global_position, target_pos)
+			if not new_path.is_empty():
+				_current_path = new_path
+				_path_index = 0
+				_destination = target_pos
+				_last_target_pos = target_pos
+			else:
+				if current_state == State.MOVING_TO_ITEM:
+					_cancel_job("Path blocked to item!")
+				elif current_state == State.MOVING_TO_STATION:
+					_cancel_job("Path blocked to station!")
+
+# ---------------------------------------------------------------------------
+# Physics loop
+# ---------------------------------------------------------------------------
 func _physics_process(delta: float) -> void:
 	if global_position.y < -50.0:
 		queue_free()
 		return
 
-	# Gravity & floor contact
+	# Gravity — 2.5x multiplier to eliminate moon-gravity feel
 	if not is_on_floor():
-		velocity.y -= gravity * delta
+		velocity.y -= gravity * GRAVITY_MULTIPLIER * delta
 	else:
 		if velocity.y < 0.0:
 			velocity.y = -0.1
 
-	# Worker Jumping & Ramp Navigation:
-	# Only evaluate ledge jump when actively traversing to item or station
-	if is_on_floor() and nav_agent != null and (current_state == State.MOVING_TO_ITEM or current_state == State.MOVING_TO_STATION):
-		var next_p: Vector3 = nav_agent.get_next_path_position()
-		var y_diff: float = next_p.y - global_position.y
+	# Abort cooldown tick
+	if _abort_cooldown > 0.0:
+		_abort_cooldown -= delta
+
+	# Dynamic route recalculation while moving
+	if current_state == State.MOVING_TO_ITEM or current_state == State.MOVING_TO_STATION:
+		_repath_timer += delta
+		if _repath_timer >= REPATH_INTERVAL:
+			_repath_timer = 0.0
+			_recalculate_moving_path()
+
+	# Jump to clear the next waypoint if it is higher than current position
+	if is_on_floor() and _has_valid_path():
+		var wp := _current_waypoint()
+		var y_diff: float = wp.y - global_position.y
 		if y_diff > JUMP_THRESHOLD:
 			velocity.y = JUMP_VELOCITY
 
@@ -148,7 +201,7 @@ func _physics_process(delta: float) -> void:
 
 	move_and_slide()
 
-	# Step height: handle small bumps/stairs automatically without jumping
+	# Step-up: handle small bumps without jumping
 	if is_on_wall():
 		var horiz_vel := Vector3(velocity.x, 0.0, velocity.z)
 		if horiz_vel.length_squared() > 0.01:
@@ -183,6 +236,9 @@ func _try_step_up(move_dir: Vector3) -> void:
 		global_position.y += step_y + 0.02
 		velocity.y = 0.0
 
+# ---------------------------------------------------------------------------
+# _process — debug label + AStar path line
+# ---------------------------------------------------------------------------
 func _process(_delta: float) -> void:
 	var debug_on: bool = _is_debug_overlay_active()
 
@@ -191,26 +247,28 @@ func _process(_delta: float) -> void:
 		if debug_on:
 			debug_label.text = _thought_text
 
+	# Draw the live AStar path as a 3D line every frame
 	if line != null:
-		if debug_on and nav_agent != null:
+		if debug_on and _has_valid_path():
 			line.visible = true
-			var raw_path: PackedVector3Array = nav_agent.get_current_navigation_path()
-			var points: PackedVector3Array = PackedVector3Array()
-			if not raw_path.is_empty():
-				points.append(global_position + Vector3(0.0, 0.25, 0.0))
-				for p in raw_path:
-					points.append(p + Vector3(0.0, 0.25, 0.0))
-			else:
-				var tgt: Vector3 = nav_agent.target_position
-				if tgt != Vector3.INF and tgt != Vector3.ZERO:
-					points.append(global_position + Vector3(0.0, 0.25, 0.0))
-					points.append(tgt + Vector3(0.0, 0.25, 0.0))
-			line.points = points
+			var pts: PackedVector3Array = PackedVector3Array()
+			# Start at bot's current position
+			pts.append(global_position + Vector3(0.0, 0.3, 0.0))
+			# Append each remaining waypoint in the AStar path
+			for i in range(_path_index, _current_path.size()):
+				pts.append(_current_path[i] + Vector3(0.0, 0.3, 0.0))
+			line.points = pts
 		else:
 			line.visible = false
+			if line.has_method("_update_mesh") or "points" in line:
+				line.points = PackedVector3Array()
 
+# ---------------------------------------------------------------------------
+# State machine
+# ---------------------------------------------------------------------------
 func _transition_to(new_state: State) -> void:
 	current_state = new_state
+	_repath_timer = 0.0
 	match current_state:
 		State.IDLE:
 			_thought_text = "[IDLE] Looking for work..."
@@ -230,16 +288,34 @@ func _transition_to(new_state: State) -> void:
 			_thought_text = "[DEPOSIT] Depositing %d item(s)..." % carried_items.size()
 
 func _process_search_job() -> void:
-	# 1. Search for nearest loose, unassigned Log or Plank within 20m radius
+	# Guard: wait until abort cooldown expires to prevent rapid flickering
+	if _abort_cooldown > 0.0:
+		_transition_to(State.IDLE)
+		return
+	# 1. Search for nearest loose, unassigned Log or Plank within search_radius
 	var item: Node3D = _find_nearest_loose_item(["logs", "planks"])
 	# 2. If no logs/planks exist, search for loose Fragments (Dirt/Stone)
 	if item == null:
 		item = _find_nearest_loose_item(["fragments"])
 
 	if item != null:
+		var astar_manager := _get_astar()
+		if astar_manager != null and astar_manager.has_method("find_astar_path"):
+			var path: PackedVector3Array = astar_manager.find_astar_path(global_position, item.global_position)
+			if path.is_empty():
+				_idle_timer = TASK_ABORT_COOLDOWN
+				_abort_cooldown = TASK_ABORT_COOLDOWN
+				_transition_to(State.IDLE)
+				return
+			_current_path = path
+			_path_index = 0
+			_destination = item.global_position
+		else:
+			_request_path(item.global_position)
+
 		target_item = item
 		target_item.set_meta("worker_assigned", true)
-		_set_nav_target(target_item.global_position)
+		_last_target_pos = target_item.global_position
 		_transition_to(State.MOVING_TO_ITEM)
 	else:
 		_idle_timer = 1.0
@@ -256,19 +332,14 @@ func _find_nearest_loose_item(group_names: Array, same_type: String = "") -> Nod
 				continue
 			if node.is_queued_for_deletion():
 				continue
-			# Carried by player or another worker
 			if node.get_parent() is Marker3D:
 				continue
-			# Already assigned to a worker
 			if node.get_meta("worker_assigned", false):
 				continue
-			# Pulled by vacuum or part of pallet craft block
 			if node.get_meta("vacuum_pull", false) or node.get_meta("pallet_craft_block", false):
 				continue
-			# RigidBody check: ignore if frozen inside player hands or other non-loose storage
 			if node is RigidBody3D and (node as RigidBody3D).freeze and not node.is_in_group("fragments"):
 				continue
-			# Optional same-type filter (for multi-pickup pass)
 			if not same_type.is_empty():
 				var mat: String = _resolve_item_material(node)
 				if mat != same_type:
@@ -282,7 +353,6 @@ func _find_nearest_loose_item(group_names: Array, same_type: String = "") -> Nod
 	return best_item
 
 func _process_moving_to_item(delta: float) -> void:
-	# Validate target item
 	if target_item == null or not is_instance_valid(target_item) or target_item.is_queued_for_deletion():
 		_cancel_job("Target item lost!")
 		return
@@ -290,29 +360,27 @@ func _process_moving_to_item(delta: float) -> void:
 		_cancel_job("Target taken by player/worker!")
 		return
 
-	# Dynamic target recalculation if item moves
+	# Dynamic target recalculation if item moves significantly
 	if target_item.global_position.distance_squared_to(_last_target_pos) > 0.4:
-		_set_nav_target(target_item.global_position)
+		_request_path(target_item.global_position)
+		_last_target_pos = target_item.global_position
 
 	var dist: float = global_position.distance_to(target_item.global_position)
 	_thought_text = "[MOVING] Target: %s | Dist: %.1fm" % [target_item.name, dist]
 
-	# Check arrival (reach distance threshold)
-	if (nav_agent != null and nav_agent.is_target_reached()) or dist <= reach_distance:
+	if dist <= reach_distance:
 		_transition_to(State.PICKUP_ITEM)
 		return
 
-	_steer_towards(target_item.global_position, delta)
+	_follow_path(delta)
 
 func _process_pickup_item() -> void:
 	if target_item == null or not is_instance_valid(target_item) or target_item.is_queued_for_deletion():
 		_cancel_job("Target item disappeared!")
 		return
 
-	# Determine this item's material
 	var item_mat: String = _resolve_item_material(target_item)
 
-	# Capacity check — if already full, skip to station now
 	if not _can_carry_more(item_mat):
 		_go_to_station_or_idle(carried_material if not carried_material.is_empty() else item_mat)
 		return
@@ -327,11 +395,11 @@ func _process_pickup_item() -> void:
 		rb.linear_velocity = Vector3.ZERO
 		rb.angular_velocity = Vector3.ZERO
 
-	# Visual stack offset: each additional item sits 0.28 units above the last
+	# Visual stack offset
 	var stack_index: int = carried_items.size()
 	var y_offset: float = float(stack_index) * 0.28
 
-	# Reparent / attach to carrier marker
+	# Reparent to carrier marker
 	var old_parent: Node = target_item.get_parent()
 	if old_parent != null:
 		old_parent.remove_child(target_item)
@@ -343,43 +411,53 @@ func _process_pickup_item() -> void:
 	carried_material = item_mat
 	target_item = null
 
-	# If not yet at capacity, look for another nearby item of the SAME type
+	# Look for another nearby item of the same type
 	if _can_carry_more(carried_material):
 		var next_item: Node3D = _find_nearest_loose_item(
 			[_material_to_group(carried_material)], carried_material
 		)
 		if next_item != null:
-			target_item = next_item
-			target_item.set_meta("worker_assigned", true)
-			_set_nav_target(target_item.global_position)
-			_transition_to(State.MOVING_TO_ITEM)
-			return
+			var astar_mgr := _get_astar()
+			var valid_path := true
+			var next_path := PackedVector3Array()
+			if astar_mgr != null and astar_mgr.has_method("find_astar_path"):
+				next_path = astar_mgr.find_astar_path(global_position, next_item.global_position)
+				if next_path.is_empty():
+					valid_path = false
+			if valid_path:
+				target_item = next_item
+				target_item.set_meta("worker_assigned", true)
+				if not next_path.is_empty():
+					_current_path = next_path
+					_path_index = 0
+					_destination = next_item.global_position
+				else:
+					_request_path(target_item.global_position)
+				_last_target_pos = target_item.global_position
+				_transition_to(State.MOVING_TO_ITEM)
+				return
 
-	# At capacity or no more nearby items of same type — head to station
 	_go_to_station_or_idle(carried_material)
 
-## Returns true when the worker can take another item of this material type.
 func _can_carry_more(mat: String) -> bool:
 	if mat == "log":
 		return carried_items.size() < MAX_LOGS
 	elif mat == "plank":
 		return carried_items.size() < MAX_PLANKS
-	# Fragments / other: single-item capacity
 	return carried_items.is_empty()
 
-## Map a material string to its node group name.
 func _material_to_group(mat: String) -> String:
 	match mat:
 		"log":   return "logs"
 		"plank": return "planks"
 		_:       return "fragments"
 
-## Find nearest station then transition, or cancel if none available.
 func _go_to_station_or_idle(mat: String) -> void:
 	var station: Node3D = _find_nearest_station_for_material(mat)
 	if station != null:
 		target_station = station
-		_set_nav_target(target_station.global_position)
+		_request_path(target_station.global_position)
+		_last_target_pos = target_station.global_position
 		_transition_to(State.MOVING_TO_STATION)
 	else:
 		_cancel_job("No valid station for %s!" % mat)
@@ -405,7 +483,6 @@ func _find_nearest_station_for_material(mat: String) -> Node3D:
 	var best_station: Node3D = null
 	var best_dist_sq: float = INF
 
-	# If log, check Chopping Blocks that don't have a log
 	if mat == "log":
 		for block in get_tree().get_nodes_in_group("chopping_blocks"):
 			if not (block is ChoppingBlock) or not is_instance_valid(block):
@@ -417,7 +494,6 @@ func _find_nearest_station_for_material(mat: String) -> Node3D:
 				best_dist_sq = d_sq
 				best_station = block
 
-	# Check Pallets accepting this material
 	for pallet in get_tree().get_nodes_in_group("pallets"):
 		if not (pallet is Pallet) or not is_instance_valid(pallet):
 			continue
@@ -445,39 +521,37 @@ func _find_nearest_station_for_material(mat: String) -> Node3D:
 
 func _process_moving_to_station(delta: float) -> void:
 	if target_station == null or not is_instance_valid(target_station) or target_station.is_queued_for_deletion():
-		# Try re-evaluating another station
 		var alt_station := _find_nearest_station_for_material(carried_material)
 		if alt_station != null:
 			target_station = alt_station
-			_set_nav_target(target_station.global_position)
+			_request_path(target_station.global_position)
+			_last_target_pos = target_station.global_position
 		else:
 			_cancel_job("Target station lost!")
 			return
 
-	# Dynamic target recalculation if station moves
 	if target_station.global_position.distance_squared_to(_last_target_pos) > 0.4:
-		_set_nav_target(target_station.global_position)
+		_request_path(target_station.global_position)
+		_last_target_pos = target_station.global_position
 
-	var dist: float = global_position.distance_to(target_station.global_position)
-	_thought_text = "[CARRYING %d] Transporting to %s | Dist: %.1fm" % [carried_items.size(), target_station.name, dist]
+	# Use horizontal distance only to avoid height mismatches causing deposit failure
+	var horiz_dist: float = Vector2(global_position.x - target_station.global_position.x, global_position.z - target_station.global_position.z).length()
+	_thought_text = "[CARRYING %d] Transporting to %s | Dist: %.1fm" % [carried_items.size(), target_station.name, horiz_dist]
 
-	# Check arrival at station (reach distance threshold)
-	if (nav_agent != null and nav_agent.is_target_reached()) or dist <= reach_distance:
+	if horiz_dist <= reach_distance:
 		_transition_to(State.DEPOSIT_ITEM)
 		return
 
-	_steer_towards(target_station.global_position, delta)
+	_follow_path(delta)
 
 func _process_deposit_item() -> void:
 	if not is_instance_valid(target_station):
-		# Station gone — drop everything
 		_drop_all_carried()
 		target_station = null
 		carried_material = ""
 		_transition_to(State.SEARCH_JOB)
 		return
 
-	# Deposit items iteratively from the carried_items array
 	var remaining: Array = []
 	for item in carried_items:
 		if not is_instance_valid(item):
@@ -504,7 +578,6 @@ func _process_deposit_item() -> void:
 		else:
 			remaining.append(item)
 
-	# Drop any items that could not be deposited back into the world
 	for leftover in remaining:
 		_drop_single_item(leftover)
 
@@ -513,40 +586,48 @@ func _process_deposit_item() -> void:
 	carried_material = ""
 	_transition_to(State.SEARCH_JOB)
 
-func _steer_towards(target_pos: Vector3, delta: float) -> void:
-	var next_pos: Vector3 = target_pos
-	if nav_agent != null:
-		var np: Vector3 = nav_agent.get_next_path_position()
-		if np != Vector3.ZERO:
-			next_pos = np
-
-	var dir: Vector3 = next_pos - global_position
-	dir.y = 0.0
-	if dir.length_squared() < 0.001:
-		dir = target_pos - global_position
-		dir.y = 0.0
-
-	if dir.length_squared() > 0.001:
-		dir = dir.normalized()
-		var target_yaw: float = atan2(-dir.x, -dir.z)
-		rotation.y = lerp_angle(rotation.y, target_yaw, 10.0 * delta)
-
-		var desired_vel: Vector3 = dir * move_speed
-		if nav_agent != null and nav_agent.avoidance_enabled:
-			nav_agent.set_velocity(desired_vel)
-			if _safe_velocity.length_squared() > 0.01:
-				velocity.x = _safe_velocity.x
-				velocity.z = _safe_velocity.z
-			else:
-				velocity.x = desired_vel.x
-				velocity.z = desired_vel.z
-		else:
-			velocity.x = desired_vel.x
-			velocity.z = desired_vel.z
-	else:
+# ---------------------------------------------------------------------------
+# AStar path-following locomotion
+# ---------------------------------------------------------------------------
+func _follow_path(delta: float) -> void:
+	if not _has_valid_path():
+		# No path — coast to a stop
 		velocity.x = move_toward(velocity.x, 0.0, move_speed * delta * 5.0)
 		velocity.z = move_toward(velocity.z, 0.0, move_speed * delta * 5.0)
+		return
 
+	var wp := _current_waypoint()
+
+	# Advance waypoint when close enough (XZ plane only so jump arcs don't skip nodes)
+	var xz_dist: float = Vector2(global_position.x - wp.x, global_position.z - wp.z).length()
+	if xz_dist < WAYPOINT_REACH:
+		_advance_waypoint()
+		if not _has_valid_path():
+			velocity.x = move_toward(velocity.x, 0.0, move_speed * delta * 5.0)
+			velocity.z = move_toward(velocity.z, 0.0, move_speed * delta * 5.0)
+			return
+		wp = _current_waypoint()
+
+	var dir: Vector3 = wp - global_position
+	dir.y = 0.0
+
+	if dir.length_squared() < 0.001:
+		velocity.x = move_toward(velocity.x, 0.0, move_speed * delta * 5.0)
+		velocity.z = move_toward(velocity.z, 0.0, move_speed * delta * 5.0)
+		return
+
+	dir = dir.normalized()
+
+	# Smooth rotation towards movement direction
+	var target_yaw: float = atan2(-dir.x, -dir.z)
+	rotation.y = lerp_angle(rotation.y, target_yaw, 10.0 * delta)
+
+	velocity.x = dir.x * move_speed
+	velocity.z = dir.z * move_speed
+
+# ---------------------------------------------------------------------------
+# Job cancellation / item dropping
+# ---------------------------------------------------------------------------
 func _cancel_job(reason: String) -> void:
 	_thought_text = "[BLOCKED] %s" % reason
 	if debug_label != null:
@@ -560,16 +641,17 @@ func _cancel_job(reason: String) -> void:
 
 	target_station = null
 	carried_material = ""
-	_idle_timer = 1.0
+	_idle_timer = TASK_ABORT_COOLDOWN
+	_abort_cooldown = TASK_ABORT_COOLDOWN
+	_current_path = PackedVector3Array()
+	_path_index = 0
 	_transition_to(State.IDLE)
 
-## Drop all currently carried items back into the world.
 func _drop_all_carried() -> void:
 	for item in carried_items:
 		_drop_single_item(item)
 	carried_items.clear()
 
-## Detach a single item from carrier_marker and restore its physics.
 func _drop_single_item(item: Node3D) -> void:
 	if item == null or not is_instance_valid(item):
 		return
@@ -594,31 +676,24 @@ func _drop_single_item(item: Node3D) -> void:
 		var rb := item as RigidBody3D
 		rb.freeze = false
 		rb.sleeping = false
-		rb.collision_layer = 4 # DEBRIS_LAYER
-		rb.collision_mask = 1 | 4 # DEBRIS_COLLISION_MASK
+		rb.collision_layer = 4  # DEBRIS_LAYER
+		rb.collision_mask = 1 | 4
 		rb.linear_velocity = Vector3(randf_range(-0.5, 0.5), 0.8, randf_range(-0.5, 0.5))
 
 	item.set_meta("worker_assigned", false)
 
-
-func _has_navigation_mesh() -> bool:
-	if nav_agent == null:
-		return false
-	var nav_map: RID = nav_agent.get_navigation_map()
-	return not NavigationServer3D.map_get_regions(nav_map).is_empty()
-
+# ---------------------------------------------------------------------------
+# Debug overlay check
+# ---------------------------------------------------------------------------
 func _is_debug_overlay_active() -> bool:
-	# 1. Check for CanvasLayer named DebugOverlay
 	var overlay: Node = get_tree().root.find_child("DebugOverlay", true, false)
 	if overlay != null and overlay is CanvasLayer:
 		return (overlay as CanvasLayer).visible
-	# 2. Check BuildHUD
 	var hud: Node = get_tree().root.find_child("BuildHUD", true, false)
 	if hud != null:
 		var v = hud.get("_debug_visible")
 		if v != null:
 			return bool(v)
-	# 3. Check Player
 	var player_node: Node = get_tree().root.find_child("Player", true, false)
 	if player_node != null:
 		var v = player_node.get("_debug_overlay_enabled")

@@ -30,7 +30,8 @@ func _ready() -> void:
 	axis_lock_angular_y = false
 	axis_lock_angular_z = false
 	center_of_mass_mode = RigidBody3D.CENTER_OF_MASS_MODE_CUSTOM
-	center_of_mass = Vector3(0.0, trunk_height * 0.5, 0.0)
+	## Crown-biased COM — top-heavy body cannot weeble-wobble upright.
+	center_of_mass = Vector3(0.0, trunk_height * 0.8, 0.0)
 
 ## amount: axe damage. hit_direction: vector from player toward/away (tree - player).
 func take_damage(amount: int, hit_direction: Vector3 = Vector3.ZERO) -> void:
@@ -126,24 +127,27 @@ func _fell(hit_direction: Vector3) -> void:
 	max_contacts_reported = 6
 	collision_layer = 1
 	collision_mask = 1
+	# Unlock all angular axes so the tree can tip freely in any direction
 	axis_lock_angular_x = false
 	axis_lock_angular_y = false
 	axis_lock_angular_z = false
+	# Crown-biased COM — shifting weight 80% up makes the tree irreversibly top-heavy.
 	center_of_mass_mode = RigidBody3D.CENTER_OF_MASS_MODE_CUSTOM
-	center_of_mass = Vector3(0.0, trunk_height * 0.5, 0.0)
+	center_of_mass = Vector3(0.0, trunk_height * 0.8, 0.0)
 	freeze = false
 	sleeping = false
 
 	if not body_entered.is_connected(_on_body_entered):
 		body_entered.connect(_on_body_entered)
 
-	# 1. Apply strong lateral impulse near the top of the tree for felling leverage
+	# 1. Apply strong lateral impulse near the crown for lever-arm effect
 	var top_offset := Vector3(0.0, trunk_height * 0.85, 0.0)
 	apply_impulse(push_dir * (fell_impulse * 2.5), top_offset)
 
-	# 2. Apply torque impulse along perpendicular axis to tip tree over realistically
-	var torque_axis: Vector3 = push_dir.cross(Vector3.UP).normalized()
-	apply_torque_impulse(torque_axis * (fell_impulse * 5.0))
+	# 2. Massive torque impulse — a top-heavy body with 500 Nm·s CANNOT stand back up.
+	var fall_dir: Vector3 = push_dir
+	var torque_axis: Vector3 = fall_dir.cross(Vector3.UP).normalized()
+	apply_torque_impulse(torque_axis * 500.0)
 
 	# 3. Fallback timer (2.0 seconds) in case tree snags without triggering body_entered
 	if is_inside_tree():

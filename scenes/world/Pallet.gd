@@ -714,6 +714,10 @@ static func make_craft_block_body(type: String) -> RigidBody3D:
 	body.linear_damp = 0.5
 	body.angular_damp = 0.6
 	body.continuous_cd = true
+	# FIX: Start frozen so placed blocks stick to surfaces (mortar behaviour).
+	# Caller must explicitly set freeze=false when the block needs to be a loose physics object.
+	body.freeze_mode = RigidBody3D.FREEZE_MODE_STATIC
+	body.freeze = true
 
 	var box := BoxMesh.new()
 	box.size = Vector3(1.0, 1.0, 1.0)

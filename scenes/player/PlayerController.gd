@@ -1832,8 +1832,9 @@ func _spawn_voxel_fragments_burst(center: Vector3, block_type: StringName) -> vo
 	for i in range(shard_count):
 		var body := _make_irregular_shard_body(ftype, mat)
 		parent.add_child(body)
-		# Elevate initial fragment spawn position slightly above the terrain block so it doesn't spawn inside static colliders
-		body.global_position = center + offsets[i] + Vector3.UP * 0.15
+		# Spawn 0.75 units above the voxel center so fragments fall via gravity
+		# and never spawn inside the static terrain collider.
+		body.global_position = center + offsets[i] + Vector3.UP * 0.75
 		body.rotation = Vector3(randf() * TAU, randf() * TAU, randf() * TAU)
 		# Absolute zero explosion — collapse in place under gravity only.
 		body.linear_velocity = Vector3.ZERO
@@ -1872,80 +1873,20 @@ func _generate_packed_shard_offsets(count: int) -> Array[Vector3]:
 		))
 	return result
 
-## Pre-cached solid 3D octahedron shard and ConvexPolygonShape3D resources (Task 2).
-static var _cached_shard_shapes: Array[ConvexPolygonShape3D] = []
-static var _cached_shard_meshes: Array[ArrayMesh] = []
-const SHARD_BASE_RADIUS: float = 0.12
-
-## Low-poly Octahedron generator for peak performance and solid 3D look.
-static func _build_octahedron_shard_variant() -> Dictionary:
-	# Define 6 vertices (Top, Bottom, Front, Back, Left, Right) starting at distance 1.0 from center.
-	# Multiply each vertex position by a random scalar randf_range(0.4, 1.2) to make it irregular.
-	var top := Vector3(0.0, 1.0, 0.0) * randf_range(0.4, 1.2) * SHARD_BASE_RADIUS
-	var bottom := Vector3(0.0, -1.0, 0.0) * randf_range(0.4, 1.2) * SHARD_BASE_RADIUS
-	var front := Vector3(0.0, 0.0, 1.0) * randf_range(0.4, 1.2) * SHARD_BASE_RADIUS
-	var back := Vector3(0.0, 0.0, -1.0) * randf_range(0.4, 1.2) * SHARD_BASE_RADIUS
-	var left := Vector3(-1.0, 0.0, 0.0) * randf_range(0.4, 1.2) * SHARD_BASE_RADIUS
-	var right := Vector3(1.0, 0.0, 0.0) * randf_range(0.4, 1.2) * SHARD_BASE_RADIUS
-
-	var st := SurfaceTool.new()
-	st.begin(Mesh.PRIMITIVE_TRIANGLES)
-
-	# Build 8 triangle faces connecting these 6 vertices with verified outward normals
-	_add_octahedron_face(st, top, front, right)
-	_add_octahedron_face(st, top, right, back)
-	_add_octahedron_face(st, top, back, left)
-	_add_octahedron_face(st, top, left, front)
-
-	_add_octahedron_face(st, bottom, right, front)
-	_add_octahedron_face(st, bottom, back, right)
-	_add_octahedron_face(st, bottom, left, back)
-	_add_octahedron_face(st, bottom, front, left)
-
-	st.generate_tangents()
-
-	var mesh: ArrayMesh = st.commit()
-
-	# Generate a ConvexPolygonShape3D matching these exactly 6 vertices.
-	var convex := ConvexPolygonShape3D.new()
-	convex.points = PackedVector3Array([top, bottom, front, back, left, right])
-	convex.margin = 0.01
-
-	return {"shape": convex, "mesh": mesh}
-
-static func _add_octahedron_face(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3) -> void:
-	var face_norm: Vector3 = (b - a).cross(c - a).normalized()
-	var face_center: Vector3 = (a + b + c) / 3.0
-	# Ensure vertex winding is counter-clockwise and normal points strictly outwards from mesh center
-	if face_norm.dot(face_center) < 0.0:
-		var temp := b
-		b = c
-		c = temp
-		face_norm = (b - a).cross(c - a).normalized()
-	if face_norm.dot(face_center) < 0.0:
-		face_norm = -face_norm
-
-	st.set_normal(face_norm)
-	st.set_uv(Vector2(a.x + 0.5, a.z + 0.5))
-	st.add_vertex(a)
-
-	st.set_normal(face_norm)
-	st.set_uv(Vector2(b.x + 0.5, b.z + 0.5))
-	st.add_vertex(b)
-
-	st.set_normal(face_norm)
-	st.set_uv(Vector2(c.x + 0.5, c.z + 0.5))
-	st.add_vertex(c)
+## Pre-cached native BoxMesh and BoxShape3D primitives for stable, non-clipping fragment physics.
+const FRAGMENT_BOX_SIZE: Vector3 = Vector3(0.2, 0.2, 0.2)
+static var _cached_box_mesh: BoxMesh = null
+static var _cached_box_shape: BoxShape3D = null
 
 static func _ensure_cached_shard_resources() -> void:
-	if not _cached_shard_shapes.is_empty():
-		return
-	for i in range(8):
-		var res := _build_octahedron_shard_variant()
-		_cached_shard_shapes.append(res["shape"])
-		_cached_shard_meshes.append(res["mesh"])
+	if _cached_box_mesh == null:
+		_cached_box_mesh = BoxMesh.new()
+		_cached_box_mesh.size = FRAGMENT_BOX_SIZE
+	if _cached_box_shape == null:
+		_cached_box_shape = BoxShape3D.new()
+		_cached_box_shape.size = FRAGMENT_BOX_SIZE
 
-## Builds one solid 3D irregular polyhedron shard RigidBody3D matching generated 3D vertices.
+## Builds one solid native primitive Box shard RigidBody3D with matching BoxShape3D collision.
 func _make_irregular_shard_body(ftype: String, mat: StandardMaterial3D) -> RigidBody3D:
 	_ensure_cached_shard_resources()
 	var body: RigidBody3D = VoxelFragmentScript.new()
@@ -1964,7 +1905,7 @@ func _make_irregular_shard_body(ftype: String, mat: StandardMaterial3D) -> Rigid
 	body.continuous_cd = true
 	body.freeze = false
 	body.contact_monitor = true
-	body.max_contacts_reported = 4
+	body.max_contacts_reported = 2
 
 	# StandardMaterial3D with PER_PIXEL shading reacting accurately to global illumination and shadows
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
@@ -1977,23 +1918,19 @@ func _make_irregular_shard_body(ftype: String, mat: StandardMaterial3D) -> Rigid
 	mat.vertex_color_use_as_albedo = false
 	mat.cull_mode = BaseMaterial3D.CULL_BACK
 
-	var variant_idx: int = randi() % _cached_shard_shapes.size()
 	var mesh_inst := MeshInstance3D.new()
-	mesh_inst.mesh = _cached_shard_meshes[variant_idx]
+	mesh_inst.mesh = _cached_box_mesh
 	mesh_inst.material_override = mat
 	mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
 
-	# Apply randomized scale (0.7 to 1.5)
-	var uniform_scale: float = randf_range(0.7, 1.5)
-	var s := Vector3.ONE * uniform_scale
-	mesh_inst.scale = s
-
 	var col := CollisionShape3D.new()
-	col.shape = _cached_shard_shapes[variant_idx]
-	col.scale = s
+	col.shape = _cached_box_shape
 
 	body.add_child(mesh_inst)
 	body.add_child(col)
+
+	# Randomize initial rotation
+	body.rotation = Vector3(randf() * TAU, randf() * TAU, randf() * TAU)
 	return body
 
 ## Spawns one shard at `pos` with initial toss velocity (used by bag dump toss).
