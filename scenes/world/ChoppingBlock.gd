@@ -17,6 +17,8 @@ const PLANK_SIZE: Vector3 = Vector3(0.08, 0.70, 0.22)
 
 @onready var visual_log: MeshInstance3D = $VisualLog
 
+var reserved_worker: Node = null
+
 func _ready() -> void:
 	add_to_group("crafting_stations")
 	add_to_group("chopping_blocks")
@@ -27,6 +29,7 @@ func _ready() -> void:
 	call_deferred("_notify_astar")
 
 func _exit_tree() -> void:
+	release_reservation()
 	call_deferred("_notify_astar")
 
 func _notify_astar() -> void:
@@ -38,8 +41,40 @@ func _notify_astar() -> void:
 		var aabb := AABB(global_position - Vector3(0.5, 0.2, 0.5), Vector3(1.0, 1.0, 1.0))
 		astar_mgr.notify_bounds_changed(aabb)
 
-func can_accept_log() -> bool:
-	return not has_log and not bool(get_meta("worker_assigned", false))
+func can_accept_log(for_worker: Node = null) -> bool:
+	if has_log:
+		return false
+	if reserved_worker != null:
+		if not is_instance_valid(reserved_worker) or not (reserved_worker is Node and (reserved_worker as Node).is_inside_tree()):
+			reserved_worker = null
+		elif for_worker != null and reserved_worker == for_worker:
+			return true
+		else:
+			return false
+	if has_meta("worker_reserved_by"):
+		var w = get_meta("worker_reserved_by")
+		if w is Node:
+			if not is_instance_valid(w) or not (w as Node).is_inside_tree():
+				set_meta("worker_reserved_by", null)
+			elif for_worker != null and w == for_worker:
+				return true
+			else:
+				return false
+	return true
+
+func reserve(worker: Node) -> bool:
+	if not can_accept_log(worker):
+		return false
+	reserved_worker = worker
+	set_meta("worker_reserved_by", worker)
+	set_meta("worker_assigned", true)
+	return true
+
+func release_reservation(worker: Node = null) -> void:
+	if worker == null or reserved_worker == worker or (has_meta("worker_reserved_by") and get_meta("worker_reserved_by") == worker):
+		reserved_worker = null
+		set_meta("worker_reserved_by", null)
+		set_meta("worker_assigned", false)
 
 func try_place_log() -> bool:
 	if has_log:

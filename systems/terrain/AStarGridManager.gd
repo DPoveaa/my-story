@@ -175,7 +175,22 @@ func _is_position_blocked_by_physics(cell: Vector3i) -> bool:
 	# Mask 1 = World/Stations/Buildings/Placed Blocks (excludes loose layer 4 pickups)
 	ray_query.collision_mask = 1
 	var ray_hit := direct_state.intersect_ray(ray_query)
-	return not ray_hit.is_empty()
+	if ray_hit.is_empty():
+		return false
+
+	var collider = ray_hit.get("collider", null)
+	if collider != null:
+		# Exclude terrain mesh: terrain solidity is already verified directly by voxel data
+		if collider == _voxel_world:
+			return false
+		if collider is Node and (collider == _voxel_world or collider.get_parent() == _voxel_world):
+			return false
+		if collider.is_class("VoxelTerrain") or (collider is Node and (collider as Node).is_in_group("voxel_terrain")):
+			return false
+		if "generator" in collider and "generate_collisions" in collider:
+			return false
+
+	return true
 
 func update_center(world_pos: Vector3) -> void:
 	## Stores current center without polling chunks or triggering heavy rebuilds.
@@ -438,6 +453,7 @@ func notify_block_changed(world_cell: Vector3i) -> void:
 	_update_local_column(world_cell.x, world_cell.z)
 	for off in ADJACENT_OFFSETS:
 		_reconnect_column(world_cell.x + off.x, world_cell.z + off.y)
+	graph_rebuilt.emit()
 
 func notify_bounds_changed(aabb: AABB) -> void:
 	var min_cell := Vector3i(floori(aabb.position.x), floori(aabb.position.y), floori(aabb.position.z))
@@ -589,6 +605,50 @@ func find_astar_path(from_world: Vector3, to_world: Vector3) -> PackedVector3Arr
 func get_astar_path(from_world: Vector3, to_world: Vector3) -> PackedVector3Array:
 	return find_astar_path(from_world, to_world)
 
+func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: float = 0.5, max_dist: float = 2.4) -> PackedVector3Array:
+	## Finds a path from from_world to a valid, walkable approach node beside target_world.
+	var from_id := _closest_point_id(from_world)
+	if from_id < 0:
+		return PackedVector3Array()
+
+	var target_col := Vector2i(floori(target_world.x), floori(target_world.z))
+	var candidates: Array[Dictionary] = []
+
+	# Check columns in a 5x5 grid around target (up to 2 blocks away horizontally)
+	for dx in range(-2, 3):
+		for dz in range(-2, 3):
+			var col := Vector2i(target_col.x + dx, target_col.y + dz)
+			if not _column_to_cells.has(col):
+				continue
+			for cell in _column_to_cells[col]:
+				if not _point_ids.has(cell):
+					continue
+				var cand_id: int = _point_ids[cell]
+				var cand_pos: Vector3 = _astar.get_point_position(cand_id)
+				var d_target: float = cand_pos.distance_to(target_world)
+				var y_diff: float = absf(cand_pos.y - target_world.y)
+				if d_target <= max_dist and y_diff <= 1.8:
+					var d_from: float = cand_pos.distance_squared_to(from_world)
+					candidates.append({"id": cand_id, "dist_target": d_target, "dist_from": d_from})
+
+	if candidates.is_empty():
+		var direct_to_id := _closest_point_id(target_world)
+		if direct_to_id >= 0:
+			return _astar.get_point_path(from_id, direct_to_id)
+		return PackedVector3Array()
+
+	candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return a["dist_from"] < b["dist_from"]
+	)
+
+	for i in range(mini(4, candidates.size())):
+		var cand_id: int = candidates[i]["id"]
+		var path: PackedVector3Array = _astar.get_point_path(from_id, cand_id)
+		if not path.is_empty():
+			return path
+
+	return PackedVector3Array()
+
 func get_closest_walkable_pos(world_pos: Vector3) -> Vector3:
 	## Snaps a world position to the nearest walkable AStar node.
 	var id := _closest_point_id(world_pos)
@@ -597,12 +657,37 @@ func get_closest_walkable_pos(world_pos: Vector3) -> Vector3:
 	return _astar.get_point_position(id)
 
 func _closest_point_id(world_pos: Vector3) -> int:
-	## Find the closest graph point within 3 blocks; returns -1 if none.
 	if _astar.get_point_count() == 0:
 		return -1
-	var id: int = _astar.get_closest_point(world_pos)
-	if id < 0 or not _id_cells.has(id):
-		return -1
-	if _astar.get_point_position(id).distance_squared_to(world_pos) > 9.0:
-		return -1
-	return id
+
+	var target_col := Vector2i(floori(world_pos.x), floori(world_pos.z))
+	var best_id: int = -1
+	var best_dist_sq: float = INF
+
+	# 1. Search local 3x3 columns around world_pos to find closest 3D match without skipping tunnel levels
+	for dx in range(-1, 2):
+		for dz in range(-1, 2):
+			var col := Vector2i(target_col.x + dx, target_col.y + dz)
+			if not _column_to_cells.has(col):
+				continue
+			for cell in _column_to_cells[col]:
+				if not _point_ids.has(cell):
+					continue
+				var id: int = _point_ids[cell]
+				var pt_pos: Vector3 = _astar.get_point_position(id)
+				var d_sq: float = pt_pos.distance_squared_to(world_pos)
+				if d_sq < 16.0 and absf(pt_pos.y - world_pos.y) <= 2.2:
+					if d_sq < best_dist_sq:
+						best_dist_sq = d_sq
+						best_id = id
+
+	if best_id >= 0:
+		return best_id
+
+	# 2. Fallback to global closest point within 4m
+	var global_id: int = _astar.get_closest_point(world_pos)
+	if global_id >= 0 and _id_cells.has(global_id):
+		if _astar.get_point_position(global_id).distance_squared_to(world_pos) <= 16.0:
+			return global_id
+
+	return -1

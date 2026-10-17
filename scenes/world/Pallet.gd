@@ -62,7 +62,11 @@ func _ready() -> void:
 	call_deferred("_absorb_overlapping_catch_bodies")
 	call_deferred("_notify_astar")
 
+var active_reservations: Dictionary = {}
+
 func _exit_tree() -> void:
+	active_reservations.clear()
+	set_meta("worker_assigned", false)
 	call_deferred("_notify_astar")
 
 func _notify_astar() -> void:
@@ -358,21 +362,76 @@ func can_withdraw() -> bool:
 		return false
 	return _get_assigned_count() > 0
 
-func can_accept_material(item_material: String, amount: int = 1) -> bool:
+func get_total_reserved_amount(for_worker: Node = null) -> int:
+	var total: int = 0
+	var stale_keys: Array = []
+	for w in active_reservations.keys():
+		if not is_instance_valid(w) or not (w is Node and (w as Node).is_inside_tree()):
+			stale_keys.append(w)
+			continue
+		if for_worker != null and w == for_worker:
+			continue
+		var res: Dictionary = active_reservations[w]
+		total += int(res.get("amount", 0))
+	for w in stale_keys:
+		active_reservations.erase(w)
+	return total
+
+func get_effective_assigned_material() -> String:
+	if not assigned_material.is_empty():
+		return assigned_material
+	for w in active_reservations.keys():
+		if is_instance_valid(w) and (w as Node).is_inside_tree():
+			var mat: String = String(active_reservations[w].get("material", ""))
+			if not mat.is_empty():
+				return mat
+	return ""
+
+func get_capacity(item_material: String) -> int:
+	if _is_fragment_type(item_material):
+		return FRAGMENTS_PER_BLOCK * CRAFT_BATCH_BLOCKS
+	elif item_material == "log":
+		return 32
+	return 64
+
+func get_remaining_capacity(item_material: String, for_worker: Node = null) -> int:
+	if not _is_storable(item_material) or _auto_converted:
+		return 0
+	var eff_mat: String = get_effective_assigned_material()
+	if not eff_mat.is_empty() and not _materials_compatible(item_material, eff_mat):
+		return 0
+	var cap: int = get_capacity(item_material)
+	var current: int = _get_assigned_count() + get_total_reserved_amount(for_worker)
+	return maxi(0, cap - current)
+
+func can_accept_material(item_material: String, amount: int = 1, for_worker: Node = null) -> bool:
 	if amount <= 0 or not _is_storable(item_material):
 		return false
 	if _auto_converted:
 		return false
-	if not assigned_material.is_empty() and not _materials_compatible(item_material, assigned_material):
+	var eff_mat: String = get_effective_assigned_material()
+	if not eff_mat.is_empty() and not _materials_compatible(item_material, eff_mat):
 		return false
-	var cap: int = 64
-	if _is_fragment_type(item_material):
-		cap = FRAGMENTS_PER_BLOCK * CRAFT_BATCH_BLOCKS
-	elif item_material == "log":
-		cap = 32
-	if _get_assigned_count() + amount > cap:
+	var cap: int = get_capacity(item_material)
+	var reserved_others: int = get_total_reserved_amount(for_worker)
+	if _get_assigned_count() + reserved_others + amount > cap:
 		return false
 	return true
+
+func reserve(worker: Node, mat: String, amount: int) -> bool:
+	if not can_accept_material(mat, amount, worker):
+		return false
+	active_reservations[worker] = {"material": mat, "amount": amount}
+	set_meta("worker_assigned", true)
+	return true
+
+func release_reservation(worker: Node = null) -> void:
+	if worker != null and active_reservations.has(worker):
+		active_reservations.erase(worker)
+	elif worker == null:
+		active_reservations.clear()
+	if active_reservations.is_empty():
+		set_meta("worker_assigned", false)
 
 func refund_material(item_material: String, amount: int) -> bool:
 	if amount <= 0 or item_material.is_empty():
@@ -383,7 +442,12 @@ func _try_accept_material(item_material: String) -> bool:
 	return _try_accept_material_amount(item_material, 1)
 
 func _try_accept_material_amount(item_material: String, amount: int) -> bool:
-	if not can_accept_material(item_material, amount):
+	if amount <= 0 or not _is_storable(item_material) or _auto_converted:
+		return false
+	if not assigned_material.is_empty() and not _materials_compatible(item_material, assigned_material):
+		return false
+	var cap: int = get_capacity(item_material)
+	if _get_assigned_count() + amount > cap:
 		return false
 	if assigned_material == "":
 		assigned_material = item_material
