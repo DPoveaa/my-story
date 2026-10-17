@@ -137,9 +137,8 @@ func setup_island(cells: Array, block_data_map: Dictionary, p_cell_size: float, 
 	contact_monitor = true
 	max_contacts_reported = 6
 	continuous_cd = true
-	# Layer 4 = debris (bit 3); mask 7 = layers 1(ground)+2(player)+4(debris)
-	# Kept off world layer 1 so the player locomotion mask can ignore debris piles.
-	collision_layer = 4
+	# Layer 1 = world obstacle (obstructs helper navigation), Layer 4 = debris
+	collision_layer = 1 | 4
 	collision_mask = 7
 
 ## Sets up an island resulting from a split of an existing debris island.
@@ -192,7 +191,7 @@ func setup_island_split(cells: Array, block_data_map: Dictionary, orig_offsets: 
 	contact_monitor = true
 	max_contacts_reported = 6
 	continuous_cd = true
-	collision_layer = 4
+	collision_layer = 1 | 4
 	collision_mask = 7
 
 ## Resolves the constituent cell coordinate hit by a physics raycast.
@@ -512,12 +511,45 @@ func wake_and_disable_sleep() -> void:
 	if sleeping:
 		sleeping = false
 
+func _exit_tree() -> void:
+	_notify_astar()
+
 func _on_sleeping_state_changed() -> void:
 	if sleeping and not is_settled:
 		is_settled = true
 		island_settled.emit(self)
+		_notify_astar()
 	elif not sleeping:
 		is_settled = false
+
+func get_global_aabb() -> AABB:
+	if constituent_blocks.is_empty():
+		return AABB(global_position - Vector3(0.5, 0.5, 0.5), Vector3.ONE)
+	var first: bool = true
+	var min_p := Vector3.ZERO
+	var max_p := Vector3.ZERO
+	for c in constituent_blocks.keys():
+		var local_pos: Vector3 = local_offsets.get(c, Vector3.ZERO)
+		var world_pos: Vector3 = global_transform * local_pos
+		var b_min := world_pos - Vector3.ONE * (cell_size * 0.5)
+		var b_max := world_pos + Vector3.ONE * (cell_size * 0.5)
+		if first:
+			min_p = b_min
+			max_p = b_max
+			first = false
+		else:
+			min_p = min_p.min(b_min)
+			max_p = max_p.max(b_max)
+	return AABB(min_p, max_p - min_p)
+
+func _notify_astar() -> void:
+	if not is_inside_tree():
+		return
+	var root := get_tree().root
+	var astar_mgr: Node = root.find_child("AStarGridManager", true, false)
+	if astar_mgr != null and astar_mgr.has_method("notify_bounds_changed"):
+		var aabb := get_global_aabb().grow(0.6)
+		astar_mgr.notify_bounds_changed(aabb)
 
 # ==============================================================================
 # MORTAR OVERLAY HELPERS (mirrors MortarOverlayRenderer geometry)

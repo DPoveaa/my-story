@@ -38,7 +38,7 @@ func _notify_astar() -> void:
 	var root := get_tree().root
 	var astar_mgr: Node = root.find_child("AStarGridManager", true, false)
 	if astar_mgr != null and astar_mgr.has_method("notify_bounds_changed"):
-		var aabb := AABB(global_position - Vector3(0.5, 0.2, 0.5), Vector3(1.0, 1.0, 1.0))
+		var aabb := AABB(global_position - Vector3(1.0, 0.2, 1.0), Vector3(2.0, 2.0, 2.0))
 		astar_mgr.notify_bounds_changed(aabb)
 
 func can_accept_log(for_worker: Node = null) -> bool:

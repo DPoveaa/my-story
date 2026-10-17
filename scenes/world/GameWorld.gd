@@ -404,6 +404,16 @@ func _setup_astar_grid() -> void:
 			grid_system.block_removed.connect(
 				func(cell: Vector3i, _data: Variant = null) -> void: astar_grid.notify_block_changed(cell)
 			)
+		if grid_system.has_signal("blocks_removed_batch"):
+			grid_system.blocks_removed_batch.connect(
+				func(cells: Array, _data_map: Dictionary = {}) -> void:
+					for c in cells:
+						astar_grid.notify_block_changed(c)
+			)
+		if grid_system.has_signal("grid_cleared"):
+			grid_system.grid_cleared.connect(
+				func() -> void: astar_grid.rebuild_graph()
+			)
 
 	# Initial graph built around origin — will shift to player after spawn
 	astar_grid.setup(voxel_world)

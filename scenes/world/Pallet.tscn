@@ -31,7 +31,7 @@ material = SubResource("MatFill")
 size = Vector3(2.0, 1.0, 2.0)
 
 [sub_resource type="BoxShape3D" id="ColPallet"]
-size = Vector3(2.2, 0.2, 2.2)
+size = Vector3(2.1, 1.6, 2.1)
 
 [sub_resource type="BoxShape3D" id="ColCatch"]
 size = Vector3(2.1, 2.4, 2.1)
@@ -87,7 +87,7 @@ visible = false
 mesh = SubResource("MeshWallShort")
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.1, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.8, 0)
 shape = SubResource("ColPallet")
 
 [node name="FillVolume" type="MeshInstance3D" parent="."]

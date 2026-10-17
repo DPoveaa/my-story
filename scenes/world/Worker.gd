@@ -90,6 +90,7 @@ var _recovery_attempts: int = 0
 var _jump_cooldown: float = 0.0
 var _jump_count_at_waypoint: int = 0
 var _last_jump_waypoint_idx: int = -1
+var _wall_stuck_timer: float = 0.0
 
 ## Target blacklist: instance_id -> expiry_ticks_msec
 var _blacklisted_targets: Dictionary = {}
@@ -178,9 +179,9 @@ func _get_astar() -> Node:
 	return _astar_mgr
 
 func _request_path(to: Vector3, is_station_or_item: bool = true) -> bool:
-	_destination = to
 	var mgr := _get_astar()
 	if mgr == null:
+		_destination = to
 		_current_path = PackedVector3Array([to])
 		_path_index = 0
 		_path_dirty = true
@@ -188,17 +189,21 @@ func _request_path(to: Vector3, is_station_or_item: bool = true) -> bool:
 
 	var path: PackedVector3Array = PackedVector3Array()
 	if is_station_or_item and mgr.has_method("find_approach_path"):
-		path = mgr.find_approach_path(global_position, to)
+		var min_d: float = 1.3 if (target_station != null or (to == _last_target_pos and current_state == State.MOVING_TO_STATION)) else 0.8
+		path = mgr.find_approach_path(global_position, to, min_d, 2.4)
 	if path.is_empty() and mgr.has_method("find_astar_path"):
 		path = mgr.find_astar_path(global_position, to)
 
 	if path.is_empty():
 		_current_path = PackedVector3Array()
 		_path_index = 0
+		_destination = Vector3.INF
 		_path_dirty = true
 		return false
 
 	_current_path = path
+	# Destination is the reachable approach point beside the obstacle, NOT the inside of the object
+	_destination = _current_path[_current_path.size() - 1]
 	_path_index = 0
 	# If the first waypoint is already behind or very close to the bot, advance to 1
 	if _current_path.size() > 1:
@@ -295,12 +300,21 @@ func _physics_process(delta: float) -> void:
 
 	move_and_slide()
 
-	# Step-up: handle small bumps (up to 1.05m) smoothly without jumping
+	# Step-up: handle small bumps (up to 1.05m) smoothly without jumping; replan if blocked
 	if is_on_wall():
 		var horiz_vel := Vector2(velocity.x, velocity.z)
 		if horiz_vel.length_squared() > 0.01:
 			var move_dir := Vector3(velocity.x, 0.0, velocity.z).normalized()
-			_try_step_up(move_dir)
+			var stepped: bool = _try_step_up(move_dir)
+			if not stepped and _has_valid_path():
+				_wall_stuck_timer += delta
+				if _wall_stuck_timer >= 0.4:
+					_wall_stuck_timer = 0.0
+					_trigger_stuck_recovery("Path obstructed by wall/obstacle")
+			else:
+				_wall_stuck_timer = 0.0
+	else:
+		_wall_stuck_timer = 0.0
 
 func _has_jump_headroom() -> bool:
 	if not is_inside_tree():
@@ -316,12 +330,12 @@ func _has_jump_headroom() -> bool:
 	ray.exclude = [get_rid()]
 	return space.intersect_ray(ray).is_empty()
 
-func _try_step_up(move_dir: Vector3) -> void:
+func _try_step_up(move_dir: Vector3) -> bool:
 	if not is_inside_tree() or not is_on_floor():
-		return
+		return false
 	var space := get_world_3d().direct_space_state
 	if space == null:
-		return
+		return false
 
 	var test_up := global_position + Vector3.UP * step_height
 	var test_fwd := test_up + move_dir * 0.4
@@ -330,7 +344,7 @@ func _try_step_up(move_dir: Vector3) -> void:
 	params.collision_mask = collision_mask
 	var hit := space.intersect_ray(params)
 	if not hit.is_empty():
-		return
+		return false
 
 	var check_to := test_fwd + Vector3.DOWN * (step_height + 0.1)
 	var floor_params := PhysicsRayQueryParameters3D.create(test_fwd, check_to)
@@ -338,12 +352,15 @@ func _try_step_up(move_dir: Vector3) -> void:
 	floor_params.collision_mask = collision_mask
 	var floor_hit := space.intersect_ray(floor_params)
 	if floor_hit.is_empty():
-		return
+		return false
 
 	var step_y: float = floor_hit.position.y - global_position.y
 	if step_y > 0.05 and step_y <= step_height:
 		global_position.y += step_y + 0.02
 		velocity.y = 0.0
+		return true
+
+	return false
 
 # ---------------------------------------------------------------------------
 # Debug & F3 Overlay Visuals
@@ -490,15 +507,23 @@ func _find_best_candidate_item(group_names: Array, same_type: String = "") -> No
 				continue
 
 			# Respect per-worker reservations
-			var res_worker = node.get_meta("worker_reserved_by", null)
+			var res_worker = null
+			if node.has_meta("worker_reserved_by"):
+				res_worker = node.get_meta("worker_reserved_by")
 			if res_worker != null:
 				if is_instance_valid(res_worker) and res_worker != self:
 					continue
-			elif node.get_meta("worker_assigned", false):
-				if node != target_item:
+			elif node.has_meta("worker_assigned"):
+				if bool(node.get_meta("worker_assigned")) and node != target_item:
 					continue
 
-			if node.get_meta("vacuum_pull", false) or node.get_meta("pallet_craft_block", false):
+			var is_vac: bool = false
+			if node.has_meta("vacuum_pull"):
+				is_vac = bool(node.get_meta("vacuum_pull"))
+			var is_craft: bool = false
+			if node.has_meta("pallet_craft_block"):
+				is_craft = bool(node.get_meta("pallet_craft_block"))
+			if is_vac or is_craft:
 				continue
 			if node is RigidBody3D and (node as RigidBody3D).freeze and not node.is_in_group("fragments"):
 				continue
@@ -577,9 +602,10 @@ func _can_station_accept_material(station: Node3D, mat: String, amount: int = -1
 		var cb := station as ChoppingBlock
 		if cb.has_log:
 			return false
-		if cb.has_method("can_accept_log"):
-			return cb.can_accept_log(self)
-		if station != target_station and station.get_meta("worker_assigned", false):
+		var is_assigned: bool = false
+		if station.has_meta("worker_assigned"):
+			is_assigned = bool(station.get_meta("worker_assigned"))
+		if station != target_station and is_assigned:
 			return false
 		return true
 	elif station is Pallet:
@@ -614,7 +640,7 @@ func _find_nearest_station_for_material(mat: String, amount: int = -1) -> Node3D
 			if astar_mgr != null:
 				var p: PackedVector3Array = PackedVector3Array()
 				if astar_mgr.has_method("find_approach_path"):
-					p = astar_mgr.find_approach_path(global_position, block.global_position)
+					p = astar_mgr.find_approach_path(global_position, block.global_position, 1.1, 2.4)
 				elif astar_mgr.has_method("find_astar_path"):
 					p = astar_mgr.find_astar_path(global_position, block.global_position)
 				if p.is_empty():
@@ -637,7 +663,7 @@ func _find_nearest_station_for_material(mat: String, amount: int = -1) -> Node3D
 		if astar_mgr != null:
 			var p: PackedVector3Array = PackedVector3Array()
 			if astar_mgr.has_method("find_approach_path"):
-				p = astar_mgr.find_approach_path(global_position, pallet.global_position)
+				p = astar_mgr.find_approach_path(global_position, pallet.global_position, 1.3, 2.4)
 			elif astar_mgr.has_method("find_astar_path"):
 				p = astar_mgr.find_astar_path(global_position, pallet.global_position)
 			if p.is_empty():
@@ -716,8 +742,8 @@ func _process_moving_to_station(delta: float) -> void:
 
 func _follow_path(delta: float) -> void:
 	if not _has_valid_path():
-		velocity.x = move_toward(velocity.x, 0.0, move_speed * delta * 5.0)
-		velocity.z = move_toward(velocity.z, 0.0, move_speed * delta * 5.0)
+		velocity.x = move_toward(velocity.x, 0.0, move_speed * delta * 8.0)
+		velocity.z = move_toward(velocity.z, 0.0, move_speed * delta * 8.0)
 		return
 
 	var wp := _current_waypoint()
@@ -726,14 +752,12 @@ func _follow_path(delta: float) -> void:
 	var xz_dist: float = Vector2(global_position.x - wp.x, global_position.z - wp.z).length()
 	var y_diff: float = wp.y - global_position.y
 	if xz_dist < WAYPOINT_REACH:
-		# If descending (waypoint is below bot), accept up to 1.9m drop
-		# If ascending (waypoint is above bot), accept once within 1.1m
 		if (y_diff <= 0.35 and absf(y_diff) < 1.9) or (y_diff > 0.35 and y_diff < 1.1):
 			_advance_waypoint()
 			_jump_count_at_waypoint = 0
 			if not _has_valid_path():
-				velocity.x = move_toward(velocity.x, 0.0, move_speed * delta * 5.0)
-				velocity.z = move_toward(velocity.z, 0.0, move_speed * delta * 5.0)
+				velocity.x = move_toward(velocity.x, 0.0, move_speed * delta * 8.0)
+				velocity.z = move_toward(velocity.z, 0.0, move_speed * delta * 8.0)
 				return
 			wp = _current_waypoint()
 
@@ -741,18 +765,29 @@ func _follow_path(delta: float) -> void:
 	dir.y = 0.0
 
 	if dir.length_squared() < 0.001:
-		velocity.x = move_toward(velocity.x, 0.0, move_speed * delta * 5.0)
-		velocity.z = move_toward(velocity.z, 0.0, move_speed * delta * 5.0)
+		velocity.x = move_toward(velocity.x, 0.0, move_speed * delta * 8.0)
+		velocity.z = move_toward(velocity.z, 0.0, move_speed * delta * 8.0)
 		return
 
 	dir = dir.normalized()
+
+	# Smooth steering when approaching current waypoint towards next waypoint
+	if _path_index + 1 < _current_path.size() and xz_dist < 0.8:
+		var next_wp := _current_path[_path_index + 1]
+		var dir_next := next_wp - global_position
+		dir_next.y = 0.0
+		if dir_next.length_squared() > 0.001:
+			var blend: float = clampf(1.0 - (xz_dist / 0.8), 0.0, 0.45)
+			dir = dir.lerp(dir_next.normalized(), blend).normalized()
 
 	# Smooth rotation towards movement direction
 	var target_yaw: float = atan2(-dir.x, -dir.z)
 	rotation.y = lerp_angle(rotation.y, target_yaw, 10.0 * delta)
 
-	velocity.x = dir.x * move_speed
-	velocity.z = dir.z * move_speed
+	var target_vx := dir.x * move_speed
+	var target_vz := dir.z * move_speed
+	velocity.x = move_toward(velocity.x, target_vx, move_speed * delta * 10.0)
+	velocity.z = move_toward(velocity.z, target_vz, move_speed * delta * 10.0)
 
 func _monitor_stuck_progress(delta: float) -> void:
 	_stuck_timer += delta
@@ -950,7 +985,7 @@ func _get_item_resource_value(item: Node3D) -> int:
 	if item is VoxelFragment:
 		return (item as VoxelFragment).resource_value
 	if item.has_meta("resource_value"):
-		return int(item.get_meta("resource_value", 1))
+		return int(item.get_meta("resource_value"))
 	return 1
 
 # ---------------------------------------------------------------------------
@@ -1052,7 +1087,7 @@ func _release_target_assignments() -> void:
 func _release_item_reservation(item: Node3D = null) -> void:
 	var it := item if item != null else target_item
 	if is_instance_valid(it):
-		if it.get_meta("worker_reserved_by", null) == self:
+		if it.has_meta("worker_reserved_by") and it.get_meta("worker_reserved_by") == self:
 			it.set_meta("worker_reserved_by", null)
 		it.set_meta("worker_assigned", false)
 	if item == null or item == target_item:
@@ -1064,7 +1099,7 @@ func _release_station_reservation(st: Node3D = null) -> void:
 		if station_to_release.has_method("release_reservation"):
 			station_to_release.release_reservation(self)
 		else:
-			if station_to_release.get_meta("worker_reserved_by", null) == self:
+			if station_to_release.has_meta("worker_reserved_by") and station_to_release.get_meta("worker_reserved_by") == self:
 				station_to_release.set_meta("worker_reserved_by", null)
 			station_to_release.set_meta("worker_assigned", false)
 	if st == null or st == target_station:
@@ -1122,5 +1157,5 @@ func _drop_single_item(item: Node3D) -> void:
 		rb.linear_velocity = Vector3(randf_range(-0.5, 0.5), 0.8, randf_range(-0.5, 0.5))
 
 	item.set_meta("worker_assigned", false)
-	if item.get_meta("worker_reserved_by", null) == self:
+	if item.has_meta("worker_reserved_by") and item.get_meta("worker_reserved_by") == self:
 		item.set_meta("worker_reserved_by", null)

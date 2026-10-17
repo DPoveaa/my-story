@@ -75,7 +75,7 @@ func _notify_astar() -> void:
 	var root := get_tree().root
 	var astar_mgr: Node = root.find_child("AStarGridManager", true, false)
 	if astar_mgr != null and astar_mgr.has_method("notify_bounds_changed"):
-		var aabb := AABB(global_position - Vector3(1.1, 0.2, 1.1), Vector3(2.2, 1.6, 2.2))
+		var aabb := AABB(global_position - Vector3(1.5, 0.2, 1.5), Vector3(3.0, 2.5, 3.0))
 		astar_mgr.notify_bounds_changed(aabb)
 
 func _process(_delta: float) -> void:
@@ -212,7 +212,7 @@ func _on_catch_zone_body_entered(body: Node3D) -> void:
 			return
 	if body.has_meta("vacuum_pull") and bool(body.get_meta("vacuum_pull")):
 		return
-	if body.is_in_group("craft_blocks") or bool(body.get_meta("is_craft_block", false)):
+	if body.is_in_group("craft_blocks") or (body.has_meta("is_craft_block") and bool(body.get_meta("is_craft_block"))):
 		return
 	var mat: String = _resolve_body_material(body)
 	if mat.is_empty():

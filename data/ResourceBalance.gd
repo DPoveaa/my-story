@@ -5,7 +5,7 @@ extends RefCounted
 ## Single source of truth for voxel yields, fragment values, and pallet recipes.
 
 ## Average/standard resource yield when mining one ordinary voxel block.
-const VOXEL_RESOURCE_YIELD: int = 8
+const VOXEL_RESOURCE_YIELD: int = 16
 
 ## Material quantity required per standard crafted voxel block on a pallet.
 const FRAGMENTS_PER_BLOCK: int = VOXEL_RESOURCE_YIELD

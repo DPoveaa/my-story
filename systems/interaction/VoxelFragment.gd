@@ -22,7 +22,10 @@ func _ready() -> void:
 	angular_damp = 2.5
 
 	# Randomize initial rotation only if rotation is zero and not specifically preserved
-	if not bool(get_meta("preserve_rotation", false)) and rotation == Vector3.ZERO:
+	var preserve_rot: bool = false
+	if has_meta("preserve_rotation"):
+		preserve_rot = bool(get_meta("preserve_rotation"))
+	if not preserve_rot and rotation == Vector3.ZERO:
 		rotation = Vector3(randf() * TAU, randf() * TAU, randf() * TAU)
 
 func is_settled() -> bool:

@@ -970,7 +970,7 @@ func _resolve_pallet(collider: Object) -> Node:
 	# Crafted blocks sitting on a pallet are grabbable — do not treat them as the station.
 	if collider is RigidBody3D:
 		var rb := collider as RigidBody3D
-		if rb.is_in_group("craft_blocks") or bool(rb.get_meta("is_craft_block", false)):
+		if rb.is_in_group("craft_blocks") or (rb.has_meta("is_craft_block") and bool(rb.get_meta("is_craft_block"))):
 			return null
 	var node: Node = collider as Node
 	while node != null:
@@ -1601,13 +1601,17 @@ func _process_vacuum_bag(delta: float) -> void:
 		_vacuum_pulled.remove_at(i)
 
 	if target_dist < vacuum_collect_distance:
-		var mat_key: String = String(target.get_meta("material", target.get_meta("fragment_type", "stone")))
+		var mat_key: String = "stone"
+		if target.has_meta("material"):
+			mat_key = String(target.get_meta("material"))
+		elif target.has_meta("fragment_type"):
+			mat_key = String(target.get_meta("fragment_type"))
 		# Read resource_value so merged/overflow fragments yield correct amounts.
 		var rv: int = 1
 		if target is VoxelFragment:
 			rv = (target as VoxelFragment).resource_value
 		elif target.has_meta("resource_value"):
-			rv = int(target.get_meta("resource_value", 1))
+			rv = int(target.get_meta("resource_value"))
 		# Clamp to remaining bag space so we never exceed capacity silently.
 		var space: int = bag_max_capacity - _bag_total()
 		var collect: int = mini(rv, maxi(space, 0))
@@ -1629,7 +1633,10 @@ func _process_vacuum_bag(delta: float) -> void:
 		_update_slot_hud(true)
 		return
 
-	if not bool(target.get_meta("vacuum_pull", false)):
+	var is_pull: bool = false
+	if target.has_meta("vacuum_pull"):
+		is_pull = bool(target.get_meta("vacuum_pull"))
+	if not is_pull:
 		target.set_meta("vacuum_pull", true)
 		_disable_fragment_collision(target)
 		if target is RigidBody3D:
@@ -2195,7 +2202,7 @@ func _count_active_physical_fragments() -> int:
 
 ## Spawns Voronoi fracture pieces inside the mined voxel, preserving original shape geometry.
 ## Preserves relative transforms, applies two-tone materials, and caps active physics at 30.
-## Yields exactly TOTAL_VOXEL_RESOURCE_YIELD (12) total resource units across the pieces.
+## Yields exactly TOTAL_VOXEL_RESOURCE_YIELD (16) total resource units across the pieces (all pieces have value >= 1).
 func _spawn_voxel_fragments_burst(center: Vector3, block_type: StringName, block_type_id: int = 0) -> void:
 	var parent: Node = _get_debris_parent()
 	if parent == null:
@@ -2230,10 +2237,12 @@ func _spawn_voxel_fragments_burst(center: Vector3, block_type: StringName, block
 
 	if not pieces.is_empty():
 		var piece_count: int = pieces.size()
-		var base_val: int = TOTAL_VOXEL_RESOURCE_YIELD / piece_count
-		var rem_val: int = TOTAL_VOXEL_RESOURCE_YIELD % piece_count
+		# Cap spawned pieces to total yield if template has more pieces, guaranteeing every piece gets >= 1
+		var spawn_count: int = mini(piece_count, TOTAL_VOXEL_RESOURCE_YIELD)
+		var base_val: int = TOTAL_VOXEL_RESOURCE_YIELD / spawn_count
+		var rem_val: int = TOTAL_VOXEL_RESOURCE_YIELD % spawn_count
 
-		for i in range(piece_count):
+		for i in range(spawn_count):
 			var pdata: Dictionary = pieces[i]
 			var p_mesh: Mesh = pdata["mesh"]
 			var p_shape: Shape3D = pdata["shape"]
@@ -2293,12 +2302,12 @@ func _spawn_voxel_fragments_burst(center: Vector3, block_type: StringName, block
 			_tracked_fragments.append(weakref(body))
 	else:
 		# Procedural fallback if pre-baked assets are unavailable
-		var to_spawn: int = 6
+		var to_spawn: int = mini(6, TOTAL_VOXEL_RESOURCE_YIELD)
 		var base_val: int = TOTAL_VOXEL_RESOURCE_YIELD / to_spawn
 		var rem_val: int = TOTAL_VOXEL_RESOURCE_YIELD % to_spawn
 		for i in range(to_spawn):
 			var arch_idx: int = i % _cached_phys_meshes.size()
-			var piece_val: int = base_val + (rem_val if i == 0 else 0)
+			var piece_val: int = base_val + (1 if i < rem_val else 0)
 			var body: VoxelFragment = VoxelFragmentScript.new() as VoxelFragment
 			body.add_to_group("fragments")
 			body.set_meta("mined_fragment", true)
@@ -3573,7 +3582,7 @@ func _is_selectable_placed_block(body: RigidBody3D) -> bool:
 		return false
 	if body.is_in_group("fragments"):
 		return false
-	return body.is_in_group("craft_blocks") or bool(body.get_meta("is_craft_block", false))
+	return body.is_in_group("craft_blocks") or (body.has_meta("is_craft_block") and bool(body.get_meta("is_craft_block")))
 
 func _apply_placed_craft_block_hit(grid: Node, body: RigidBody3D, hit_pos: Vector3, hit_normal: Vector3) -> void:
 	has_target = true
@@ -3753,12 +3762,14 @@ func _get_carry_type(body: RigidBody3D) -> String:
 		return ""
 	if body.has_meta("carry_type"):
 		return String(body.get_meta("carry_type"))
-	if body.is_in_group("logs") or bool(body.get_meta("is_log", false)):
+	if body.is_in_group("logs") or (body.has_meta("is_log") and bool(body.get_meta("is_log"))):
 		return "log"
-	if body.is_in_group("planks") or bool(body.get_meta("is_plank", false)):
+	if body.is_in_group("planks") or (body.has_meta("is_plank") and bool(body.get_meta("is_plank"))):
 		return "plank"
-	if body.is_in_group("craft_blocks") or bool(body.get_meta("is_craft_block", false)):
-		return String(body.get_meta("material", "stone"))
+	if body.is_in_group("craft_blocks") or (body.has_meta("is_craft_block") and bool(body.get_meta("is_craft_block"))):
+		if body.has_meta("material"):
+			return String(body.get_meta("material"))
+		return "stone"
 	return ""
 
 func _max_for_carry_type(carry_type: String) -> int:
@@ -3790,7 +3801,7 @@ func _is_holding_building_block() -> bool:
 		var ctype := _current_held_type()
 		if BlockTypeCatalog.has_type(StringName(ctype)) or ctype == "dirt" or ctype == "stone" or ctype == "grass" or ctype == "brick" or ctype == "wood":
 			return true
-		if _held_logs[0].is_in_group("craft_blocks") or bool(_held_logs[0].get_meta("is_craft_block", false)):
+		if _held_logs[0].is_in_group("craft_blocks") or (_held_logs[0].has_meta("is_craft_block") and bool(_held_logs[0].get_meta("is_craft_block"))):
 			return true
 	return false
 
@@ -4102,7 +4113,7 @@ func _craft_radial_option_count() -> int:
 func _pallet_craft_required_count() -> int:
 	if is_instance_valid(target_pallet) and target_pallet.has_method("get_craft_required_count"):
 		return int(target_pallet.call("get_craft_required_count"))
-	return 8 * 8
+	return ResourceBalance.PALLET_CRAFT_REQUIRED_UNITS
 
 func _build_pallet_craft_options() -> Array:
 	var options: Array = []

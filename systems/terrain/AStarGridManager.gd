@@ -22,13 +22,55 @@ const CHUNK_SIZE: int = 16
 const BOUNDS_XZ: int = 64
 const BOUNDS_Y: int = 32
 
-## Immediate orthogonal adjacent neighbor offsets (cardinal directions only)
-const ADJACENT_OFFSETS: Array[Vector2i] = [
+## Cardinal orthogonal adjacent neighbor offsets
+const CARDINAL_OFFSETS: Array[Vector2i] = [
 	Vector2i(1, 0),
 	Vector2i(-1, 0),
 	Vector2i(0, 1),
 	Vector2i(0, -1),
 ]
+
+## Diagonal neighbor offsets
+const DIAGONAL_OFFSETS: Array[Vector2i] = [
+	Vector2i(1, 1),
+	Vector2i(1, -1),
+	Vector2i(-1, 1),
+	Vector2i(-1, -1),
+]
+
+## All 8 adjacent horizontal neighbor offsets
+const ADJACENT_OFFSETS: Array[Vector2i] = [
+	Vector2i(1, 0),
+	Vector2i(-1, 0),
+	Vector2i(0, 1),
+	Vector2i(0, -1),
+	Vector2i(1, 1),
+	Vector2i(1, -1),
+	Vector2i(-1, 1),
+	Vector2i(-1, -1),
+]
+
+var _clearance_shape: CapsuleShape3D = null
+var _clearance_query: PhysicsShapeQueryParameters3D = null
+
+func _get_clearance_query() -> PhysicsShapeQueryParameters3D:
+	if _clearance_query == null:
+		_clearance_shape = CapsuleShape3D.new()
+		_clearance_shape.radius = 0.32
+		_clearance_shape.height = 1.45
+		_clearance_query = PhysicsShapeQueryParameters3D.new()
+		_clearance_query.shape = _clearance_shape
+		_clearance_query.collision_mask = 1
+	return _clearance_query
+
+func _is_cell_solid(cell: Vector3i) -> bool:
+	if _voxel_world != null and _voxel_world.has_method("is_solid_block"):
+		if _voxel_world.is_solid_block(cell):
+			return true
+	var gs := get_node_or_null("/root/GridSystem")
+	if gs != null and gs.has_block(cell):
+		return true
+	return false
 
 var _astar: AStar3D = AStar3D.new()
 var _voxel_world: Node = null
@@ -83,7 +125,7 @@ const FRAME_BUDGET_MS: float = 2.0
 func _ready() -> void:
 	pass  ## No startup delay needed — physics queries are skipped during initial bake.
 
-func _process(_delta: float) -> void:
+func _physics_process(_delta: float) -> void:
 	if not _is_chunk_active and _pending_chunks.is_empty():
 		# Queue just drained — emit graph_rebuilt once and mark initial bake complete.
 		if _graph_rebuilt_pending:
@@ -128,13 +170,13 @@ func _process(_delta: float) -> void:
 				var scan_top: int = mini(max_y, surf_y)
 				var y: int = min_y - 1
 				while y <= scan_top:
-					if _voxel_world.has_method("is_solid_block") and _voxel_world.is_solid_block(Vector3i(x, y, z)):
+					if _is_cell_solid(Vector3i(x, y, z)):
 						var walk_cell := Vector3i(x, y + 1, z)
 						var head_cell := Vector3i(x, y + 2, z)
-						if not _voxel_world.is_solid_block(walk_cell) and not _voxel_world.is_solid_block(head_cell):
+						if not _is_cell_solid(walk_cell) and not _is_cell_solid(head_cell):
 							var valid := true
 							if _initial_bake_done:
-								if _is_position_blocked_by_physics(walk_cell) or _is_position_blocked_by_physics(head_cell):
+								if _is_position_blocked_by_physics(walk_cell):
 									valid = false
 							if valid:
 								_active_chunk_new_cells.append(walk_cell)
@@ -154,6 +196,8 @@ func _process(_delta: float) -> void:
 			break
 
 func _is_position_blocked_by_physics(cell: Vector3i) -> bool:
+	if not _initial_bake_done:
+		return false
 	if not is_inside_tree():
 		return false
 	var viewport := get_viewport()
@@ -162,35 +206,40 @@ func _is_position_blocked_by_physics(cell: Vector3i) -> bool:
 	var world_3d: World3D = viewport.find_world_3d()
 	if world_3d == null or not world_3d.space.is_valid():
 		return false
-	var direct_state: PhysicsDirectSpaceState3D = PhysicsServer3D.space_get_direct_state(world_3d.space)
+	var direct_state: PhysicsDirectSpaceState3D = world_3d.direct_space_state
 	if direct_state == null:
 		return false
 
-	var center := Vector3(float(cell.x) + 0.5, float(cell.y) + 0.5, float(cell.z) + 0.5)
-	# Raycast within the cell interior to avoid detecting ground/ceiling boundaries
-	var ray_query := PhysicsRayQueryParameters3D.create(
-		center + Vector3(0.0, 0.4, 0.0),
-		center - Vector3(0.0, 0.4, 0.0)
-	)
-	# Mask 1 = World/Stations/Buildings/Placed Blocks (excludes loose layer 4 pickups)
-	ray_query.collision_mask = 1
-	var ray_hit := direct_state.intersect_ray(ray_query)
-	if ray_hit.is_empty():
+	var query := _get_clearance_query()
+	var center := Vector3(float(cell.x) + 0.5, float(cell.y) + 0.75, float(cell.z) + 0.5)
+	query.transform = Transform3D(Basis.IDENTITY, center)
+
+	var hits := direct_state.intersect_shape(query, 8)
+	if hits.is_empty():
 		return false
 
-	var collider = ray_hit.get("collider", null)
-	if collider != null:
-		# Exclude terrain mesh: terrain solidity is already verified directly by voxel data
+	for hit in hits:
+		var collider = hit.get("collider", null)
+		if collider == null:
+			continue
+		# Exclude terrain mesh: terrain solidity is verified directly by voxel data
 		if collider == _voxel_world:
-			return false
+			continue
 		if collider is Node and (collider == _voxel_world or collider.get_parent() == _voxel_world):
-			return false
+			continue
 		if collider.is_class("VoxelTerrain") or (collider is Node and (collider as Node).is_in_group("voxel_terrain")):
-			return false
+			continue
 		if "generator" in collider and "generate_collisions" in collider:
-			return false
+			continue
+		# Exclude workers and players
+		if collider is CharacterBody3D or (collider is Node and (collider as Node).is_in_group("workers")):
+			continue
+		# Exclude loose pickups (debris layer 8, resource layer 4 fragments/planks/logs)
+		if collider is Node and ((collider as Node).is_in_group("fragments") or (collider as Node).is_in_group("planks") or (collider as Node).is_in_group("logs")):
+			continue
+		return true
 
-	return true
+	return false
 
 func update_center(world_pos: Vector3) -> void:
 	## Stores current center without polling chunks or triggering heavy rebuilds.
@@ -314,24 +363,9 @@ func _finish_chunk_bake() -> void:
 		_chunk_points[cp] = []
 	_chunk_points[cp].append_array(new_cells)
 
-	# Connect immediate adjacent orthogonal neighbors (4 cardinal + step-ups)
+	# Connect immediate adjacent orthogonal & safe diagonal neighbors
 	for cell in new_cells:
-		var from_id: int = _point_ids[cell]
-		for off in ADJACENT_OFFSETS:
-			for dy in range(-STEP_UP_MAX, STEP_UP_MAX + 1):
-				var neighbor := Vector3i(cell.x + off.x, cell.y + dy, cell.z + off.y)
-				if not _point_ids.has(neighbor):
-					continue
-				var to_id: int = _point_ids[neighbor]
-				if from_id == to_id:
-					continue
-				var pos_a: Vector3 = _astar.get_point_position(from_id)
-				var pos_b: Vector3 = _astar.get_point_position(to_id)
-				if absf(pos_a.y - pos_b.y) > 1.1:
-					continue
-				_astar.connect_points(from_id, to_id, true)
-				if dy > 0:
-					_astar.set_point_weight_scale(to_id, 1.5)
+		_connect_point_neighbors(cell)
 
 	_graph_rebuilt_pending = true
 
@@ -389,13 +423,13 @@ func _bake_single_chunk(current_chunk: Variant) -> void:
 				var scan_top: int = mini(max_y, surf_y)
 				var y: int = min_y - 1
 				while y <= scan_top:
-					if _voxel_world.has_method("is_solid_block") and _voxel_world.is_solid_block(Vector3i(x, y, z)):
+					if _is_cell_solid(Vector3i(x, y, z)):
 						var walk_cell := Vector3i(x, y + 1, z)
 						var head_cell := Vector3i(x, y + 2, z)
-						if not _voxel_world.is_solid_block(walk_cell) and not _voxel_world.is_solid_block(head_cell):
+						if not _is_cell_solid(walk_cell) and not _is_cell_solid(head_cell):
 							var valid := true
 							if _initial_bake_done:
-								if _is_position_blocked_by_physics(walk_cell) or _is_position_blocked_by_physics(head_cell):
+								if _is_position_blocked_by_physics(walk_cell):
 									valid = false
 							if valid:
 								new_cells.append(walk_cell)
@@ -422,22 +456,7 @@ func _bake_single_chunk(current_chunk: Variant) -> void:
 	_chunk_points[cp].append_array(new_cells)
 
 	for cell in new_cells:
-		var from_id: int = _point_ids[cell]
-		for off in ADJACENT_OFFSETS:
-			for dy in range(-STEP_UP_MAX, STEP_UP_MAX + 1):
-				var neighbor := Vector3i(cell.x + off.x, cell.y + dy, cell.z + off.y)
-				if not _point_ids.has(neighbor):
-					continue
-				var to_id: int = _point_ids[neighbor]
-				if from_id == to_id:
-					continue
-				var pos_a: Vector3 = _astar.get_point_position(from_id)
-				var pos_b: Vector3 = _astar.get_point_position(to_id)
-				if absf(pos_a.y - pos_b.y) > 1.1:
-					continue
-				_astar.connect_points(from_id, to_id, true)
-				if dy > 0:
-					_astar.set_point_weight_scale(to_id, 1.5)
+		_connect_point_neighbors(cell)
 
 	_graph_rebuilt_pending = true
 
@@ -478,24 +497,33 @@ func _update_local_column(x: int, z: int) -> void:
 	if _voxel_world.has_method("get_highest_solid_y"):
 		surf_y = _voxel_world.get_highest_solid_y(x, z)
 
+	# Also check GridSystem placed blocks
+	var gs := get_node_or_null("/root/GridSystem")
+	var gs_max_y: int = -1
+	if gs != null and gs.has_method("get_block"):
+		for test_y in range(surf_y - 2, surf_y + 16):
+			if gs.has_block(Vector3i(x, test_y, z)):
+				gs_max_y = maxi(gs_max_y, test_y)
+
+	var effective_top: int = maxi(surf_y, gs_max_y)
+
 	var half_y: int = BOUNDS_Y / 2
 	var min_y: int = roundi(_center.y) - half_y if _center != Vector3.ZERO else 0
 	var max_y: int = roundi(_center.y) + half_y if _center != Vector3.ZERO else 128
 
-	if surf_y < min_y:
+	if effective_top < min_y:
 		return
 
-	var scan_top: int = mini(max_y, surf_y)
+	var scan_top: int = mini(max_y, effective_top)
 	var y: int = min_y - 1
 	while y <= scan_top:
-		if _voxel_world.has_method("is_solid_block") and _voxel_world.is_solid_block(Vector3i(x, y, z)):
+		if _is_cell_solid(Vector3i(x, y, z)):
 			var walk_cell := Vector3i(x, y + 1, z)
 			var head_cell := Vector3i(x, y + 2, z)
-			if not _voxel_world.is_solid_block(walk_cell) and not _voxel_world.is_solid_block(head_cell):
+			if not _is_cell_solid(walk_cell) and not _is_cell_solid(head_cell):
 				var valid := true
-				if _initial_bake_done:
-					if _is_position_blocked_by_physics(walk_cell) or _is_position_blocked_by_physics(head_cell):
-						valid = false
+				if _is_position_blocked_by_physics(walk_cell):
+					valid = false
 				if valid:
 					_add_and_connect_point(walk_cell)
 				y += 2
@@ -509,23 +537,7 @@ func _reconnect_column(x: int, z: int) -> void:
 	if not _column_to_cells.has(col):
 		return
 	for cell in _column_to_cells[col]:
-		if not _point_ids.has(cell):
-			continue
-		var id: int = _point_ids[cell]
-		for off in ADJACENT_OFFSETS:
-			for dy in range(-STEP_UP_MAX, STEP_UP_MAX + 1):
-				var neighbor := Vector3i(cell.x + off.x, cell.y + dy, cell.z + off.y)
-				if not _point_ids.has(neighbor):
-					continue
-				var to_id: int = _point_ids[neighbor]
-				if id == to_id:
-					continue
-				var pos_a: Vector3 = _astar.get_point_position(id)
-				var pos_b: Vector3 = _astar.get_point_position(to_id)
-				if absf(pos_a.y - pos_b.y) <= 1.1:
-					_astar.connect_points(id, to_id, true)
-					if dy > 0:
-						_astar.set_point_weight_scale(to_id, 1.5)
+		_connect_point_neighbors(cell)
 
 func _on_voxel_changed(world_cell: Vector3i, _block_type: StringName = &"") -> void:
 	notify_block_changed(world_cell)
@@ -555,7 +567,7 @@ func _remove_point_at(cell: Vector3i) -> void:
 func _add_and_connect_point(cell: Vector3i) -> int:
 	if _point_ids.has(cell):
 		return _point_ids[cell]
-	if _initial_bake_done and _is_position_blocked_by_physics(cell):
+	if _is_position_blocked_by_physics(cell):
 		return -1
 	var id: int = _next_id
 	_next_id += 1
@@ -573,40 +585,77 @@ func _add_and_connect_point(cell: Vector3i) -> int:
 		_chunk_points[cp] = []
 	_chunk_points[cp].append(cell)
 
-	for off in ADJACENT_OFFSETS:
+	_connect_point_neighbors(cell)
+	return id
+
+func _connect_point_neighbors(cell: Vector3i) -> void:
+	if not _point_ids.has(cell):
+		return
+	var from_id: int = _point_ids[cell]
+	var pos_a: Vector3 = _astar.get_point_position(from_id)
+
+	# 1. Cardinal connections
+	for off in CARDINAL_OFFSETS:
 		for dy in range(-STEP_UP_MAX, STEP_UP_MAX + 1):
 			var neighbor := Vector3i(cell.x + off.x, cell.y + dy, cell.z + off.y)
 			if not _point_ids.has(neighbor):
 				continue
 			var to_id: int = _point_ids[neighbor]
-			if id == to_id:
+			if from_id == to_id:
 				continue
-			var pos_a: Vector3 = _astar.get_point_position(id)
 			var pos_b: Vector3 = _astar.get_point_position(to_id)
 			if absf(pos_a.y - pos_b.y) > 1.1:
 				continue
-			_astar.connect_points(id, to_id, true)
+			_astar.connect_points(from_id, to_id, true)
 			if dy > 0:
-				_astar.set_point_weight_scale(to_id, 1.5)
-	return id
+				_astar.set_point_weight_scale(to_id, 1.4)
+
+	# 2. Diagonal connections with corner-cutting prevention
+	for diag in DIAGONAL_OFFSETS:
+		# Orthogonal intermediate cells must not be solid/blocked at foot or head level
+		var ortho1 := Vector3i(cell.x + diag.x, cell.y, cell.z)
+		var ortho2 := Vector3i(cell.x, cell.y, cell.z + diag.y)
+		if _is_cell_solid(ortho1) or _is_cell_solid(Vector3i(ortho1.x, ortho1.y + 1, ortho1.z)):
+			continue
+		if _is_cell_solid(ortho2) or _is_cell_solid(Vector3i(ortho2.x, ortho2.y + 1, ortho2.z)):
+			continue
+		if _initial_bake_done:
+			if _is_position_blocked_by_physics(ortho1) or _is_position_blocked_by_physics(ortho2):
+				continue
+
+		for dy in range(-STEP_UP_MAX, STEP_UP_MAX + 1):
+			var target := Vector3i(cell.x + diag.x, cell.y + dy, cell.z + diag.y)
+			if not _point_ids.has(target):
+				continue
+			var to_id: int = _point_ids[target]
+			if from_id == to_id:
+				continue
+			var pos_b: Vector3 = _astar.get_point_position(to_id)
+			if absf(pos_a.y - pos_b.y) > 1.1:
+				continue
+			_astar.connect_points(from_id, to_id, true)
+			if dy > 0:
+				_astar.set_point_weight_scale(to_id, 1.6)
 
 # ---------------------------------------------------------------------------
-# Public Query API
+# Public Query API & Path Optimization
 # ---------------------------------------------------------------------------
 func find_astar_path(from_world: Vector3, to_world: Vector3) -> PackedVector3Array:
-	## Returns the world-space waypoint array from AStar3D.
-	## Returns empty array if either endpoint is off-graph.
+	## Returns the world-space waypoint array from AStar3D, optimized for natural routes.
 	var from_id := _closest_point_id(from_world)
 	var to_id   := _closest_point_id(to_world)
 	if from_id < 0 or to_id < 0:
 		return PackedVector3Array()
-	return _astar.get_point_path(from_id, to_id)
+	var raw := _astar.get_point_path(from_id, to_id)
+	if raw.is_empty():
+		return raw
+	return optimize_path(raw)
 
 func get_astar_path(from_world: Vector3, to_world: Vector3) -> PackedVector3Array:
 	return find_astar_path(from_world, to_world)
 
-func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: float = 0.5, max_dist: float = 2.4) -> PackedVector3Array:
-	## Finds a path from from_world to a valid, walkable approach node beside target_world.
+func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: float = 0.8, max_dist: float = 2.4) -> PackedVector3Array:
+	## Finds an optimized path from from_world to a valid, walkable approach node beside target_world.
 	var from_id := _closest_point_id(from_world)
 	if from_id < 0:
 		return PackedVector3Array()
@@ -625,29 +674,107 @@ func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: fl
 					continue
 				var cand_id: int = _point_ids[cell]
 				var cand_pos: Vector3 = _astar.get_point_position(cand_id)
-				var d_target: float = cand_pos.distance_to(target_world)
+				var horiz_d: float = Vector2(cand_pos.x - target_world.x, cand_pos.z - target_world.z).length()
 				var y_diff: float = absf(cand_pos.y - target_world.y)
-				if d_target <= max_dist and y_diff <= 1.8:
+				# Ensure candidate is outside the obstacle boundary and within reachable distance
+				if horiz_d >= min_dist and horiz_d <= max_dist and y_diff <= 1.5:
+					if _is_position_blocked_by_physics(cell):
+						continue
 					var d_from: float = cand_pos.distance_squared_to(from_world)
-					candidates.append({"id": cand_id, "dist_target": d_target, "dist_from": d_from})
+					candidates.append({"id": cand_id, "dist_from": d_from, "horiz_d": horiz_d})
 
 	if candidates.is_empty():
-		var direct_to_id := _closest_point_id(target_world)
-		if direct_to_id >= 0:
-			return _astar.get_point_path(from_id, direct_to_id)
 		return PackedVector3Array()
 
 	candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 		return a["dist_from"] < b["dist_from"]
 	)
 
-	for i in range(mini(4, candidates.size())):
+	for i in range(mini(6, candidates.size())):
 		var cand_id: int = candidates[i]["id"]
-		var path: PackedVector3Array = _astar.get_point_path(from_id, cand_id)
-		if not path.is_empty():
-			return path
+		var raw: PackedVector3Array = _astar.get_point_path(from_id, cand_id)
+		if not raw.is_empty():
+			return optimize_path(raw)
 
 	return PackedVector3Array()
+
+func optimize_path(raw_path: PackedVector3Array) -> PackedVector3Array:
+	## Removes redundant waypoints using capsule sweep and ground support checks.
+	if raw_path.size() <= 2:
+		return raw_path
+
+	var viewport := get_viewport()
+	if viewport == null:
+		return raw_path
+	var world_3d: World3D = viewport.find_world_3d()
+	if world_3d == null or not world_3d.space.is_valid():
+		return raw_path
+	var direct_state: PhysicsDirectSpaceState3D = world_3d.direct_space_state
+	if direct_state == null:
+		return raw_path
+
+	var optimized: PackedVector3Array = PackedVector3Array()
+	optimized.append(raw_path[0])
+
+	var current_idx: int = 0
+	var n: int = raw_path.size()
+
+	while current_idx < n - 1:
+		var best_idx: int = current_idx + 1
+		for test_idx in range(n - 1, current_idx + 1, -1):
+			if _is_shortcut_safe(direct_state, raw_path, current_idx, test_idx):
+				best_idx = test_idx
+				break
+		optimized.append(raw_path[best_idx])
+		current_idx = best_idx
+
+	return optimized
+
+func _is_shortcut_safe(space: PhysicsDirectSpaceState3D, path: PackedVector3Array, from_idx: int, to_idx: int) -> bool:
+	var start: Vector3 = path[from_idx]
+	var end: Vector3 = path[to_idx]
+
+	# 1. Preserve height transitions: no shortcuts across steps, stairs, or ledges
+	var base_y: float = start.y
+	for i in range(from_idx + 1, to_idx + 1):
+		if absf(path[i].y - base_y) > 0.25:
+			return false
+
+	var delta := end - start
+	var horiz_dist := Vector2(delta.x, delta.z).length()
+	if horiz_dist < 0.1:
+		return true
+
+	# 2. Capsule sweep clearance check from start to end
+	var sweep_query := PhysicsShapeQueryParameters3D.new()
+	var sweep_shape := CapsuleShape3D.new()
+	sweep_shape.radius = 0.32
+	sweep_shape.height = 1.45
+	sweep_query.shape = sweep_shape
+	sweep_query.collision_mask = 1
+	sweep_query.transform = Transform3D(Basis.IDENTITY, start + Vector3(0.0, 0.75, 0.0))
+	sweep_query.motion = delta
+
+	var cast_res := space.cast_motion(sweep_query)
+	if cast_res.is_empty() or cast_res[0] < 0.99:
+		return false
+
+	# 3. Ground support check: verify floor exists along shortcut to prevent walking off ledges
+	var steps: int = maxi(1, int(ceil(horiz_dist / 0.7)))
+	for s in range(1, steps):
+		var frac: float = float(s) / float(steps)
+		var sample_pt: Vector3 = start.lerp(end, frac)
+		var ray_from := sample_pt + Vector3(0.0, 0.5, 0.0)
+		var ray_to := sample_pt - Vector3(0.0, 1.2, 0.0)
+		var ray_q := PhysicsRayQueryParameters3D.create(ray_from, ray_to, 1)
+		var ground_hit := space.intersect_ray(ray_q)
+		if ground_hit.is_empty():
+			return false
+		var hit_y: float = ground_hit.position.y
+		if absf(hit_y - base_y) > 0.5:
+			return false
+
+	return true
 
 func get_closest_walkable_pos(world_pos: Vector3) -> Vector3:
 	## Snaps a world position to the nearest walkable AStar node.
