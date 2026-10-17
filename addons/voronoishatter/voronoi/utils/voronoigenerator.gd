@@ -192,15 +192,78 @@ func create_geometry_from_sites(mesh_instance: MeshInstance3D, cells: Array[Voro
 
     return voronoi_meshes
 
-# Creates a mesh out of the points and clips it against the given mask_mesh
+## Build a solid closed triangle mesh from the convex hull of the given point cloud.
+## Uses boundary faces of Delaunay tetrahedralization so normals point outward.
+func _build_convex_hull_solid_mesh(pts: PackedVector3Array) -> ArrayMesh:
+    var delaunay := Geometry3D.tetrahedralize_delaunay(pts)
+    if delaunay.is_empty():
+        return null
+
+    # Boundary faces appear exactly once across all tetrahedra; interior faces appear twice.
+    var face_map: Dictionary = {}
+    var tet_count := delaunay.size() / 4
+    for t in range(tet_count):
+        var i0: int = delaunay[t * 4]
+        var i1: int = delaunay[t * 4 + 1]
+        var i2: int = delaunay[t * 4 + 2]
+        var i3: int = delaunay[t * 4 + 3]
+        # Each tetrahedron has 4 triangular faces; the opposite vertex is used to orient outward normal
+        var t_faces: Array = [
+            [i0, i1, i2, i3],
+            [i0, i2, i3, i1],
+            [i0, i3, i1, i2],
+            [i1, i3, i2, i0]
+        ]
+        for f in t_faces:
+            var sorted_key: Array = [f[0], f[1], f[2]]
+            sorted_key.sort()
+            var key: String = "%d_%d_%d" % [sorted_key[0], sorted_key[1], sorted_key[2]]
+            if face_map.has(key):
+                face_map[key]["count"] += 1
+            else:
+                face_map[key] = {
+                    "count": 1,
+                    "v0": pts[f[0]],
+                    "v1": pts[f[1]],
+                    "v2": pts[f[2]],
+                    "opp": pts[f[3]]
+                }
+
+    var st := SurfaceTool.new()
+    st.begin(Mesh.PRIMITIVE_TRIANGLES)
+    for key in face_map:
+        var fd: Dictionary = face_map[key]
+        if fd["count"] != 1:
+            continue
+        var v0: Vector3 = fd["v0"]
+        var v1: Vector3 = fd["v1"]
+        var v2: Vector3 = fd["v2"]
+        var opp: Vector3 = fd["opp"]
+        var fn: Vector3 = (v1 - v0).cross(v2 - v0)
+        # Ensure outward normal points away from the opposite (interior) vertex
+        if fn.dot(v0 - opp) < 0.0:
+            var tmp := v1; v1 = v2; v2 = tmp
+            fn = -fn
+        var n := fn.normalized()
+        st.set_normal(n); st.add_vertex(v0)
+        st.set_normal(n); st.add_vertex(v1)
+        st.set_normal(n); st.add_vertex(v2)
+    st.index()
+    return st.commit()
+
+# Creates a solid convex-hull mesh from the Voronoi cell points and clips it against mask_mesh
 func clip_to_mesh(points: Array, mask_mesh: Mesh) -> VoronoiMesh:
     var center = mask_mesh.get_aabb().get_center()
 
     csg_mask.mesh = mask_mesh
 
-    var shape_3d: ConvexPolygonShape3D = ConvexPolygonShape3D.new()
-    shape_3d.set_points(PackedVector3Array(points))
-    csg_clip.mesh = shape_3d.get_debug_mesh()
+    # Build a proper solid triangle mesh for the Voronoi cell.
+    # get_debug_mesh() returns WIREFRAME (LINES), not triangles — feeding that to CSGMesh3D
+    # produces geometry with ~100% inverted normals. Build an actual closed manifold instead.
+    var cell_solid_mesh := _build_convex_hull_solid_mesh(PackedVector3Array(points))
+    if cell_solid_mesh == null or cell_solid_mesh.get_surface_count() == 0:
+        return null
+    csg_clip.mesh = cell_solid_mesh
     
     # Now safe to access result
     csg_clip._update_shape()
@@ -224,27 +287,66 @@ func clip_to_mesh(points: Array, mask_mesh: Mesh) -> VoronoiMesh:
     return voronoi_mesh
 
 func recenter_mesh_origin(mesh: ArrayMesh) -> ArrayMesh:
-    var combined_aabb = mesh.get_aabb()
-    var center = combined_aabb.get_center()
+    var combined_aabb: AABB = mesh.get_aabb()
+    var center: Vector3 = combined_aabb.get_center()
 
     var new_mesh = ArrayMesh.new()
 
     for surface in range(mesh.get_surface_count()):
         var arr = mesh.surface_get_arrays(surface)
-        var vertices = arr[Mesh.ARRAY_VERTEX]
+        var vertices: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
 
         if not len(vertices):
             continue
 
-        # Offset all vertices by -center
-        for i in range(vertices.size()):
-            vertices[i] -= center
+        var uvs: PackedVector2Array = arr[Mesh.ARRAY_TEX_UV] if arr[Mesh.ARRAY_TEX_UV] != null else PackedVector2Array()
 
-        # Preserve material
+        var new_verts := PackedVector3Array()
+        var new_norms := PackedVector3Array()
+        var new_uvs := PackedVector2Array()
+
+        var tri_count := vertices.size() / 3
+        for t in range(tri_count):
+            var i0: int = t * 3
+            var i1: int = t * 3 + 1
+            var i2: int = t * 3 + 2
+
+            var v0: Vector3 = vertices[i0] - center
+            var v1: Vector3 = vertices[i1] - center
+            var v2: Vector3 = vertices[i2] - center
+
+            var fn_raw: Vector3 = (v1 - v0).cross(v2 - v0)
+            if fn_raw.length_squared() < 1e-10:
+                # Discard degenerate zero-area sliver triangles from CSG clipping
+                continue
+
+            var n := fn_raw.normalized()
+            new_verts.append(v0)
+            new_verts.append(v1)
+            new_verts.append(v2)
+
+            new_norms.append(n)
+            new_norms.append(n)
+            new_norms.append(n)
+
+            if uvs.size() >= i2 + 1:
+                new_uvs.append(uvs[i0])
+                new_uvs.append(uvs[i1])
+                new_uvs.append(uvs[i2])
+
+        if new_verts.is_empty():
+            continue
+
+        var new_arr: Array = []
+        new_arr.resize(Mesh.ARRAY_MAX)
+        new_arr[Mesh.ARRAY_VERTEX] = new_verts
+        new_arr[Mesh.ARRAY_NORMAL] = new_norms
+        if not new_uvs.is_empty():
+            new_arr[Mesh.ARRAY_TEX_UV] = new_uvs
+
         var material = mesh.surface_get_material(surface)
-
-        # Re-add the adjusted surface to the new mesh
-        new_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, arr)
-        new_mesh.surface_set_material(surface, material)
+        new_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, new_arr)
+        new_mesh.surface_set_material(new_mesh.get_surface_count() - 1, material)
 
     return new_mesh
+

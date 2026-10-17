@@ -2158,7 +2158,22 @@ func _get_debris_parent() -> Node:
 		return get_tree().current_scene
 	return get_tree().root if get_tree() != null else null
 
-## Counts active, non-frozen physical rigid bodies towards the 30-body physics cap.
+## Checks whether a fragment has solid voxel support beneath it.
+func _is_fragment_supported(frag: Node3D) -> bool:
+	var vox_world := _get_voxel_world()
+	if vox_world == null:
+		return false
+	var pos := frag.global_position
+	var below_cell := Vector3i(floori(pos.x), floori(pos.y - 0.2), floori(pos.z))
+	if vox_world.has_method("is_solid_block"):
+		return bool(vox_world.is_solid_block(below_cell))
+	elif vox_world.has_method("get_voxel_at"):
+		var v: StringName = vox_world.get_voxel_at(below_cell)
+		return v != &"" and v != &"air"
+	return false
+
+## Counts actively moving physical rigid bodies towards the 30-body physics cap.
+## Supported fragments that sleep naturally as dynamic rigid bodies do not consume active cap.
 func _count_active_physical_fragments() -> int:
 	var count: int = 0
 	var i: int = _tracked_fragments.size() - 1
@@ -2167,8 +2182,14 @@ func _count_active_physical_fragments() -> int:
 		var node: Node = ref.get_ref() as Node if ref != null else null
 		if node == null or not is_instance_valid(node) or node.is_queued_for_deletion():
 			_tracked_fragments.remove_at(i)
-		elif node is RigidBody3D and not (node as RigidBody3D).freeze:
-			count += 1
+		elif node is RigidBody3D:
+			var rb := node as RigidBody3D
+			if not rb.freeze and not rb.sleeping:
+				if rb.has_method("is_settled"):
+					if not rb.is_settled():
+						count += 1
+				elif rb.linear_velocity.length_squared() > 0.04 or rb.angular_velocity.length_squared() > 0.04:
+					count += 1
 		i -= 1
 	return count
 
@@ -2384,14 +2405,14 @@ func _spawn_voxel_fragment(center: Vector3, block_type: StringName) -> void:
 	_spawn_voxel_fragments_burst(center, block_type, 0)
 
 ## Detects resting fragments that have lost support when a voxel is mined and reactivates them.
-## Only wakes fragments directly in the mined cavity or resting in the column above it.
+## Wakes fragments in columns above mined cells so they can fall naturally under gravity.
 func _wake_nearby_fragments(center: Vector3, _radius: float = 1.5) -> void:
 	var x_min := center.x - 0.6
 	var x_max := center.x + 0.6
 	var z_min := center.z - 0.6
 	var z_max := center.z + 0.6
 	var y_min := center.y - 0.5
-	var y_max := center.y + 1.8
+	var y_max := center.y + 64.0
 
 	for ref in _tracked_fragments:
 		if ref == null:
@@ -2406,7 +2427,7 @@ func _wake_nearby_fragments(center: Vector3, _radius: float = 1.5) -> void:
 		if pos.x >= x_min and pos.x <= x_max and pos.z >= z_min and pos.z <= z_max and pos.y >= y_min and pos.y <= y_max:
 			rb.freeze = false
 			rb.sleeping = false
-			# Minimal downward nudge to immediately engage gravity if air is beneath, without shaking
+			# Minimal downward nudge to immediately engage gravity if air is beneath
 			rb.apply_central_impulse(Vector3(0.0, -0.01, 0.0))
 
 ## Prevents fragment scaling: preserves true Voronoi geometric shape scale.
@@ -2425,14 +2446,17 @@ func _find_safe_recovery_position(pos: Vector3) -> Vector3:
 	return global_position + Vector3(0.0, 0.5, 0.0)
 
 ## Centralized lifecycle and void cleanup.
-## Deletes fragments below void threshold (-35.0) and prunes references. Never teleports or merges fragments.
+## Deletes fragments below void threshold (-35.0), unfreezes unsupported fragments so they never stay frozen in air,
+## and lets supported fragments rest naturally as dynamic sleeping bodies.
 func _process_fragment_lifecycle(delta: float) -> void:
 	_fragment_lifecycle_timer += delta
 	if _fragment_lifecycle_timer < 0.5:
 		return
 	_fragment_lifecycle_timer = 0.0
 
-	# Prune dead weak references and delete fragments fallen into the void
+	var active_moving: int = _count_active_physical_fragments()
+
+	# Prune dead weak references and manage support-aware activation
 	var i: int = _tracked_fragments.size() - 1
 	while i >= 0:
 		var ref: WeakRef = _tracked_fragments[i]
@@ -2444,6 +2468,18 @@ func _process_fragment_lifecycle(delta: float) -> void:
 			if frag.global_position.y < -35.0:
 				frag.queue_free()
 				_tracked_fragments.remove_at(i)
+			elif frag.freeze:
+				if not _is_fragment_supported(frag):
+					# Unsupported fragment floating in air: must fall
+					if active_moving < MAX_PHYSICAL_FRAGMENTS:
+						active_moving += 1
+						frag.freeze = false
+						frag.sleeping = false
+						frag.apply_central_impulse(Vector3(0.0, -0.01, 0.0))
+				else:
+					# Supported fragment on ground: let it sleep naturally as dynamic body
+					frag.freeze = false
+					frag.sleeping = true
 		i -= 1
 
 # ── end Voronoi Procedural Mining-Fragment System ─────────────────────────────
