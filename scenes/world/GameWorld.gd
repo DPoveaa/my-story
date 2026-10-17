@@ -407,8 +407,11 @@ func _setup_astar_grid() -> void:
 		if grid_system.has_signal("blocks_removed_batch"):
 			grid_system.blocks_removed_batch.connect(
 				func(cells: Array, _data_map: Dictionary = {}) -> void:
-					for c in cells:
-						astar_grid.notify_block_changed(c)
+					if astar_grid.has_method("notify_blocks_changed"):
+						astar_grid.notify_blocks_changed(cells)
+					else:
+						for c in cells:
+							astar_grid.notify_block_changed(c)
 			)
 		if grid_system.has_signal("grid_cleared"):
 			grid_system.grid_cleared.connect(

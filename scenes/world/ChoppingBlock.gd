@@ -38,7 +38,7 @@ func _notify_astar() -> void:
 	var root := get_tree().root
 	var astar_mgr: Node = root.find_child("AStarGridManager", true, false)
 	if astar_mgr != null and astar_mgr.has_method("notify_bounds_changed"):
-		var aabb := AABB(global_position - Vector3(1.0, 0.2, 1.0), Vector3(2.0, 2.0, 2.0))
+		var aabb := AABB(global_position + Vector3(-0.7, -0.05, -0.7), Vector3(1.4, 0.65, 1.4))
 		astar_mgr.notify_bounds_changed(aabb)
 
 func can_accept_log(for_worker: Node = null) -> bool:
@@ -165,7 +165,9 @@ func _spawn_planks_neat(count: int) -> void:
 	for i in range(count):
 		var plank := make_plank_body()
 		parent.add_child(plank)
-		var local_offset := Vector3(-0.04 + (float(i) * 0.08), 0.55 + PLANK_SIZE.y * 0.5, 0.0)
+		var x_pos: float = -0.05 + (float(i) * 0.10)
+		var y_pos: float = 0.55 + (PLANK_SIZE.y * 0.5) + 0.015
+		var local_offset := Vector3(x_pos, y_pos, 0.0)
 		plank.global_transform = Transform3D(global_transform.basis, global_transform * local_offset)
 		plank.linear_velocity = Vector3.ZERO
 		plank.angular_velocity = Vector3.ZERO

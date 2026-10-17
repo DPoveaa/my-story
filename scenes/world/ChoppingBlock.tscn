@@ -15,7 +15,7 @@ radial_segments = 12
 
 [sub_resource type="CylinderShape3D" id="ColStump"]
 radius = 0.58
-height = 1.1
+height = 0.55
 
 [sub_resource type="StandardMaterial3D" id="MatLog"]
 albedo_color = Color(0.42, 0.28, 0.14, 1)
@@ -38,7 +38,7 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.275, 0)
 mesh = SubResource("MeshStump")
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.55, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.275, 0)
 shape = SubResource("ColStump")
 
 [node name="VisualLog" type="MeshInstance3D" parent="."]

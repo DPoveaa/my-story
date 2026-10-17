@@ -89,10 +89,42 @@ var _initial_bake_done: bool = false
 var _graph_rebuilt_pending: bool = false
 var _initialized: bool = false
 var _t_bake_start: int = 0
+
+enum BakeStage {
+	SCANNING_COLUMNS,
+	REGISTERING_POINTS,
+	CONNECTING_EDGES,
+}
+
 var _is_chunk_active: bool = false
 var _active_chunk: Vector2i = Vector2i.ZERO
 var _active_col_idx: int = 0
+var _active_node_idx: int = 0
+var _bake_stage: BakeStage = BakeStage.SCANNING_COLUMNS
 var _active_chunk_new_cells: Array[Vector3i] = []
+var _physics_blocked_cache: Dictionary = {}
+
+var _sweep_shape: CapsuleShape3D = null
+var _sweep_query: PhysicsShapeQueryParameters3D = null
+var _ray_query: PhysicsRayQueryParameters3D = null
+
+func _get_sweep_query() -> PhysicsShapeQueryParameters3D:
+	if _sweep_query == null:
+		_sweep_shape = CapsuleShape3D.new()
+		_sweep_shape.radius = 0.32
+		_sweep_shape.height = 1.45
+		_sweep_query = PhysicsShapeQueryParameters3D.new()
+		_sweep_query.shape = _sweep_shape
+		_sweep_query.collision_mask = 1
+	return _sweep_query
+
+func _get_ray_query(from_pt: Vector3, to_pt: Vector3) -> PhysicsRayQueryParameters3D:
+	if _ray_query == null:
+		_ray_query = PhysicsRayQueryParameters3D.new()
+		_ray_query.collision_mask = 1
+	_ray_query.from = from_pt
+	_ray_query.to = to_pt
+	return _ray_query
 
 # ---------------------------------------------------------------------------
 # Setup & Lifecycle
@@ -118,7 +150,7 @@ func initialize_once(spawn_pos: Vector3) -> void:
 	update_center(spawn_pos)
 	rebuild_graph()
 
-## Per-frame wall-clock budget in milliseconds. Processes column batches within
+## Per-frame wall-clock budget in milliseconds. Processes chunk stages within
 ## this window, then yields back to the engine to avoid frame spikes.
 const FRAME_BUDGET_MS: float = 2.0
 
@@ -138,7 +170,7 @@ func _physics_process(_delta: float) -> void:
 			graph_rebuilt.emit()
 		return
 
-	# Incrementally consume columns within the per-frame time budget.
+	# Incrementally process chunk baking stages within the per-frame time budget.
 	var frame_start_ms: int = Time.get_ticks_msec()
 	while true:
 		if not _is_chunk_active:
@@ -149,48 +181,99 @@ func _physics_process(_delta: float) -> void:
 			if not _is_chunk_active:
 				continue
 
-		var half_y: int = BOUNDS_Y / 2
-		var min_y: int = roundi(_center.y) - half_y if _center != Vector3.ZERO else 0
-		var max_y: int = roundi(_center.y) + half_y if _center != Vector3.ZERO else 128
-		var start_x: int = _active_chunk.x * CHUNK_SIZE
-		var start_z: int = _active_chunk.y * CHUNK_SIZE
+		# Stage 1: Column scanning
+		if _bake_stage == BakeStage.SCANNING_COLUMNS:
+			var half_y: int = BOUNDS_Y / 2
+			var min_y: int = roundi(_center.y) - half_y if _center != Vector3.ZERO else 0
+			var max_y: int = roundi(_center.y) + half_y if _center != Vector3.ZERO else 128
+			var start_x: int = _active_chunk.x * CHUNK_SIZE
+			var start_z: int = _active_chunk.y * CHUNK_SIZE
 
-		while _active_col_idx < 256:
-			var lx: int = _active_col_idx % CHUNK_SIZE
-			var lz: int = _active_col_idx / CHUNK_SIZE
-			_active_col_idx += 1
-			var x: int = start_x + lx
-			var z: int = start_z + lz
+			while _active_col_idx < 256:
+				var lx: int = _active_col_idx % CHUNK_SIZE
+				var lz: int = _active_col_idx / CHUNK_SIZE
+				_active_col_idx += 1
+				var x: int = start_x + lx
+				var z: int = start_z + lz
 
-			var surf_y: int = -1
-			if _voxel_world.has_method("get_highest_solid_y"):
-				surf_y = _voxel_world.get_highest_solid_y(x, z)
+				var surf_y: int = -1
+				if _voxel_world.has_method("get_highest_solid_y"):
+					surf_y = _voxel_world.get_highest_solid_y(x, z)
 
-			if surf_y >= min_y:
-				var scan_top: int = mini(max_y, surf_y)
-				var y: int = min_y - 1
-				while y <= scan_top:
-					if _is_cell_solid(Vector3i(x, y, z)):
-						var walk_cell := Vector3i(x, y + 1, z)
-						var head_cell := Vector3i(x, y + 2, z)
-						if not _is_cell_solid(walk_cell) and not _is_cell_solid(head_cell):
-							var valid := true
-							if _initial_bake_done:
-								if _is_position_blocked_by_physics(walk_cell):
-									valid = false
-							if valid:
-								_active_chunk_new_cells.append(walk_cell)
-							y += 2
+				if surf_y >= min_y:
+					var scan_top: int = mini(max_y, surf_y)
+					var y: int = min_y - 1
+					while y <= scan_top:
+						if _is_cell_solid(Vector3i(x, y, z)):
+							var walk_cell := Vector3i(x, y + 1, z)
+							var head_cell := Vector3i(x, y + 2, z)
+							if not _is_cell_solid(walk_cell) and not _is_cell_solid(head_cell):
+								var valid := true
+								if _initial_bake_done:
+									if _is_position_blocked_by_physics(walk_cell):
+										valid = false
+								if valid:
+									_active_chunk_new_cells.append(walk_cell)
+								y += 2
+							else:
+								y += 1
 						else:
 							y += 1
-					else:
-						y += 1
 
-			if _active_col_idx % 8 == 0:
-				if float(Time.get_ticks_msec() - frame_start_ms) >= FRAME_BUDGET_MS:
-					return
+				if _active_col_idx % 8 == 0:
+					if float(Time.get_ticks_msec() - frame_start_ms) >= FRAME_BUDGET_MS:
+						return
 
-		_finish_chunk_bake()
+			_bake_stage = BakeStage.REGISTERING_POINTS
+			_active_node_idx = 0
+
+		# Stage 2: Point registration
+		if _bake_stage == BakeStage.REGISTERING_POINTS:
+			var num_cells: int = _active_chunk_new_cells.size()
+			while _active_node_idx < num_cells:
+				var cell: Vector3i = _active_chunk_new_cells[_active_node_idx]
+				_active_node_idx += 1
+
+				var world_pos := Vector3(float(cell.x) + 0.5, float(cell.y), float(cell.z) + 0.5)
+				var id: int = _next_id
+				_next_id += 1
+				_astar.add_point(id, world_pos)
+				_point_ids[cell] = id
+				_id_cells[id] = cell
+				var col := Vector2i(cell.x, cell.z)
+				if not _column_to_cells.has(col):
+					_column_to_cells[col] = []
+				_column_to_cells[col].append(cell)
+
+				if _active_node_idx % 16 == 0:
+					if float(Time.get_ticks_msec() - frame_start_ms) >= FRAME_BUDGET_MS:
+						return
+
+			var cp: Vector2i = _active_chunk
+			if not _chunk_points.has(cp):
+				_chunk_points[cp] = []
+			_chunk_points[cp].append_array(_active_chunk_new_cells)
+
+			_bake_stage = BakeStage.CONNECTING_EDGES
+			_active_node_idx = 0
+
+		# Stage 3: Edge connection
+		if _bake_stage == BakeStage.CONNECTING_EDGES:
+			var num_cells: int = _active_chunk_new_cells.size()
+			while _active_node_idx < num_cells:
+				var cell: Vector3i = _active_chunk_new_cells[_active_node_idx]
+				_active_node_idx += 1
+				_connect_point_neighbors(cell)
+
+				if _active_node_idx % 8 == 0:
+					if float(Time.get_ticks_msec() - frame_start_ms) >= FRAME_BUDGET_MS:
+						return
+
+			# Chunk bake completely finished!
+			_is_chunk_active = false
+			_active_chunk_new_cells.clear()
+			_physics_blocked_cache.clear()
+			_graph_rebuilt_pending = true
 
 		if float(Time.get_ticks_msec() - frame_start_ms) >= FRAME_BUDGET_MS:
 			break
@@ -198,6 +281,13 @@ func _physics_process(_delta: float) -> void:
 func _is_position_blocked_by_physics(cell: Vector3i) -> bool:
 	if not _initial_bake_done:
 		return false
+	if _physics_blocked_cache.has(cell):
+		return _physics_blocked_cache[cell]
+	var res := _query_position_blocked_by_physics(cell)
+	_physics_blocked_cache[cell] = res
+	return res
+
+func _query_position_blocked_by_physics(cell: Vector3i) -> bool:
 	if not is_inside_tree():
 		return false
 	var viewport := get_viewport()
@@ -291,7 +381,7 @@ func rebuild_graph() -> void:
 			var cp := Vector2i(cx_idx, cz_idx)
 			queue_chunk(cp)
 
-## Begin an incremental chunk bake (used by _process for the 2ms budget loop).
+## Begin an incremental chunk bake (used by _physics_process for the 2ms budget loop).
 func _begin_chunk_bake(current_chunk: Variant) -> void:
 	if _voxel_world == null:
 		_is_chunk_active = false
@@ -333,132 +423,14 @@ func _begin_chunk_bake(current_chunk: Variant) -> void:
 
 	_active_chunk = cp
 	_active_col_idx = 0
+	_active_node_idx = 0
+	_bake_stage = BakeStage.SCANNING_COLUMNS
 	_active_chunk_new_cells.clear()
 	_is_chunk_active = true
 
-## Finish registering points collected so far and wiring edges for _active_chunk.
-func _finish_chunk_bake() -> void:
-	if not _is_chunk_active:
-		return
-	_is_chunk_active = false
-
-	var new_cells: Array[Vector3i] = _active_chunk_new_cells.duplicate()
-	_active_chunk_new_cells.clear()
-	var cp: Vector2i = _active_chunk
-
-	# Register points into AStar3D
-	for cell in new_cells:
-		var world_pos := Vector3(float(cell.x) + 0.5, float(cell.y), float(cell.z) + 0.5)
-		var id: int = _next_id
-		_next_id += 1
-		_astar.add_point(id, world_pos)
-		_point_ids[cell] = id
-		_id_cells[id] = cell
-		var col := Vector2i(cell.x, cell.z)
-		if not _column_to_cells.has(col):
-			_column_to_cells[col] = []
-		_column_to_cells[col].append(cell)
-
-	if not _chunk_points.has(cp):
-		_chunk_points[cp] = []
-	_chunk_points[cp].append_array(new_cells)
-
-	# Connect immediate adjacent orthogonal & safe diagonal neighbors
-	for cell in new_cells:
-		_connect_point_neighbors(cell)
-
-	_graph_rebuilt_pending = true
-
-## Synchronous full-chunk bake — used only for post-startup dynamic edits.
+## Incremental queue bake — redirects to queue_chunk to prevent main-thread spikes.
 func _bake_single_chunk(current_chunk: Variant) -> void:
-	if _voxel_world == null:
-		return
-
-	var cp: Vector2i
-	if current_chunk is Vector2i:
-		cp = current_chunk
-	elif current_chunk is Vector3i:
-		cp = Vector2i(floori(float(current_chunk.x) / float(CHUNK_SIZE)), floori(float(current_chunk.z) / float(CHUNK_SIZE)))
-	elif current_chunk is Vector3:
-		cp = Vector2i(floori(current_chunk.x / float(CHUNK_SIZE)), floori(current_chunk.z / float(CHUNK_SIZE)))
-	elif current_chunk is Vector2:
-		cp = Vector2i(floori(current_chunk.x / float(CHUNK_SIZE)), floori(current_chunk.y / float(CHUNK_SIZE)))
-	else:
-		return
-
-	if _voxel_world.has_method("is_chunk_loaded") and not _voxel_world.is_chunk_loaded(cp):
-		return
-
-	_baked_chunks[cp] = true
-
-	if _chunk_points.has(cp):
-		for old_cell in _chunk_points[cp]:
-			if _point_ids.has(old_cell):
-				var old_id: int = _point_ids[old_cell]
-				_astar.remove_point(old_id)
-				_point_ids.erase(old_cell)
-				_id_cells.erase(old_id)
-				var col := Vector2i(old_cell.x, old_cell.z)
-				if _column_to_cells.has(col):
-					_column_to_cells[col].erase(old_cell)
-					if _column_to_cells[col].is_empty():
-						_column_to_cells.erase(col)
-		_chunk_points[cp].clear()
-
-	var half_y: int = BOUNDS_Y / 2
-	var min_y: int = roundi(_center.y) - half_y if _center != Vector3.ZERO else 0
-	var max_y: int = roundi(_center.y) + half_y if _center != Vector3.ZERO else 128
-
-	var new_cells: Array[Vector3i] = []
-	var start_x: int = cp.x * CHUNK_SIZE
-	var start_z: int = cp.y * CHUNK_SIZE
-
-	for x in range(start_x, start_x + CHUNK_SIZE):
-		for z in range(start_z, start_z + CHUNK_SIZE):
-			var surf_y: int = -1
-			if _voxel_world.has_method("get_highest_solid_y"):
-				surf_y = _voxel_world.get_highest_solid_y(x, z)
-
-			if surf_y >= min_y:
-				var scan_top: int = mini(max_y, surf_y)
-				var y: int = min_y - 1
-				while y <= scan_top:
-					if _is_cell_solid(Vector3i(x, y, z)):
-						var walk_cell := Vector3i(x, y + 1, z)
-						var head_cell := Vector3i(x, y + 2, z)
-						if not _is_cell_solid(walk_cell) and not _is_cell_solid(head_cell):
-							var valid := true
-							if _initial_bake_done:
-								if _is_position_blocked_by_physics(walk_cell):
-									valid = false
-							if valid:
-								new_cells.append(walk_cell)
-							y += 2
-						else:
-							y += 1
-					else:
-						y += 1
-
-	for cell in new_cells:
-		var world_pos := Vector3(float(cell.x) + 0.5, float(cell.y), float(cell.z) + 0.5)
-		var id: int = _next_id
-		_next_id += 1
-		_astar.add_point(id, world_pos)
-		_point_ids[cell] = id
-		_id_cells[id] = cell
-		var col := Vector2i(cell.x, cell.z)
-		if not _column_to_cells.has(col):
-			_column_to_cells[col] = []
-		_column_to_cells[col].append(cell)
-
-	if not _chunk_points.has(cp):
-		_chunk_points[cp] = []
-	_chunk_points[cp].append_array(new_cells)
-
-	for cell in new_cells:
-		_connect_point_neighbors(cell)
-
-	_graph_rebuilt_pending = true
+	queue_chunk(current_chunk)
 
 # ---------------------------------------------------------------------------
 # Signal-Driven Dynamic Expansion & Voxel Edits
@@ -469,19 +441,52 @@ func bake_chunk_if_needed(cp: Vector2i) -> void:
 	queue_chunk(cp)
 
 func notify_block_changed(world_cell: Vector3i) -> void:
-	_update_local_column(world_cell.x, world_cell.z)
-	for off in ADJACENT_OFFSETS:
-		_reconnect_column(world_cell.x + off.x, world_cell.z + off.y)
-	graph_rebuilt.emit()
+	notify_blocks_changed([world_cell])
+
+func notify_blocks_changed(cells: Array) -> void:
+	if cells.is_empty():
+		return
+	var unique_cols: Dictionary = {}
+	for c in cells:
+		var cell: Vector3i
+		if c is Vector3i:
+			cell = c
+		elif c is Vector3:
+			cell = Vector3i(floori(c.x), floori(c.y), floori(c.z))
+		else:
+			continue
+		unique_cols[Vector2i(cell.x, cell.z)] = true
+
+	var cols: Array[Vector2i] = []
+	for col in unique_cols.keys():
+		cols.append(col)
+	_update_columns_batch(cols)
 
 func notify_bounds_changed(aabb: AABB) -> void:
 	var min_cell := Vector3i(floori(aabb.position.x), floori(aabb.position.y), floori(aabb.position.z))
 	var max_cell := Vector3i(ceili(aabb.end.x), ceili(aabb.end.y), ceili(aabb.end.z))
+	var cols: Array[Vector2i] = []
 	for x in range(min_cell.x, max_cell.x + 1):
 		for z in range(min_cell.z, max_cell.z + 1):
-			_update_local_column(x, z)
-			for off in ADJACENT_OFFSETS:
-				_reconnect_column(x + off.x, z + off.y)
+			cols.append(Vector2i(x, z))
+	_update_columns_batch(cols)
+
+func _update_columns_batch(cols: Array[Vector2i]) -> void:
+	if cols.is_empty():
+		return
+	_physics_blocked_cache.clear()
+
+	for col in cols:
+		_update_local_column(col.x, col.y)
+
+	var neighbor_cols: Dictionary = {}
+	for col in cols:
+		for off in ADJACENT_OFFSETS:
+			neighbor_cols[col + off] = true
+
+	for adj_col in neighbor_cols.keys():
+		_reconnect_column(adj_col.x, adj_col.y)
+
 	graph_rebuilt.emit()
 
 func _update_local_column(x: int, z: int) -> void:
@@ -698,8 +703,11 @@ func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: fl
 
 	return PackedVector3Array()
 
+const MAX_SHORTCUT_LOOKAHEAD: int = 6
+const MAX_SHORTCUT_HORIZ_DIST: float = 6.0
+
 func optimize_path(raw_path: PackedVector3Array) -> PackedVector3Array:
-	## Removes redundant waypoints using capsule sweep and ground support checks.
+	## Removes redundant waypoints using bounded-lookahead capsule sweep and ground support checks.
 	if raw_path.size() <= 2:
 		return raw_path
 
@@ -721,7 +729,8 @@ func optimize_path(raw_path: PackedVector3Array) -> PackedVector3Array:
 
 	while current_idx < n - 1:
 		var best_idx: int = current_idx + 1
-		for test_idx in range(n - 1, current_idx + 1, -1):
+		var max_lookahead_idx: int = mini(n - 1, current_idx + MAX_SHORTCUT_LOOKAHEAD)
+		for test_idx in range(max_lookahead_idx, current_idx + 1, -1):
 			if _is_shortcut_safe(direct_state, raw_path, current_idx, test_idx):
 				best_idx = test_idx
 				break
@@ -744,14 +753,11 @@ func _is_shortcut_safe(space: PhysicsDirectSpaceState3D, path: PackedVector3Arra
 	var horiz_dist := Vector2(delta.x, delta.z).length()
 	if horiz_dist < 0.1:
 		return true
+	if horiz_dist > MAX_SHORTCUT_HORIZ_DIST:
+		return false
 
-	# 2. Capsule sweep clearance check from start to end
-	var sweep_query := PhysicsShapeQueryParameters3D.new()
-	var sweep_shape := CapsuleShape3D.new()
-	sweep_shape.radius = 0.32
-	sweep_shape.height = 1.45
-	sweep_query.shape = sweep_shape
-	sweep_query.collision_mask = 1
+	# 2. Capsule sweep clearance check from start to end using reusable query
+	var sweep_query := _get_sweep_query()
 	sweep_query.transform = Transform3D(Basis.IDENTITY, start + Vector3(0.0, 0.75, 0.0))
 	sweep_query.motion = delta
 
@@ -766,7 +772,7 @@ func _is_shortcut_safe(space: PhysicsDirectSpaceState3D, path: PackedVector3Arra
 		var sample_pt: Vector3 = start.lerp(end, frac)
 		var ray_from := sample_pt + Vector3(0.0, 0.5, 0.0)
 		var ray_to := sample_pt - Vector3(0.0, 1.2, 0.0)
-		var ray_q := PhysicsRayQueryParameters3D.create(ray_from, ray_to, 1)
+		var ray_q := _get_ray_query(ray_from, ray_to)
 		var ground_hit := space.intersect_ray(ray_q)
 		if ground_hit.is_empty():
 			return false
