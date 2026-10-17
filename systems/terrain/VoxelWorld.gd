@@ -765,6 +765,9 @@ func is_solid_block(world_cell: Vector3i) -> bool:
 		return false
 	return _read_type_id(world_cell) != BLOCK_AIR
 
+func get_block_type_id(world_cell: Vector3i) -> int:
+	return _read_type_id(world_cell)
+
 func is_ground_cell(world_cell: Vector3i) -> bool:
 	return is_solid_block(world_cell) or is_solid_block(world_cell - Vector3i(0, 1, 0))
 

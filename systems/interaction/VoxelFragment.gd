@@ -21,8 +21,8 @@ func _ready() -> void:
 	linear_damp = 2.0
 	angular_damp = 2.5
 
-	# Randomize initial rotation so pieces look varied immediately.
-	if rotation == Vector3.ZERO:
+	# Randomize initial rotation only if rotation is zero and not specifically preserved
+	if not bool(get_meta("preserve_rotation", false)) and rotation == Vector3.ZERO:
 		rotation = Vector3(randf() * TAU, randf() * TAU, randf() * TAU)
 
 func is_settled() -> bool:
