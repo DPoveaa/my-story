@@ -1449,7 +1449,33 @@ func _process_lmb_mining(delta: float) -> void:
 	var mined_type: StringName = &""
 	if target_is_terrain:
 		if vox_world != null and vox_world.has_method("mine_voxel"):
+			# Capture the raw model ID BEFORE mine_voxel() clears the voxel type.
+			# After mine_voxel the cell is AIR, so get_block_type_id would return 0 (cube).
+			var raw_id: int = vox_world.get_block_type_id(mine_cell) if vox_world.has_method("get_block_type_id") else 0
 			mined_type = vox_world.mine_voxel(mine_cell)
+			if not mined_type.is_empty():
+				_apply_mine_sdf_sphere(mine_cell)
+				var res_key := String(mined_type)
+				inventory[res_key] = inventory.get(res_key, 0) + 1
+				var voxel_center: Vector3 = Vector3(mine_cell) + Vector3(0.5, 0.5, 0.5)
+				_spawn_mining_particles(voxel_center, mined_type)
+				_spawn_voxel_fragments_burst(voxel_center, mined_type, raw_id)
+				_wake_nearby_fragments(voxel_center, 1.5)
+				var inv_mgr := _get_inventory_manager()
+				if inv_mgr != null:
+					inv_mgr.add_material(mined_type, 1)
+				var status := "✓ Mined 1 %s!" % BlockTypeCatalog.get_display_name(mined_type)
+				target_face_changed.emit(has_target, mine_cell, target_face_dir, status)
+				if build_hud != null and build_hud.has_method("show_mine_feedback"):
+					build_hud.show_mine_feedback(mined_type, 1)
+				if build_hud != null and build_hud.has_method("set_mining_progress"):
+					build_hud.set_mining_progress(false, "", 0)
+				_hide_terrain_target_visuals()
+			else:
+				_hide_terrain_target_visuals()
+				if build_hud != null and build_hud.has_method("set_mining_progress"):
+					build_hud.set_mining_progress(false, "", 0)
+			return
 	elif is_grid_block:
 		var b_data2: BlockData = grid.get_block(mine_cell)
 		if b_data2 != null:
@@ -1471,11 +1497,9 @@ func _process_lmb_mining(delta: float) -> void:
 	var res_key := String(mined_type)
 	inventory[res_key] = inventory.get(res_key, 0) + 1
 
-	var vox_w := _get_voxel_world()
-	var raw_id: int = vox_w.get_block_type_id(mine_cell) if vox_w != null and vox_w.has_method("get_block_type_id") else 0
 	var voxel_center: Vector3 = Vector3(mine_cell) + Vector3(0.5, 0.5, 0.5)
 	_spawn_mining_particles(voxel_center, mined_type)
-	_spawn_voxel_fragments_burst(voxel_center, mined_type, raw_id)
+	_spawn_voxel_fragments_burst(voxel_center, mined_type, 0)
 	_wake_nearby_fragments(voxel_center, 1.5)
 
 	var inv_mgr := _get_inventory_manager()
@@ -1825,6 +1849,7 @@ func _ensure_cached_shard_resources() -> void:
 	# 1. Load pre-baked Voronoi templates from manifest
 	const MANIFEST_PATH := "res://assets/generated/fractures/manifest.json"
 	if FileAccess.file_exists(MANIFEST_PATH):
+		var t_asset_start: int = Time.get_ticks_msec()
 		var file := FileAccess.open(MANIFEST_PATH, FileAccess.READ)
 		if file != null:
 			var json_text := file.get_as_text()
@@ -1850,6 +1875,8 @@ func _ensure_cached_shard_resources() -> void:
 							})
 					if not loaded_pieces.is_empty():
 						_cached_voronoi_templates[sname] = loaded_pieces
+		var t_asset_elapsed: int = Time.get_ticks_msec() - t_asset_start
+		print("[StartupTiming] Fragment asset loading took: %d ms, shapes: %s" % [t_asset_elapsed, _cached_voronoi_templates.keys()])
 
 	# 2. Fallback primitive archetypes if pre-baked assets are unavailable
 	if _cached_phys_meshes.is_empty():
@@ -1921,16 +1948,22 @@ func _ensure_cached_shard_resources() -> void:
 		_cached_particle_process_mat = pmat
 
 ## Returns exterior surface material matching the mined voxel.
-func _get_phys_material(block_type: StringName) -> StandardMaterial3D:
+## Prefers the exact shared terrain ShaderMaterial so fragments visually match
+## the natural terrain surface (grass, dirt, stone shader & colors).
+func _get_phys_material(block_type: StringName) -> Material:
 	if _cached_phys_materials.has(block_type):
-		return _cached_phys_materials[block_type] as StandardMaterial3D
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = _fragment_albedo(block_type)
-	mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
-	mat.roughness = 0.85
-	mat.metallic = 0.0
-	mat.cull_mode = BaseMaterial3D.CULL_BACK
-	mat.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED
+		return _cached_phys_materials[block_type] as Material
+	var mat: Material = TerrainBlockyLibrary.get_shared_material(block_type)
+	if mat == null:
+		# Fallback StandardMaterial3D for unknown block types
+		var fb := StandardMaterial3D.new()
+		fb.albedo_color = _fragment_albedo(block_type)
+		fb.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
+		fb.roughness = 0.85
+		fb.metallic = 0.0
+		fb.cull_mode = BaseMaterial3D.CULL_BACK
+		fb.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED
+		mat = fb
 	_cached_phys_materials[block_type] = mat
 	return mat
 
@@ -2377,17 +2410,15 @@ func _find_safe_recovery_position(pos: Vector3) -> Vector3:
 			return Vector3(float(ix) + 0.5, float(sy) + 1.2, float(iz) + 0.5)
 	return global_position + Vector3(0.0, 0.5, 0.0)
 
-## Centralized lifecycle and void recovery.
-## Never merges or fuses fragments. Out-of-bounds fragments recover to safe terrain
-## so no resources are ever lost.
+## Centralized lifecycle and void cleanup.
+## Deletes fragments below void threshold (-35.0) and prunes references. Never teleports or merges fragments.
 func _process_fragment_lifecycle(delta: float) -> void:
 	_fragment_lifecycle_timer += delta
 	if _fragment_lifecycle_timer < 0.5:
 		return
 	_fragment_lifecycle_timer = 0.0
 
-	# 1. Prune dead weak references
-	var valid_fragments: Array[VoxelFragment] = []
+	# Prune dead weak references and delete fragments fallen into the void
 	var i: int = _tracked_fragments.size() - 1
 	while i >= 0:
 		var ref: WeakRef = _tracked_fragments[i]
@@ -2395,19 +2426,11 @@ func _process_fragment_lifecycle(delta: float) -> void:
 		if node == null or not is_instance_valid(node) or node.is_queued_for_deletion():
 			_tracked_fragments.remove_at(i)
 		elif node is VoxelFragment:
-			valid_fragments.append(node as VoxelFragment)
+			var frag := node as VoxelFragment
+			if frag.global_position.y < -35.0:
+				frag.queue_free()
+				_tracked_fragments.remove_at(i)
 		i -= 1
-
-	# 2. Void / Out-of-bounds safety — recover to safe ground, never delete resources
-	for frag in valid_fragments:
-		if not is_instance_valid(frag) or frag.is_queued_for_deletion():
-			continue
-		if frag.global_position.y < -35.0:
-			var safe_pos := _find_safe_recovery_position(frag.global_position)
-			frag.global_position = safe_pos
-			frag.linear_velocity = Vector3.ZERO
-			frag.angular_velocity = Vector3.ZERO
-			frag.sleeping = true
 
 # ── end Voronoi Procedural Mining-Fragment System ─────────────────────────────
 

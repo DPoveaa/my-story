@@ -80,6 +80,7 @@ const _TerrainBlockyLibraryScript = preload("res://systems/terrain/TerrainBlocky
 const DELTA_SAVE_PATH: String = "user://terrain_deltas.json"
 var _mined_deltas: Dictionary = {}
 var _mined_deltas_set: Dictionary = {}
+var _surface_y_cache: Dictionary = {}
 
 ## Legacy test stubs
 var stale_results_discarded: int = 0
@@ -564,9 +565,23 @@ func force_sync_spawn_chunks(cx: int = 0, cz: int = 0) -> void:
 	await wait_for_terrain_at(world_pos)
 
 func get_highest_solid_y(x: int, z: int) -> int:
+	var col := Vector2i(x, z)
+	if _surface_y_cache.has(col):
+		return _surface_y_cache[col]
+
+	var est_y: int = -1
+	if _island_gen != null and _island_gen.has_method("eval_surface_y"):
+		est_y = int(_island_gen.eval_surface_y(x, z))
+		if est_y < 0:
+			_surface_y_cache[col] = -1
+			return -1
+
+	var found_y: int = -1
 	if _voxel_tool != null and _has_data_at(Vector3i(x, int(ISLAND_Y_MAX), z)):
 		_voxel_tool.channel = VoxelBuffer.CHANNEL_TYPE
-		for y in range(int(ISLAND_Y_MAX) + 16, int(ISLAND_Y_MIN) - 48, -1):
+		var scan_top: int = mini(int(ISLAND_Y_MAX) + 16, est_y + 4) if est_y >= 0 else int(ISLAND_Y_MAX) + 16
+		var scan_bot: int = int(ISLAND_Y_MIN) - 48
+		for y in range(scan_top, scan_bot, -1):
 			if int(_voxel_tool.get_voxel(Vector3i(x, y, z))) != BLOCK_AIR:
 				var cx := floori(float(x) / 16.0)
 				var cz := floori(float(z) / 16.0)
@@ -574,17 +589,20 @@ func get_highest_solid_y(x: int, z: int) -> int:
 				var lc := Vector3i(posmod(x, 16), y, posmod(z, 16))
 				if _mined_deltas_set.has(cp) and _mined_deltas_set[cp].has(lc):
 					continue
-				return y
+				found_y = y
+				break
 
-	if _island_gen != null and _island_gen.has_method("eval_surface_y"):
-		var sy: int = int(_island_gen.eval_surface_y(x, z))
-		if sy >= 0:
-			return sy
+	if found_y < 0 and est_y >= 0:
+		found_y = est_y
 
-	for y2 in range(WORLD_HEIGHT - 1, -1, -1):
-		if is_solid_block(Vector3i(x, y2, z)):
-			return y2
-	return -1
+	if found_y < 0:
+		for y2 in range(WORLD_HEIGHT - 1, -1, -1):
+			if is_solid_block(Vector3i(x, y2, z)):
+				found_y = y2
+				break
+
+	_surface_y_cache[col] = found_y
+	return found_y
 
 func _expected_surface_y(x: int, z: int) -> int:
 	if _island_gen != null and _island_gen.has_method("eval_surface_y"):
@@ -620,19 +638,12 @@ func _feet_from_surface_hit(x: float, z: float, hit_y: float) -> Vector3:
 	## CharacterBody3D origin at capsule bottom / feet.
 	return Vector3(x, hit_y + SPAWN_FEET_CLEARANCE, z)
 
-func verify_spawn_physics(candidate_pos: Vector3, exclude_rids: Array[RID] = []) -> bool:
+func _verify_capsule_clearance(candidate_pos: Vector3, exclude_rids: Array[RID] = []) -> bool:
 	if not is_inside_tree():
 		return true
 	var space := get_world_3d().direct_space_state if get_world_3d() != null else null
 	if space == null:
 		return true
-
-	var ground := _raycast_top_surface(candidate_pos.x, candidate_pos.z)
-	if ground.is_empty():
-		return false
-	var ground_y: float = ground.position.y
-	if absf(candidate_pos.y - (ground_y + SPAWN_FEET_CLEARANCE)) > 0.35:
-		return false
 
 	var capsule := CapsuleShape3D.new()
 	capsule.radius = SPAWN_CAPSULE_RADIUS
@@ -646,13 +657,28 @@ func verify_spawn_physics(candidate_pos: Vector3, exclude_rids: Array[RID] = [])
 	var overlaps := space.intersect_shape(query, 1)
 	return overlaps.is_empty()
 
-func get_spawn_position_raycast(x: float = 0.5, z: float = 0.5) -> Vector3:
+func verify_spawn_physics(candidate_pos: Vector3, exclude_rids: Array[RID] = []) -> bool:
+	if not is_inside_tree():
+		return true
+	var ground := _raycast_top_surface(candidate_pos.x, candidate_pos.z)
+	if ground.is_empty():
+		return false
+	var ground_y: float = ground.position.y
+	if absf(candidate_pos.y - (ground_y + SPAWN_FEET_CLEARANCE)) > 0.35:
+		return false
+	return _verify_capsule_clearance(candidate_pos, exclude_rids)
+
+func _check_column_spawn(x: float, z: float) -> Vector3:
 	var hit := _raycast_top_surface(x, z)
-	if not hit.is_empty():
-		var feet := _feet_from_surface_hit(x, z, hit.position.y)
-		if verify_spawn_physics(feet):
-			return feet
+	if hit.is_empty() or not hit.has("position"):
+		return Vector3.ZERO
+	var feet := _feet_from_surface_hit(x, z, hit.position.y)
+	if _verify_capsule_clearance(feet):
+		return feet
 	return Vector3.ZERO
+
+func get_spawn_position_raycast(x: float = 0.5, z: float = 0.5) -> Vector3:
+	return _check_column_spawn(x, z)
 
 func find_nearby_land_column(center_x: float, center_z: float, max_radius: int = 256) -> Vector2:
 	## Procedural probe (no streamed mesh required) for a solid surface near a session offset.
@@ -696,13 +722,20 @@ func try_find_safe_spawn(max_radius: int = 16, carrier: Node3D = null) -> Vector
 		if _viewer_collision != null and _viewer_collision.is_inside_tree():
 			_viewer_collision.global_position = Vector3(spawn_x, 56.0, spawn_z)
 
-	# 1. Fast path: check the requested column first
-	var feet0 := get_spawn_position_raycast(spawn_x, spawn_z)
-	if feet0 != Vector3.ZERO and verify_spawn_physics(feet0):
+	# 1. Prioritize validating known candidate column after its terrain collision is ready
+	var feet0 := _check_column_spawn(spawn_x, spawn_z)
+	if feet0 != Vector3.ZERO:
 		return feet0
 
-	# 2. Spiral rings outward, checking in bounded batches per frame
-	var search_limit := clampi(max_radius, 1, 64)
+	# Give PhysicsServer3D a physics frame to ensure collision shape registration
+	if is_inside_tree():
+		await get_tree().physics_frame
+		feet0 = _check_column_spawn(spawn_x, spawn_z)
+		if feet0 != Vector3.ZERO:
+			return feet0
+
+	# 2. Spiral rings outward, bound and batch the search, avoid duplicate raycasts/shape queries
+	var search_limit := clampi(max_radius, 1, 16)
 	var base_ix := floori(spawn_x)
 	var base_iz := floori(spawn_z)
 	var origins: Array[Vector2i] = []
@@ -715,15 +748,21 @@ func try_find_safe_spawn(max_radius: int = 16, carrier: Node3D = null) -> Vector
 
 	var checked_this_frame := 0
 	for col in origins:
+		# Fast check: skip void columns where no solid surface exists
+		if get_highest_solid_y(col.x, col.y) < 0:
+			continue
+
 		var x: float = float(col.x) + 0.5
 		var z: float = float(col.y) + 0.5
-		var feet := get_spawn_position_raycast(x, z)
-		if feet != Vector3.ZERO and verify_spawn_physics(feet):
+		var feet := _check_column_spawn(x, z)
+		if feet != Vector3.ZERO:
 			return feet
+
 		checked_this_frame += 1
 		if checked_this_frame >= 16:
 			checked_this_frame = 0
-			await get_tree().process_frame
+			if is_inside_tree():
+				await get_tree().process_frame
 
 	return Vector3.ZERO
 
@@ -807,6 +846,7 @@ func mine_voxel(world_cell: Vector3i) -> StringName:
 	var cz := floori(float(world_cell.z) / 16.0)
 	var cp := Vector2i(cx, cz)
 	_chunk_generation[cp] = int(_chunk_generation.get(cp, 0)) + 1
+	_surface_y_cache.erase(Vector2i(world_cell.x, world_cell.z))
 
 	_apply_air_edit(world_cell)
 	_record_mine_delta(world_cell)
@@ -814,6 +854,7 @@ func mine_voxel(world_cell: Vector3i) -> StringName:
 	return b_type
 
 func _apply_air_edit(world_cell: Vector3i) -> void:
+	_surface_y_cache.erase(Vector2i(world_cell.x, world_cell.z))
 	if _voxel_tool == null:
 		return
 	if _voxel_tool.has_method("is_area_editable"):
@@ -884,6 +925,7 @@ func clear_world() -> void:
 	_chunks.clear()
 	_chunk_cache.clear()
 	_chunk_generation.clear()
+	_surface_y_cache.clear()
 	_results_mutex.lock()
 	_results_ready.clear()
 	_results_mutex.unlock()

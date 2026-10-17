@@ -45,6 +45,12 @@ var _center: Vector3 = Vector3.ZERO
 var _initial_bake_done: bool = false
 ## Whether a graph_rebuilt signal is pending to be emitted once the queue drains.
 var _graph_rebuilt_pending: bool = false
+var _initialized: bool = false
+var _t_bake_start: int = 0
+var _is_chunk_active: bool = false
+var _active_chunk: Vector2i = Vector2i.ZERO
+var _active_col_idx: int = 0
+var _active_chunk_new_cells: Array[Vector3i] = []
 
 # ---------------------------------------------------------------------------
 # Setup & Lifecycle
@@ -58,36 +64,91 @@ func setup(voxel_world: Node) -> void:
 		if not _voxel_world.voxel_mined.is_connected(_on_voxel_changed):
 			_voxel_world.voxel_mined.connect(_on_voxel_changed)
 
-	if _voxel_world.has_signal("spawn_chunks_ready"):
-		if not _voxel_world.spawn_chunks_ready.is_connected(rebuild_graph):
-			_voxel_world.spawn_chunks_ready.connect(rebuild_graph)
-
 	if _voxel_world.has_signal("chunk_loaded"):
 		if not _voxel_world.chunk_loaded.is_connected(_on_chunk_loaded):
 			_voxel_world.chunk_loaded.connect(_on_chunk_loaded)
 
-## Per-frame wall-clock budget in milliseconds. Processes as many queued chunks as
-## possible within this window, then yields back to the engine to avoid frame spikes.
+func initialize_once(spawn_pos: Vector3) -> void:
+	if _initialized:
+		return
+	_initialized = true
+	_t_bake_start = Time.get_ticks_msec()
+	update_center(spawn_pos)
+	rebuild_graph()
+
+## Per-frame wall-clock budget in milliseconds. Processes column batches within
+## this window, then yields back to the engine to avoid frame spikes.
 const FRAME_BUDGET_MS: float = 2.0
 
 func _ready() -> void:
 	pass  ## No startup delay needed — physics queries are skipped during initial bake.
 
 func _process(_delta: float) -> void:
-	if _pending_chunks.is_empty():
+	if not _is_chunk_active and _pending_chunks.is_empty():
 		# Queue just drained — emit graph_rebuilt once and mark initial bake complete.
 		if _graph_rebuilt_pending:
 			_graph_rebuilt_pending = false
-			_initial_bake_done = true
+			if not _initial_bake_done:
+				_initial_bake_done = true
+				if _t_bake_start > 0:
+					var elapsed: int = Time.get_ticks_msec() - _t_bake_start
+					print("[StartupTiming] A* baking took: %d ms" % elapsed)
 			graph_rebuilt.emit()
 		return
 
-	# Consume as many chunks as possible within the per-frame time budget.
+	# Incrementally consume columns within the per-frame time budget.
 	var frame_start_ms: int = Time.get_ticks_msec()
-	while not _pending_chunks.is_empty():
-		var current_chunk = _pending_chunks.pop_front()
-		_bake_single_chunk(current_chunk)
-		# Check wall-clock budget; yield if over limit to keep frame time bounded.
+	while true:
+		if not _is_chunk_active:
+			if _pending_chunks.is_empty():
+				break
+			var next_chunk = _pending_chunks.pop_front()
+			_begin_chunk_bake(next_chunk)
+			if not _is_chunk_active:
+				continue
+
+		var half_y: int = BOUNDS_Y / 2
+		var min_y: int = roundi(_center.y) - half_y if _center != Vector3.ZERO else 0
+		var max_y: int = roundi(_center.y) + half_y if _center != Vector3.ZERO else 128
+		var start_x: int = _active_chunk.x * CHUNK_SIZE
+		var start_z: int = _active_chunk.y * CHUNK_SIZE
+
+		while _active_col_idx < 256:
+			var lx: int = _active_col_idx % CHUNK_SIZE
+			var lz: int = _active_col_idx / CHUNK_SIZE
+			_active_col_idx += 1
+			var x: int = start_x + lx
+			var z: int = start_z + lz
+
+			var surf_y: int = -1
+			if _voxel_world.has_method("get_highest_solid_y"):
+				surf_y = _voxel_world.get_highest_solid_y(x, z)
+
+			if surf_y >= min_y and surf_y <= max_y:
+				var ground_cell := Vector3i(x, surf_y, z)
+				var walk_cell := Vector3i(x, surf_y + 1, z)
+				var head_cell := Vector3i(x, surf_y + 2, z)
+
+				var valid := true
+				if _voxel_world.has_method("is_solid_block"):
+					if not _voxel_world.is_solid_block(ground_cell) \
+					or _voxel_world.is_solid_block(walk_cell) \
+					or _voxel_world.is_solid_block(head_cell):
+						valid = false
+
+				if valid and _initial_bake_done:
+					if _is_position_blocked_by_physics(walk_cell) or _is_position_blocked_by_physics(head_cell):
+						valid = false
+
+				if valid:
+					_active_chunk_new_cells.append(walk_cell)
+
+			if _active_col_idx % 8 == 0:
+				if float(Time.get_ticks_msec() - frame_start_ms) >= FRAME_BUDGET_MS:
+					return
+
+		_finish_chunk_bake()
+
 		if float(Time.get_ticks_msec() - frame_start_ms) >= FRAME_BUDGET_MS:
 			break
 
@@ -165,6 +226,95 @@ func rebuild_graph() -> void:
 			var cp := Vector2i(cx_idx, cz_idx)
 			queue_chunk(cp)
 
+## Begin an incremental chunk bake (used by _process for the 2ms budget loop).
+func _begin_chunk_bake(current_chunk: Variant) -> void:
+	if _voxel_world == null:
+		_is_chunk_active = false
+		return
+
+	var cp: Vector2i
+	if current_chunk is Vector2i:
+		cp = current_chunk
+	elif current_chunk is Vector3i:
+		cp = Vector2i(floori(float(current_chunk.x) / float(CHUNK_SIZE)), floori(float(current_chunk.z) / float(CHUNK_SIZE)))
+	elif current_chunk is Vector3:
+		cp = Vector2i(floori(current_chunk.x / float(CHUNK_SIZE)), floori(current_chunk.z / float(CHUNK_SIZE)))
+	elif current_chunk is Vector2:
+		cp = Vector2i(floori(current_chunk.x / float(CHUNK_SIZE)), floori(current_chunk.y / float(CHUNK_SIZE)))
+	else:
+		_is_chunk_active = false
+		return
+
+	if _voxel_world.has_method("is_chunk_loaded") and not _voxel_world.is_chunk_loaded(cp):
+		_is_chunk_active = false
+		return
+
+	_baked_chunks[cp] = true
+
+	# Clean up any previously baked points in this chunk before re-baking
+	if _chunk_points.has(cp):
+		for old_cell in _chunk_points[cp]:
+			if _point_ids.has(old_cell):
+				var old_id: int = _point_ids[old_cell]
+				_astar.remove_point(old_id)
+				_point_ids.erase(old_cell)
+				_id_cells.erase(old_id)
+				var col := Vector2i(old_cell.x, old_cell.z)
+				if _column_to_cell.get(col) == old_cell:
+					_column_to_cell.erase(col)
+		_chunk_points[cp].clear()
+
+	_active_chunk = cp
+	_active_col_idx = 0
+	_active_chunk_new_cells.clear()
+	_is_chunk_active = true
+
+## Finish registering points collected so far and wiring edges for _active_chunk.
+func _finish_chunk_bake() -> void:
+	if not _is_chunk_active:
+		return
+	_is_chunk_active = false
+
+	var new_cells: Array[Vector3i] = _active_chunk_new_cells.duplicate()
+	_active_chunk_new_cells.clear()
+	var cp: Vector2i = _active_chunk
+
+	# Register points into AStar3D
+	for cell in new_cells:
+		var world_pos := Vector3(float(cell.x) + 0.5, float(cell.y), float(cell.z) + 0.5)
+		var id: int = _next_id
+		_next_id += 1
+		_astar.add_point(id, world_pos)
+		_point_ids[cell] = id
+		_id_cells[id] = cell
+		_column_to_cell[Vector2i(cell.x, cell.z)] = cell
+
+	if not _chunk_points.has(cp):
+		_chunk_points[cp] = []
+	_chunk_points[cp].append_array(new_cells)
+
+	# Connect immediate adjacent orthogonal neighbors (4 cardinal + step-ups)
+	for cell in new_cells:
+		var from_id: int = _point_ids[cell]
+		for off in ADJACENT_OFFSETS:
+			for dy in range(-STEP_UP_MAX, STEP_UP_MAX + 1):
+				var neighbor := Vector3i(cell.x + off.x, cell.y + dy, cell.z + off.y)
+				if not _point_ids.has(neighbor):
+					continue
+				var to_id: int = _point_ids[neighbor]
+				if from_id == to_id:
+					continue
+				var pos_a: Vector3 = _astar.get_point_position(from_id)
+				var pos_b: Vector3 = _astar.get_point_position(to_id)
+				if absf(pos_a.y - pos_b.y) > 1.1:
+					continue
+				_astar.connect_points(from_id, to_id, true)
+				if dy > 0:
+					_astar.set_point_weight_scale(to_id, 1.5)
+
+	_graph_rebuilt_pending = true
+
+## Synchronous full-chunk bake — used only for post-startup dynamic edits.
 func _bake_single_chunk(current_chunk: Variant) -> void:
 	if _voxel_world == null:
 		return
@@ -186,7 +336,6 @@ func _bake_single_chunk(current_chunk: Variant) -> void:
 
 	_baked_chunks[cp] = true
 
-	# Clean up any previously baked points in this chunk before re-baking
 	if _chunk_points.has(cp):
 		for old_cell in _chunk_points[cp]:
 			if _point_ids.has(old_cell):
@@ -207,7 +356,6 @@ func _bake_single_chunk(current_chunk: Variant) -> void:
 	var start_x: int = cp.x * CHUNK_SIZE
 	var start_z: int = cp.y * CHUNK_SIZE
 
-	# Strictly surface voxels only: 1 query per column (256 columns per chunk)
 	for x in range(start_x, start_x + CHUNK_SIZE):
 		for z in range(start_z, start_z + CHUNK_SIZE):
 			var surf_y: int = -1
@@ -221,25 +369,18 @@ func _bake_single_chunk(current_chunk: Variant) -> void:
 			var walk_cell := Vector3i(x, surf_y + 1, z)
 			var head_cell := Vector3i(x, surf_y + 2, z)
 
-			# Only add point if ground is SOLID and headroom is AIR/EMPTY
 			if _voxel_world.has_method("is_solid_block"):
 				if not _voxel_world.is_solid_block(ground_cell):
 					continue
 				if _voxel_world.is_solid_block(walk_cell) or _voxel_world.is_solid_block(head_cell):
 					continue
 
-			# Physics intersection checks (for placed objects / pallets / stations) are
-			# SKIPPED during the initial startup bake to avoid thousands of synchronous
-			# PhysicsServer3D queries flooding the main thread before gameplay begins.
-			# After startup (_initial_bake_done = true), these checks run normally so
-			# that dynamically placed blocks correctly invalidate walkable cells.
 			if _initial_bake_done:
 				if _is_position_blocked_by_physics(walk_cell) or _is_position_blocked_by_physics(head_cell):
 					continue
 
 			new_cells.append(walk_cell)
 
-	# Register points into AStar3D
 	for cell in new_cells:
 		var world_pos := Vector3(float(cell.x) + 0.5, float(cell.y), float(cell.z) + 0.5)
 		var id: int = _next_id
@@ -253,8 +394,6 @@ func _bake_single_chunk(current_chunk: Variant) -> void:
 		_chunk_points[cp] = []
 	_chunk_points[cp].append_array(new_cells)
 
-	# Connect immediate adjacent orthogonal neighbors (4 cardinal + step-ups)
-	# Native C++ AStar3D handles edge deduplication directly
 	for cell in new_cells:
 		var from_id: int = _point_ids[cell]
 		for off in ADJACENT_OFFSETS:
@@ -273,7 +412,6 @@ func _bake_single_chunk(current_chunk: Variant) -> void:
 				if dy > 0:
 					_astar.set_point_weight_scale(to_id, 1.5)
 
-	# Mark that a signal should fire once the full queue drains (not per-chunk).
 	_graph_rebuilt_pending = true
 
 # ---------------------------------------------------------------------------

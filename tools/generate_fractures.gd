@@ -38,12 +38,12 @@ func run_generation() -> bool:
 		"inner_corner": _build_inner_corner_mesh()
 	}
 
-	# Configuration per shape: seeds chosen for balanced, stable, visually appealing fracture pieces
+	# Configuration per shape: VoronoiShatter requires >= 6 samples to avoid incomplete geometry
 	var configs: Dictionary = {
-		"cube": {"samples": 4, "seed": 42},
-		"ramp": {"samples": 4, "seed": 42},
-		"corner": {"samples": 4, "seed": 42},
-		"inner_corner": {"samples": 4, "seed": 42}
+		"cube": {"samples": 8, "seed": 42},
+		"ramp": {"samples": 8, "seed": 42},
+		"corner": {"samples": 8, "seed": 42},
+		"inner_corner": {"samples": 8, "seed": 42}
 	}
 
 	var manifest: Dictionary = {}

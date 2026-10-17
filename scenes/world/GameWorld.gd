@@ -177,18 +177,16 @@ func _spawn_player_on_terrain() -> void:
 	var safe_spawn := Vector3.ZERO
 	if loaded_ok:
 		await get_tree().physics_frame
-		await get_tree().physics_frame
+		var t_spawn_start: int = Time.get_ticks_msec()
 		if voxel_world.has_method("try_find_safe_spawn"):
-			safe_spawn = await voxel_world.try_find_safe_spawn(48, player)
+			safe_spawn = await voxel_world.try_find_safe_spawn(16, player)
 		elif voxel_world.has_method("get_spawn_position_raycast"):
 			safe_spawn = voxel_world.get_spawn_position_raycast(_session_spawn_xz.x, _session_spawn_xz.y)
+		var t_spawn_elapsed: int = Time.get_ticks_msec() - t_spawn_start
+		print("[StartupTiming] Spawn search took: %d ms, result: %s" % [t_spawn_elapsed, safe_spawn])
 
-	var verified: bool = false
-	if safe_spawn != Vector3.ZERO:
-		if voxel_world.has_method("verify_spawn_physics"):
-			verified = voxel_world.verify_spawn_physics(safe_spawn)
-		else:
-			verified = true
+	# try_find_safe_spawn already validates physics — no second verify pass needed.
+	var verified: bool = safe_spawn != Vector3.ZERO
 
 	if not loaded_ok or safe_spawn == Vector3.ZERO or not verified:
 		if build_hud != null and build_hud.has_method("set_loading_overlay"):
@@ -208,10 +206,11 @@ func _spawn_player_on_terrain() -> void:
 	if build_hud != null and build_hud.has_method("set_loading_overlay"):
 		build_hud.set_loading_overlay(false)
 
-	# Trigger AStar graph rebuild around the player's landing position
+	# Initialize A* exactly once, centred on the confirmed spawn.
+	# initialize_once() is a no-op if called a second time, so late chunk_loaded
+	# signals cannot trigger a redundant full rebuild.
 	if astar_grid != null:
-		astar_grid.update_center(safe_spawn)
-		astar_grid.rebuild_graph()
+		astar_grid.initialize_once(safe_spawn)
 
 func _process(_delta: float) -> void:
 	## Feed the player's current position to AStarGridManager so the graph stays centred on them.
