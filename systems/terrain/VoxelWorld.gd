@@ -483,11 +483,11 @@ func wait_for_terrain_at(world_pos: Vector3) -> bool:
 		return false
 
 	_park_viewers_for_load(world_pos)
+	await get_tree().physics_frame
 
 	if is_collision_ready_at(world_pos):
 		_apply_persisted_deltas()
 		await get_tree().physics_frame
-		await get_tree().process_frame
 		if is_collision_ready_at(world_pos):
 			_unpark_viewers()
 			spawn_chunks_ready.emit()
@@ -503,7 +503,6 @@ func wait_for_terrain_at(world_pos: Vector3) -> bool:
 		if is_collision_ready_at(world_pos):
 			_apply_persisted_deltas()
 			await get_tree().physics_frame
-			await get_tree().process_frame
 			if is_collision_ready_at(world_pos):
 				_unpark_viewers()
 				spawn_chunks_ready.emit()
@@ -534,7 +533,7 @@ func wait_for_terrain_at(world_pos: Vector3) -> bool:
 			_park_viewers_for_load(world_pos)
 
 		cycles += 1
-		await get_tree().process_frame
+		await get_tree().physics_frame
 
 	if not is_collision_ready_at(world_pos):
 		terrain_loading_status.emit("Terrain slow — finishing mesh…")
@@ -543,7 +542,6 @@ func wait_for_terrain_at(world_pos: Vector3) -> bool:
 			if is_collision_ready_at(world_pos):
 				_apply_persisted_deltas()
 				await get_tree().physics_frame
-				await get_tree().process_frame
 				if is_collision_ready_at(world_pos):
 					_unpark_viewers()
 					spawn_chunks_ready.emit()
@@ -552,7 +550,7 @@ func wait_for_terrain_at(world_pos: Vector3) -> bool:
 			grace += 1
 			if grace % 30 == 0:
 				_park_viewers_for_load(world_pos)
-			await get_tree().process_frame
+			await get_tree().physics_frame
 
 	_unpark_viewers()
 	terrain_loading_status.emit("Terrain load failed — press Home to retry or Esc to quit")

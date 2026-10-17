@@ -1975,7 +1975,7 @@ func _get_interior_material(block_type: StringName) -> StandardMaterial3D:
 	mat.shading_mode = BaseMaterial3D.SHADING_MODE_PER_PIXEL
 	mat.roughness = 0.95
 	mat.metallic = 0.0
-	mat.cull_mode = BaseMaterial3D.CULL_BACK
+	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 	mat.transparency = BaseMaterial3D.TRANSPARENCY_DISABLED
 
 	match block_type:
