@@ -34,7 +34,7 @@ var _astar: AStar3D = AStar3D.new()
 var _voxel_world: Node = null
 var _point_ids: Dictionary = {}        ## Vector3i cell -> int AStar point id
 var _id_cells: Dictionary = {}         ## int id -> Vector3i cell
-var _column_to_cell: Dictionary = {}   ## Vector2i(x, z) -> Vector3i cell
+var _column_to_cells: Dictionary = {}  ## Vector2i(x, z) -> Array[Vector3i]
 var _chunk_points: Dictionary = {}     ## Vector2i chunk_coord -> Array[Vector3i]
 var _baked_chunks: Dictionary = {}     ## Vector2i chunk_coord -> bool
 var _pending_chunks: Array = []        ## Debounced chunk queue for lazy baking
@@ -124,24 +124,25 @@ func _process(_delta: float) -> void:
 			if _voxel_world.has_method("get_highest_solid_y"):
 				surf_y = _voxel_world.get_highest_solid_y(x, z)
 
-			if surf_y >= min_y and surf_y <= max_y:
-				var ground_cell := Vector3i(x, surf_y, z)
-				var walk_cell := Vector3i(x, surf_y + 1, z)
-				var head_cell := Vector3i(x, surf_y + 2, z)
-
-				var valid := true
-				if _voxel_world.has_method("is_solid_block"):
-					if not _voxel_world.is_solid_block(ground_cell) \
-					or _voxel_world.is_solid_block(walk_cell) \
-					or _voxel_world.is_solid_block(head_cell):
-						valid = false
-
-				if valid and _initial_bake_done:
-					if _is_position_blocked_by_physics(walk_cell) or _is_position_blocked_by_physics(head_cell):
-						valid = false
-
-				if valid:
-					_active_chunk_new_cells.append(walk_cell)
+			if surf_y >= min_y:
+				var scan_top: int = mini(max_y, surf_y)
+				var y: int = min_y - 1
+				while y <= scan_top:
+					if _voxel_world.has_method("is_solid_block") and _voxel_world.is_solid_block(Vector3i(x, y, z)):
+						var walk_cell := Vector3i(x, y + 1, z)
+						var head_cell := Vector3i(x, y + 2, z)
+						if not _voxel_world.is_solid_block(walk_cell) and not _voxel_world.is_solid_block(head_cell):
+							var valid := true
+							if _initial_bake_done:
+								if _is_position_blocked_by_physics(walk_cell) or _is_position_blocked_by_physics(head_cell):
+									valid = false
+							if valid:
+								_active_chunk_new_cells.append(walk_cell)
+							y += 2
+						else:
+							y += 1
+					else:
+						y += 1
 
 			if _active_col_idx % 8 == 0:
 				if float(Time.get_ticks_msec() - frame_start_ms) >= FRAME_BUDGET_MS:
@@ -171,8 +172,8 @@ func _is_position_blocked_by_physics(cell: Vector3i) -> bool:
 		center + Vector3(0.0, 0.4, 0.0),
 		center - Vector3(0.0, 0.4, 0.0)
 	)
-	# Mask 1 = World/Stations/Buildings, Mask 4 = Debris, Mask 8 = Placed Blocks / Resources
-	ray_query.collision_mask = 1 | 4 | 8
+	# Mask 1 = World/Stations/Buildings/Placed Blocks (excludes loose layer 4 pickups)
+	ray_query.collision_mask = 1
 	var ray_hit := direct_state.intersect_ray(ray_query)
 	return not ray_hit.is_empty()
 
@@ -206,7 +207,7 @@ func rebuild_graph() -> void:
 	_astar.clear()
 	_point_ids.clear()
 	_id_cells.clear()
-	_column_to_cell.clear()
+	_column_to_cells.clear()
 	_chunk_points.clear()
 	_baked_chunks.clear()
 	_next_id = 0
@@ -260,8 +261,10 @@ func _begin_chunk_bake(current_chunk: Variant) -> void:
 				_point_ids.erase(old_cell)
 				_id_cells.erase(old_id)
 				var col := Vector2i(old_cell.x, old_cell.z)
-				if _column_to_cell.get(col) == old_cell:
-					_column_to_cell.erase(col)
+				if _column_to_cells.has(col):
+					_column_to_cells[col].erase(old_cell)
+					if _column_to_cells[col].is_empty():
+						_column_to_cells.erase(col)
 		_chunk_points[cp].clear()
 
 	_active_chunk = cp
@@ -287,7 +290,10 @@ func _finish_chunk_bake() -> void:
 		_astar.add_point(id, world_pos)
 		_point_ids[cell] = id
 		_id_cells[id] = cell
-		_column_to_cell[Vector2i(cell.x, cell.z)] = cell
+		var col := Vector2i(cell.x, cell.z)
+		if not _column_to_cells.has(col):
+			_column_to_cells[col] = []
+		_column_to_cells[col].append(cell)
 
 	if not _chunk_points.has(cp):
 		_chunk_points[cp] = []
@@ -344,8 +350,10 @@ func _bake_single_chunk(current_chunk: Variant) -> void:
 				_point_ids.erase(old_cell)
 				_id_cells.erase(old_id)
 				var col := Vector2i(old_cell.x, old_cell.z)
-				if _column_to_cell.get(col) == old_cell:
-					_column_to_cell.erase(col)
+				if _column_to_cells.has(col):
+					_column_to_cells[col].erase(old_cell)
+					if _column_to_cells[col].is_empty():
+						_column_to_cells.erase(col)
 		_chunk_points[cp].clear()
 
 	var half_y: int = BOUNDS_Y / 2
@@ -362,24 +370,25 @@ func _bake_single_chunk(current_chunk: Variant) -> void:
 			if _voxel_world.has_method("get_highest_solid_y"):
 				surf_y = _voxel_world.get_highest_solid_y(x, z)
 
-			if surf_y < min_y or surf_y > max_y:
-				continue
-
-			var ground_cell := Vector3i(x, surf_y, z)
-			var walk_cell := Vector3i(x, surf_y + 1, z)
-			var head_cell := Vector3i(x, surf_y + 2, z)
-
-			if _voxel_world.has_method("is_solid_block"):
-				if not _voxel_world.is_solid_block(ground_cell):
-					continue
-				if _voxel_world.is_solid_block(walk_cell) or _voxel_world.is_solid_block(head_cell):
-					continue
-
-			if _initial_bake_done:
-				if _is_position_blocked_by_physics(walk_cell) or _is_position_blocked_by_physics(head_cell):
-					continue
-
-			new_cells.append(walk_cell)
+			if surf_y >= min_y:
+				var scan_top: int = mini(max_y, surf_y)
+				var y: int = min_y - 1
+				while y <= scan_top:
+					if _voxel_world.has_method("is_solid_block") and _voxel_world.is_solid_block(Vector3i(x, y, z)):
+						var walk_cell := Vector3i(x, y + 1, z)
+						var head_cell := Vector3i(x, y + 2, z)
+						if not _voxel_world.is_solid_block(walk_cell) and not _voxel_world.is_solid_block(head_cell):
+							var valid := true
+							if _initial_bake_done:
+								if _is_position_blocked_by_physics(walk_cell) or _is_position_blocked_by_physics(head_cell):
+									valid = false
+							if valid:
+								new_cells.append(walk_cell)
+							y += 2
+						else:
+							y += 1
+					else:
+						y += 1
 
 	for cell in new_cells:
 		var world_pos := Vector3(float(cell.x) + 0.5, float(cell.y), float(cell.z) + 0.5)
@@ -388,7 +397,10 @@ func _bake_single_chunk(current_chunk: Variant) -> void:
 		_astar.add_point(id, world_pos)
 		_point_ids[cell] = id
 		_id_cells[id] = cell
-		_column_to_cell[Vector2i(cell.x, cell.z)] = cell
+		var col := Vector2i(cell.x, cell.z)
+		if not _column_to_cells.has(col):
+			_column_to_cells[col] = []
+		_column_to_cells[col].append(cell)
 
 	if not _chunk_points.has(cp):
 		_chunk_points[cp] = []
@@ -427,13 +439,24 @@ func notify_block_changed(world_cell: Vector3i) -> void:
 	for off in ADJACENT_OFFSETS:
 		_reconnect_column(world_cell.x + off.x, world_cell.z + off.y)
 
+func notify_bounds_changed(aabb: AABB) -> void:
+	var min_cell := Vector3i(floori(aabb.position.x), floori(aabb.position.y), floori(aabb.position.z))
+	var max_cell := Vector3i(ceili(aabb.end.x), ceili(aabb.end.y), ceili(aabb.end.z))
+	for x in range(min_cell.x, max_cell.x + 1):
+		for z in range(min_cell.z, max_cell.z + 1):
+			_update_local_column(x, z)
+			for off in ADJACENT_OFFSETS:
+				_reconnect_column(x + off.x, z + off.y)
+	graph_rebuilt.emit()
+
 func _update_local_column(x: int, z: int) -> void:
 	if _voxel_world == null:
 		return
 	var col := Vector2i(x, z)
-	if _column_to_cell.has(col):
-		var old_cell: Vector3i = _column_to_cell[col]
-		_remove_point_at(old_cell)
+	if _column_to_cells.has(col):
+		var old_cells: Array = _column_to_cells[col].duplicate()
+		for old_cell in old_cells:
+			_remove_point_at(old_cell)
 
 	var surf_y: int = -1
 	if _voxel_world.has_method("get_highest_solid_y"):
@@ -443,47 +466,50 @@ func _update_local_column(x: int, z: int) -> void:
 	var min_y: int = roundi(_center.y) - half_y if _center != Vector3.ZERO else 0
 	var max_y: int = roundi(_center.y) + half_y if _center != Vector3.ZERO else 128
 
-	if surf_y < min_y or surf_y > max_y:
+	if surf_y < min_y:
 		return
 
-	var ground_cell := Vector3i(x, surf_y, z)
-	var walk_cell := Vector3i(x, surf_y + 1, z)
-	var head_cell := Vector3i(x, surf_y + 2, z)
-
-	if _voxel_world.has_method("is_solid_block"):
-		if not _voxel_world.is_solid_block(ground_cell):
-			return
-		if _voxel_world.is_solid_block(walk_cell) or _voxel_world.is_solid_block(head_cell):
-			return
-
-	if _initial_bake_done:
-		if _is_position_blocked_by_physics(walk_cell) or _is_position_blocked_by_physics(head_cell):
-			return
-
-	_add_and_connect_point(walk_cell)
+	var scan_top: int = mini(max_y, surf_y)
+	var y: int = min_y - 1
+	while y <= scan_top:
+		if _voxel_world.has_method("is_solid_block") and _voxel_world.is_solid_block(Vector3i(x, y, z)):
+			var walk_cell := Vector3i(x, y + 1, z)
+			var head_cell := Vector3i(x, y + 2, z)
+			if not _voxel_world.is_solid_block(walk_cell) and not _voxel_world.is_solid_block(head_cell):
+				var valid := true
+				if _initial_bake_done:
+					if _is_position_blocked_by_physics(walk_cell) or _is_position_blocked_by_physics(head_cell):
+						valid = false
+				if valid:
+					_add_and_connect_point(walk_cell)
+				y += 2
+			else:
+				y += 1
+		else:
+			y += 1
 
 func _reconnect_column(x: int, z: int) -> void:
 	var col := Vector2i(x, z)
-	if not _column_to_cell.has(col):
+	if not _column_to_cells.has(col):
 		return
-	var cell: Vector3i = _column_to_cell[col]
-	if not _point_ids.has(cell):
-		return
-	var id: int = _point_ids[cell]
-	for off in ADJACENT_OFFSETS:
-		for dy in range(-STEP_UP_MAX, STEP_UP_MAX + 1):
-			var neighbor := Vector3i(cell.x + off.x, cell.y + dy, cell.z + off.y)
-			if not _point_ids.has(neighbor):
-				continue
-			var to_id: int = _point_ids[neighbor]
-			if id == to_id:
-				continue
-			var pos_a: Vector3 = _astar.get_point_position(id)
-			var pos_b: Vector3 = _astar.get_point_position(to_id)
-			if absf(pos_a.y - pos_b.y) <= 1.1:
-				_astar.connect_points(id, to_id, true)
-				if dy > 0:
-					_astar.set_point_weight_scale(to_id, 1.5)
+	for cell in _column_to_cells[col]:
+		if not _point_ids.has(cell):
+			continue
+		var id: int = _point_ids[cell]
+		for off in ADJACENT_OFFSETS:
+			for dy in range(-STEP_UP_MAX, STEP_UP_MAX + 1):
+				var neighbor := Vector3i(cell.x + off.x, cell.y + dy, cell.z + off.y)
+				if not _point_ids.has(neighbor):
+					continue
+				var to_id: int = _point_ids[neighbor]
+				if id == to_id:
+					continue
+				var pos_a: Vector3 = _astar.get_point_position(id)
+				var pos_b: Vector3 = _astar.get_point_position(to_id)
+				if absf(pos_a.y - pos_b.y) <= 1.1:
+					_astar.connect_points(id, to_id, true)
+					if dy > 0:
+						_astar.set_point_weight_scale(to_id, 1.5)
 
 func _on_voxel_changed(world_cell: Vector3i, _block_type: StringName = &"") -> void:
 	notify_block_changed(world_cell)
@@ -502,8 +528,10 @@ func _remove_point_at(cell: Vector3i) -> void:
 	_point_ids.erase(cell)
 	_id_cells.erase(id)
 	var col := Vector2i(cell.x, cell.z)
-	if _column_to_cell.get(col) == cell:
-		_column_to_cell.erase(col)
+	if _column_to_cells.has(col):
+		_column_to_cells[col].erase(cell)
+		if _column_to_cells[col].is_empty():
+			_column_to_cells.erase(col)
 	var cp := Vector2i(floori(float(cell.x) / float(CHUNK_SIZE)), floori(float(cell.z) / float(CHUNK_SIZE)))
 	if _chunk_points.has(cp):
 		_chunk_points[cp].erase(cell)
@@ -511,7 +539,7 @@ func _remove_point_at(cell: Vector3i) -> void:
 func _add_and_connect_point(cell: Vector3i) -> int:
 	if _point_ids.has(cell):
 		return _point_ids[cell]
-	if _is_position_blocked_by_physics(cell):
+	if _initial_bake_done and _is_position_blocked_by_physics(cell):
 		return -1
 	var id: int = _next_id
 	_next_id += 1
@@ -519,7 +547,10 @@ func _add_and_connect_point(cell: Vector3i) -> int:
 	_astar.add_point(id, world_pos)
 	_point_ids[cell] = id
 	_id_cells[id] = cell
-	_column_to_cell[Vector2i(cell.x, cell.z)] = cell
+	var col := Vector2i(cell.x, cell.z)
+	if not _column_to_cells.has(col):
+		_column_to_cells[col] = []
+	_column_to_cells[col].append(cell)
 
 	var cp := Vector2i(floori(float(cell.x) / float(CHUNK_SIZE)), floori(float(cell.z) / float(CHUNK_SIZE)))
 	if not _chunk_points.has(cp):

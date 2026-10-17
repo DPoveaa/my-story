@@ -60,6 +60,19 @@ func _ready() -> void:
 	_rebuild_stack_visuals()
 	_update_fill_volume()
 	call_deferred("_absorb_overlapping_catch_bodies")
+	call_deferred("_notify_astar")
+
+func _exit_tree() -> void:
+	call_deferred("_notify_astar")
+
+func _notify_astar() -> void:
+	if not is_inside_tree():
+		return
+	var root := get_tree().root
+	var astar_mgr: Node = root.find_child("AStarGridManager", true, false)
+	if astar_mgr != null and astar_mgr.has_method("notify_bounds_changed"):
+		var aabb := AABB(global_position - Vector3(1.1, 0.2, 1.1), Vector3(2.2, 1.6, 2.2))
+		astar_mgr.notify_bounds_changed(aabb)
 
 func _process(_delta: float) -> void:
 	_check_block_reset()
@@ -345,23 +358,35 @@ func can_withdraw() -> bool:
 		return false
 	return _get_assigned_count() > 0
 
-func refund_material(item_material: String, amount: int) -> void:
+func can_accept_material(item_material: String, amount: int = 1) -> bool:
+	if amount <= 0 or not _is_storable(item_material):
+		return false
+	if _auto_converted:
+		return false
+	if not assigned_material.is_empty() and not _materials_compatible(item_material, assigned_material):
+		return false
+	var cap: int = 64
+	if _is_fragment_type(item_material):
+		cap = FRAGMENTS_PER_BLOCK * CRAFT_BATCH_BLOCKS
+	elif item_material == "log":
+		cap = 32
+	if _get_assigned_count() + amount > cap:
+		return false
+	return true
+
+func refund_material(item_material: String, amount: int) -> bool:
 	if amount <= 0 or item_material.is_empty():
-		return
-	_try_accept_material_amount(item_material, amount)
+		return false
+	return _try_accept_material_amount(item_material, amount)
 
 func _try_accept_material(item_material: String) -> bool:
 	return _try_accept_material_amount(item_material, 1)
 
 func _try_accept_material_amount(item_material: String, amount: int) -> bool:
-	if amount <= 0 or not _is_storable(item_material):
-		return false
-	if _auto_converted:
+	if not can_accept_material(item_material, amount):
 		return false
 	if assigned_material == "":
 		assigned_material = item_material
-	elif not _materials_compatible(item_material, assigned_material):
-		return false
 	stored_materials[item_material] = int(stored_materials.get(item_material, 0)) + amount
 	_refresh_visuals()
 	_try_auto_convert_full()
