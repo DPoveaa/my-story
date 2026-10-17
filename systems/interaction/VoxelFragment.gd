@@ -16,11 +16,18 @@ func _ready() -> void:
 	continuous_cd = false
 	contact_monitor = false
 	max_contacts_reported = 0
-	mass = 0.08
-	gravity_scale = 2.0
-	linear_damp = 2.5
-	angular_damp = 3.0
+	mass = 0.2
+	gravity_scale = 1.3
+	linear_damp = 2.0
+	angular_damp = 2.5
 
 	# Randomize initial rotation so pieces look varied immediately.
 	if rotation == Vector3.ZERO:
 		rotation = Vector3(randf() * TAU, randf() * TAU, randf() * TAU)
+
+func is_settled() -> bool:
+	if freeze:
+		return true
+	if sleeping:
+		return true
+	return linear_velocity.length_squared() < 0.04 and angular_velocity.length_squared() < 0.04

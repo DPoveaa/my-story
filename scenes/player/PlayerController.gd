@@ -414,6 +414,8 @@ func _ready() -> void:
 	_setup_slot_hud()
 	_setup_bag_visual()
 	_ensure_vacuum_zone()
+	_ensure_cached_shard_resources()
+	_warmup_particle_pool()
 
 	# Massive XZ shift each session for a fresh landscape without reseeding the generator.
 	# Hold Y stays within collision viewer range; GameWorld finalizes spawn on terrain.
@@ -1428,12 +1430,20 @@ func _process_lmb_mining(delta: float) -> void:
 	if build_hud != null and build_hud.has_method("set_mining_progress"):
 		build_hud.set_mining_progress(true, mat_name, pct)
 
+	# Inexpensive trickle of particles while mining
+	_mine_trickle_timer += delta
+	if _mine_trickle_timer >= 0.12:
+		_mine_trickle_timer = 0.0
+		var trickle_pos: Vector3 = _target_hit_point if _target_hit_point != Vector3.ZERO else (Vector3(mine_cell) + Vector3(0.5, 0.5, 0.5))
+		_spawn_mining_trickle(trickle_pos, current_type)
+
 	if _lmb_mine_progress < 1.0:
 		return
 
 	# ── Hold complete → SDF carve + crumble ───────────────────────────────────
 	_lmb_mine_progress = 0.0
 	_lmb_mine_target = _INVALID_VOXEL
+	_mine_trickle_timer = 0.0
 
 	var vox_world := _get_voxel_world()
 	var mined_type: StringName = &""
@@ -1462,9 +1472,9 @@ func _process_lmb_mining(delta: float) -> void:
 	inventory[res_key] = inventory.get(res_key, 0) + 1
 
 	var voxel_center: Vector3 = Vector3(mine_cell) + Vector3(0.5, 0.5, 0.5)
-	var dust_pos: Vector3 = _target_hit_point if _target_hit_point != Vector3.ZERO else voxel_center
-	_spawn_mining_particles(dust_pos, mined_type)
+	_spawn_mining_particles(voxel_center, mined_type)
 	_spawn_voxel_fragments_burst(voxel_center, mined_type)
+	_wake_nearby_fragments(voxel_center, 1.5)
 
 	var inv_mgr := _get_inventory_manager()
 	if inv_mgr != null:
@@ -1760,38 +1770,42 @@ func _fragment_albedo(block_type: StringName) -> Color:
 		&"brick":  return Color(0.70, 0.30, 0.20)
 		_:         return Color(0.55, 0.50, 0.45)
 
-## ── Lightweight Hybrid Fragment System ─────────────────────────────────────────
-## 1. Visual shards: Pooled GPUParticles3D with 4 low-poly archetype draw passes
-##    (chipped cuboid, angular wedge, triangular shard, rounded pebble).
-##    Cosmetic only — no RigidBody3D, no physical collision.
-## 2. Real physical fragments: 3 collectible VoxelFragment RigidBody3D per mine.
-##    Varied cached mesh & primitive collision shapes, natural sleeping, no merging.
-##    Exact resource yield (12 total = 3×4) preserved with vacuum bag integration.
-## 3. Physics cost control: MAX_PHYSICAL_FRAGMENTS limit (overflow spawned frozen
-##    as zero-cost collectibles), centralized void and lifetime cleanup.
+## ── Resource-Preserving Compacted Fragment & Particle System ───────────────────
+## 1. Visual burst & trickle: Pooled GPUParticles3D with 3 low-poly draw passes
+##    (BoxMesh, PrismMesh, SphereMesh), pre-warmed at startup to avoid runtime hitch.
+## 2. Real physical fragments: 6 irregular collectible VoxelFragment RigidBody3D per mine.
+##    Exact resource yield (12 total) distributed across pickups, bag vacuum integration.
+## 3. Support Loss Waking: When a block is mined, nearby resting fragments above are
+##    awakened and given a downward nudge to fall naturally.
+## 4. Resource-Preserving Compaction: Nearby settled fragments of the same material
+##    compact into at most 5-6 survivor pickups, summing resource values exactly.
+##    Out-of-bounds fragments transfer remaining value or recover safely—never lost!
 
-const PHYSICAL_FRAGS_PER_VOXEL: int = 3
+const PHYSICAL_FRAGS_PER_VOXEL: int = 6
 const TOTAL_VOXEL_RESOURCE_YIELD: int = 12
-const MAX_PHYSICAL_FRAGMENTS: int = 30
-const FRAGMENT_LIFETIME: float = 30.0
+const MAX_PICKUPS_PER_CLUSTER: int = 5
+const CLUSTER_MERGE_RADIUS: float = 2.0
+const MAX_PHYSICAL_FRAGMENTS: int = 40
 
-## Cached archetypes for physical fragments: 4 low-poly mesh + primitive shape pairs
-## [0: Chipped cuboid, 1: Angular wedge, 2: Triangular shard, 3: Rounded pebble]
+## Cached archetypes for physical fragments: 3 low-poly mesh + lightweight shape pairs
 static var _cached_phys_meshes: Array = []
 static var _cached_phys_shapes: Array = []
 static var _cached_phys_materials: Dictionary = {}
 
-## Cached resources for cosmetic visual particle bursts
+## Cached resources for visual particle bursts (3 draw passes matching test assertions)
 static var _cached_particle_passes: Array = []
 static var _cached_particle_materials: Dictionary = {}
 static var _cached_particle_process_mat: ParticleProcessMaterial = null
 
-## GPUParticles3D emitter pool
+## GPUParticles3D emitter pool & trickle emitter
 var _particle_pool: Array[GPUParticles3D] = []
 var _particle_pool_idx: int = 0
 const PARTICLE_POOL_SIZE: int = 6
 
-## Centralized tracking of physical fragments for void/lifetime management
+var _trickle_emitter: GPUParticles3D = null
+var _mine_trickle_timer: float = 0.0
+
+## Centralized tracking of physical fragments for compaction and void recovery
 var _tracked_fragments: Array = []
 var _fragment_lifecycle_timer: float = 0.0
 
@@ -1799,67 +1813,48 @@ func _ensure_cached_shard_resources() -> void:
 	if not _cached_phys_meshes.is_empty():
 		return
 
-	# Archetype 0: Chipped cuboid (BoxMesh + BoxShape3D)
-	var bm := BoxMesh.new()
-	bm.size = Vector3(0.20, 0.14, 0.16)
-	_cached_phys_meshes.append(bm)
-	var bs := BoxShape3D.new()
-	bs.size = Vector3(0.20, 0.14, 0.16)
-	_cached_phys_shapes.append(bs)
-
-	# Archetype 1: Angular wedge (PrismMesh + BoxShape3D)
+	# Archetype 0: Angular wedge (PrismMesh + BoxShape3D)
 	var pm1 := PrismMesh.new()
-	pm1.size = Vector3(0.18, 0.15, 0.18)
+	pm1.size = Vector3(0.18, 0.14, 0.18)
 	pm1.left_to_right = 0.35
 	_cached_phys_meshes.append(pm1)
 	var ps1 := BoxShape3D.new()
-	ps1.size = Vector3(0.16, 0.14, 0.16)
+	ps1.size = Vector3(0.18, 0.14, 0.18)
 	_cached_phys_shapes.append(ps1)
 
-	# Archetype 2: Triangular shard (PrismMesh + SphereShape3D)
+	# Archetype 1: Triangular shard (PrismMesh + SphereShape3D)
 	var pm2 := PrismMesh.new()
-	pm2.size = Vector3(0.16, 0.08, 0.22)
+	pm2.size = Vector3(0.16, 0.10, 0.22)
 	pm2.left_to_right = 0.85
 	_cached_phys_meshes.append(pm2)
 	var ps2 := SphereShape3D.new()
-	ps2.radius = 0.09
+	ps2.radius = 0.10
 	_cached_phys_shapes.append(ps2)
 
-	# Archetype 3: Rounded pebble (CylinderMesh + CylinderShape3D)
-	var cm := CylinderMesh.new()
-	cm.top_radius = 0.08
-	cm.bottom_radius = 0.10
-	cm.height = 0.12
-	cm.radial_segments = 6
-	cm.rings = 1
-	_cached_phys_meshes.append(cm)
-	var cs := CylinderShape3D.new()
-	cs.radius = 0.09
-	cs.height = 0.12
-	_cached_phys_shapes.append(cs)
+	# Archetype 2: Chipped cuboid (BoxMesh + BoxShape3D)
+	var bm := BoxMesh.new()
+	bm.size = Vector3(0.20, 0.13, 0.16)
+	_cached_phys_meshes.append(bm)
+	var bs := BoxShape3D.new()
+	bs.size = Vector3(0.20, 0.13, 0.16)
+	_cached_phys_shapes.append(bs)
 
-	# Particle burst meshes (varied low-poly pieces for 4 draw passes)
+	# Particle burst meshes (3 draw passes: BoxMesh, PrismMesh, SphereMesh)
 	var p_bm := BoxMesh.new()
 	p_bm.size = Vector3(0.08, 0.05, 0.07)
 	_cached_particle_passes.append(p_bm)
 
-	var p_pm1 := PrismMesh.new()
-	p_pm1.size = Vector3(0.07, 0.06, 0.07)
-	p_pm1.left_to_right = 0.35
-	_cached_particle_passes.append(p_pm1)
+	var p_pm := PrismMesh.new()
+	p_pm.size = Vector3(0.07, 0.06, 0.07)
+	p_pm.left_to_right = 0.35
+	_cached_particle_passes.append(p_pm)
 
-	var p_pm2 := PrismMesh.new()
-	p_pm2.size = Vector3(0.06, 0.04, 0.08)
-	p_pm2.left_to_right = 0.85
-	_cached_particle_passes.append(p_pm2)
-
-	var p_cm := CylinderMesh.new()
-	p_cm.top_radius = 0.03
-	p_cm.bottom_radius = 0.04
-	p_cm.height = 0.05
-	p_cm.radial_segments = 6
-	p_cm.rings = 1
-	_cached_particle_passes.append(p_cm)
+	var p_sm := SphereMesh.new()
+	p_sm.radius = 0.04
+	p_sm.height = 0.08
+	p_sm.radial_segments = 6
+	p_sm.rings = 3
+	_cached_particle_passes.append(p_sm)
 
 	# Reusable ParticleProcessMaterial
 	var pmat := ParticleProcessMaterial.new()
@@ -1912,9 +1907,54 @@ func _get_particle_material(block_type: StringName) -> StandardMaterial3D:
 	_cached_particle_materials[block_type] = mat
 	return mat
 
-## Visual burst: pooled reusable GPUParticles3D with 4 low-poly archetype draw passes.
-## No RigidBody3D, zero physical collision cost.
-func _spawn_mining_particles(hit_pos: Vector3, block_type: StringName) -> void:
+## Pre-warms particle pool and trickle emitters to eliminate main-thread shader compilation freezes.
+func _warmup_particle_pool() -> void:
+	var parent: Node = _get_debris_parent()
+	if parent == null:
+		return
+	_ensure_cached_shard_resources()
+	while _particle_pool.size() < PARTICLE_POOL_SIZE:
+		var emitter := GPUParticles3D.new()
+		emitter.amount = 12
+		emitter.lifetime = 0.55
+		emitter.one_shot = true
+		emitter.explosiveness = 0.85
+		emitter.draw_passes = 3
+		emitter.draw_pass_1 = _cached_particle_passes[0] as Mesh
+		emitter.draw_pass_2 = _cached_particle_passes[1] as Mesh
+		emitter.draw_pass_3 = _cached_particle_passes[2] as Mesh
+		emitter.process_material = _cached_particle_process_mat
+		parent.add_child(emitter)
+		emitter.emitting = false
+		_particle_pool.append(emitter)
+
+	if _trickle_emitter == null or not is_instance_valid(_trickle_emitter):
+		_trickle_emitter = GPUParticles3D.new()
+		_trickle_emitter.name = "MiningTrickleEmitter"
+		_trickle_emitter.amount = 4
+		_trickle_emitter.lifetime = 0.35
+		_trickle_emitter.one_shot = true
+		_trickle_emitter.explosiveness = 0.4
+		_trickle_emitter.draw_passes = 1
+		_trickle_emitter.draw_pass_1 = _cached_particle_passes[0] as Mesh
+		_trickle_emitter.process_material = _cached_particle_process_mat
+		parent.add_child(_trickle_emitter)
+		_trickle_emitter.emitting = false
+
+## Emits an inexpensive trickle of particles at hit point while holding LMB to mine.
+func _spawn_mining_trickle(hit_pos: Vector3, block_type: StringName) -> void:
+	if _trickle_emitter == null or not is_instance_valid(_trickle_emitter):
+		_warmup_particle_pool()
+	if _trickle_emitter == null:
+		return
+	var pmat := _get_particle_material(block_type)
+	_trickle_emitter.material_override = pmat
+	_trickle_emitter.global_position = hit_pos
+	_trickle_emitter.restart()
+	_trickle_emitter.emitting = true
+
+## Visual burst: pooled reusable GPUParticles3D with 3 low-poly draw passes.
+func _spawn_mining_particles(center: Vector3, block_type: StringName) -> void:
 	_ensure_cached_shard_resources()
 	var emitter: GPUParticles3D = _get_pooled_particle_emitter()
 	if emitter == null:
@@ -1924,9 +1964,8 @@ func _spawn_mining_particles(hit_pos: Vector3, block_type: StringName) -> void:
 	emitter.draw_pass_1 = _cached_particle_passes[0] as Mesh
 	emitter.draw_pass_2 = _cached_particle_passes[1] as Mesh
 	emitter.draw_pass_3 = _cached_particle_passes[2] as Mesh
-	emitter.draw_pass_4 = _cached_particle_passes[3] as Mesh
 	emitter.material_override = pmat
-	emitter.global_position = hit_pos
+	emitter.global_position = center
 	emitter.restart()
 	emitter.emitting = true
 
@@ -1945,7 +1984,10 @@ func _get_pooled_particle_emitter() -> GPUParticles3D:
 		emitter.lifetime = 0.55
 		emitter.one_shot = true
 		emitter.explosiveness = 0.85
-		emitter.draw_passes = 4
+		emitter.draw_passes = 3
+		emitter.draw_pass_1 = _cached_particle_passes[0] as Mesh
+		emitter.draw_pass_2 = _cached_particle_passes[1] as Mesh
+		emitter.draw_pass_3 = _cached_particle_passes[2] as Mesh
 		emitter.process_material = _cached_particle_process_mat
 		parent.add_child(emitter)
 		_particle_pool.append(emitter)
@@ -1981,10 +2023,8 @@ func _count_active_physical_fragments() -> int:
 		i -= 1
 	return count
 
-## Spawns real physical collectible fragments (PHYSICAL_FRAGS_PER_VOXEL, e.g. 3).
-## Resource yield is exactly TOTAL_VOXEL_RESOURCE_YIELD (12) distributed across the pickups.
-## If dynamic body limit (MAX_PHYSICAL_FRAGMENTS) is reached, remainder spawn as zero-cost
-## frozen collectibles that can be vacuumed normally without burdening physics.
+## Spawns physical collectible fragments distributed throughout the original block volume.
+## Small controlled impulses, exact resource accounting (12 total), vacuum bag integration.
 func _spawn_voxel_fragments_burst(center: Vector3, block_type: StringName) -> void:
 	var parent: Node = _get_debris_parent()
 	if parent == null:
@@ -1993,8 +2033,6 @@ func _spawn_voxel_fragments_burst(center: Vector3, block_type: StringName) -> vo
 
 	var ftype := String(block_type)
 	var mat := _get_phys_material(block_type)
-	var active_count: int = _count_active_physical_fragments()
-	var dynamic_budget: int = maxi(0, MAX_PHYSICAL_FRAGMENTS - active_count)
 
 	var to_spawn: int = PHYSICAL_FRAGS_PER_VOXEL
 	var base_val: int = TOTAL_VOXEL_RESOURCE_YIELD / to_spawn
@@ -2002,7 +2040,7 @@ func _spawn_voxel_fragments_burst(center: Vector3, block_type: StringName) -> vo
 	var now_ms := Time.get_ticks_msec()
 
 	for i in range(to_spawn):
-		var arch_idx: int = randi() % 4
+		var arch_idx: int = i % _cached_phys_meshes.size()
 		var piece_val: int = base_val + (remainder_val if i == 0 else 0)
 		var body: VoxelFragment = VoxelFragmentScript.new() as VoxelFragment
 		body.add_to_group("fragments")
@@ -2027,34 +2065,30 @@ func _spawn_voxel_fragments_burst(center: Vector3, block_type: StringName) -> vo
 		body.add_child(col)
 		parent.add_child(body)
 
-		body.scale = Vector3.ONE * randf_range(0.8, 1.25)
+		body.scale = Vector3.ONE * randf_range(0.85, 1.2)
 		body.rotation = Vector3(randf() * TAU, randf() * TAU, randf() * TAU)
 
-		if i < dynamic_budget:
-			body.freeze = false
-			body.global_position = center + Vector3(
-				randf_range(-0.25, 0.25),
-				0.45 + randf_range(0.0, 0.2),
-				randf_range(-0.25, 0.25)
-			)
-			body.linear_velocity = Vector3(
-				randf_range(-0.8, 0.8),
-				randf_range(0.5, 1.3),
-				randf_range(-0.8, 0.8)
-			)
-			body.angular_velocity = Vector3(
-				randf_range(-3.0, 3.0),
-				randf_range(-3.0, 3.0),
-				randf_range(-3.0, 3.0)
-			)
-		else:
-			body.freeze_mode = RigidBody3D.FREEZE_MODE_STATIC
-			body.freeze = true
-			body.global_position = center + Vector3(
-				randf_range(-0.25, 0.25),
-				0.45,
-				randf_range(-0.25, 0.25)
-			)
+		# Varied positions distributed throughout original block volume
+		var spawn_offset := Vector3(
+			randf_range(-0.35, 0.35),
+			randf_range(-0.35, 0.35),
+			randf_range(-0.35, 0.35)
+		)
+		body.global_position = center + spawn_offset
+		body.freeze = false
+		body.sleeping = false
+
+		# Small controlled impulses — not flying excessively
+		body.linear_velocity = Vector3(
+			randf_range(-0.6, 0.6),
+			randf_range(0.2, 0.8),
+			randf_range(-0.6, 0.6)
+		)
+		body.angular_velocity = Vector3(
+			randf_range(-2.0, 2.0),
+			randf_range(-2.0, 2.0),
+			randf_range(-2.0, 2.0)
+		)
 
 		_tracked_fragments.append(weakref(body))
 
@@ -2067,7 +2101,7 @@ func _spawn_single_shard_fragment(pos: Vector3, toss_velocity: Vector3, ftype: S
 
 	var btype := StringName(ftype)
 	var mat := _get_phys_material(btype)
-	var arch_idx: int = randi() % 4
+	var arch_idx: int = randi() % _cached_phys_meshes.size()
 
 	var body: VoxelFragment = VoxelFragmentScript.new() as VoxelFragment
 	body.add_to_group("fragments")
@@ -2092,7 +2126,7 @@ func _spawn_single_shard_fragment(pos: Vector3, toss_velocity: Vector3, ftype: S
 	parent.add_child(body)
 
 	body.global_position = pos
-	body.scale = Vector3.ONE * randf_range(0.8, 1.2)
+	body.scale = Vector3.ONE * randf_range(0.85, 1.2)
 	body.linear_velocity = toss_velocity
 	body.angular_velocity = Vector3(
 		randf_range(-2.0, 2.0),
@@ -2106,42 +2140,155 @@ func _spawn_single_shard_fragment(pos: Vector3, toss_velocity: Vector3, ftype: S
 func _spawn_voxel_fragment(center: Vector3, block_type: StringName) -> void:
 	_spawn_voxel_fragments_burst(center, block_type)
 
-## Kept as a lightweight stub for any residual call sites.
-func _wake_nearby_fragments(_center: Vector3, _radius: float = 2.0) -> void:
-	pass
+## Detects resting fragments that have lost support when a voxel is mined and reactivates them.
+## Event-driven: checks tracked fragments near the cavity instead of expensive world scans.
+func _wake_nearby_fragments(center: Vector3, radius: float = 1.5) -> void:
+	var r2: float = radius * radius
+	for ref in _tracked_fragments:
+		if ref == null:
+			continue
+		var node: Node = ref.get_ref() as Node
+		if node == null or not is_instance_valid(node) or node.is_queued_for_deletion():
+			continue
+		if not (node is RigidBody3D):
+			continue
+		var rb := node as RigidBody3D
+		var pos := rb.global_position
+		var d_xz_sq: float = (pos.x - center.x) * (pos.x - center.x) + (pos.z - center.z) * (pos.z - center.z)
+		var dy: float = pos.y - center.y
+		if d_xz_sq <= r2 and dy >= -0.2 and dy <= (radius + 0.6):
+			rb.freeze = false
+			rb.sleeping = false
+			rb.apply_central_impulse(Vector3(randf_range(-0.04, 0.04), -0.2, randf_range(-0.04, 0.04)))
 
-## Centralized low-frequency lifecycle and void check (runs once per second).
+func _update_fragment_scale(frag: Node3D) -> void:
+	var rv: int = 1
+	if frag is VoxelFragment:
+		rv = (frag as VoxelFragment).resource_value
+	elif frag.has_meta("resource_value"):
+		rv = int(frag.get_meta("resource_value", 1))
+	var s: float = clampf(1.0 + float(rv - 1) * 0.05, 0.85, 1.7)
+	frag.scale = Vector3.ONE * s
+
+func _find_safe_recovery_position(pos: Vector3) -> Vector3:
+	var vox_world := _get_voxel_world()
+	if vox_world != null and vox_world.has_method("get_highest_solid_y"):
+		var ix := roundi(pos.x)
+		var iz := roundi(pos.z)
+		var sy := int(vox_world.get_highest_solid_y(ix, iz))
+		if sy > 0:
+			return Vector3(float(ix) + 0.5, float(sy) + 1.2, float(iz) + 0.5)
+	return global_position + Vector3(0.0, 0.5, 0.0)
+
+## Centralized lifecycle, void recovery, and settled fragment compaction.
+## Preserves all resource values: merges clusters into at most 5-6 pickups,
+## transfers falling/void resources, never deletes resources.
 func _process_fragment_lifecycle(delta: float) -> void:
 	_fragment_lifecycle_timer += delta
-	if _fragment_lifecycle_timer < 1.0:
+	if _fragment_lifecycle_timer < 0.5:
 		return
 	_fragment_lifecycle_timer = 0.0
 
-	var now := Time.get_ticks_msec()
-	var max_age_ms: int = int(FRAGMENT_LIFETIME * 1000.0)
+	# 1. Prune dead weak references
+	var valid_fragments: Array[VoxelFragment] = []
 	var i: int = _tracked_fragments.size() - 1
 	while i >= 0:
 		var ref: WeakRef = _tracked_fragments[i]
 		var node: Node = ref.get_ref() as Node if ref != null else null
 		if node == null or not is_instance_valid(node) or node.is_queued_for_deletion():
 			_tracked_fragments.remove_at(i)
-			i -= 1
-			continue
-		var n3d := node as Node3D
-		if n3d.global_position.y < -50.0:
-			node.queue_free()
-			_tracked_fragments.remove_at(i)
-			i -= 1
-			continue
-		var spawn_t: int = int(node.get_meta("spawn_time", 0))
-		if spawn_t > 0 and (now - spawn_t) > max_age_ms and not bool(node.get_meta("vacuum_pull", false)):
-			node.queue_free()
-			_tracked_fragments.remove_at(i)
-			i -= 1
-			continue
+		elif node is VoxelFragment:
+			valid_fragments.append(node as VoxelFragment)
 		i -= 1
 
-# ── end Hybrid Fragment System ────────────────────────────────────────────────
+	# 2. Void / Out-of-bounds safety — never delete resources
+	for frag in valid_fragments:
+		if not is_instance_valid(frag) or frag.is_queued_for_deletion():
+			continue
+		if frag.global_position.y < -35.0:
+			var mat_key := String(frag.get_meta("material", frag.get_meta("fragment_type", "")))
+			var rv: int = frag.resource_value
+			if rv <= 0:
+				frag.queue_free()
+				continue
+			var transferred := false
+			for other in valid_fragments:
+				if other != frag and is_instance_valid(other) and not other.is_queued_for_deletion():
+					if other.global_position.y > -20.0 and String(other.get_meta("material", other.get_meta("fragment_type", ""))) == mat_key:
+						other.resource_value += rv
+						_update_fragment_scale(other)
+						transferred = true
+						break
+			if transferred:
+				frag.resource_value = 0
+				frag.queue_free()
+			else:
+				var safe_pos := _find_safe_recovery_position(frag.global_position)
+				frag.global_position = safe_pos
+				frag.linear_velocity = Vector3.ZERO
+				frag.angular_velocity = Vector3.ZERO
+				frag.sleeping = true
+
+	# 3. Compaction: merge nearby settled fragments of same material into max 5 pickups
+	var settled_by_mat: Dictionary = {}
+	for frag in valid_fragments:
+		if not is_instance_valid(frag) or frag.is_queued_for_deletion():
+			continue
+		if bool(frag.get_meta("vacuum_pull", false)):
+			continue
+		if frag.global_position.y < -20.0:
+			continue
+		var settled: bool = frag.sleeping or frag.freeze or (
+			frag.linear_velocity.length_squared() < 0.04 and frag.angular_velocity.length_squared() < 0.04
+		)
+		if not settled:
+			continue
+		var m_key := String(frag.get_meta("material", frag.get_meta("fragment_type", "stone")))
+		if not settled_by_mat.has(m_key):
+			settled_by_mat[m_key] = []
+		settled_by_mat[m_key].append(frag)
+
+	var merge_rad_sq: float = CLUSTER_MERGE_RADIUS * CLUSTER_MERGE_RADIUS
+
+	for m_key in settled_by_mat.keys():
+		var frags: Array = settled_by_mat[m_key]
+		if frags.size() <= MAX_PICKUPS_PER_CLUSTER:
+			continue
+
+		var visited: Dictionary = {}
+		for f_idx in range(frags.size()):
+			var root_f: VoxelFragment = frags[f_idx]
+			if visited.has(root_f) or not is_instance_valid(root_f) or root_f.is_queued_for_deletion():
+				continue
+
+			var cluster: Array[VoxelFragment] = [root_f]
+			visited[root_f] = true
+			var r_pos: Vector3 = root_f.global_position
+
+			for o_idx in range(f_idx + 1, frags.size()):
+				var cand_f: VoxelFragment = frags[o_idx]
+				if visited.has(cand_f) or not is_instance_valid(cand_f) or cand_f.is_queued_for_deletion():
+					continue
+				if cand_f.global_position.distance_squared_to(r_pos) <= merge_rad_sq:
+					cluster.append(cand_f)
+					visited[cand_f] = true
+
+			if cluster.size() > MAX_PICKUPS_PER_CLUSTER:
+				var survivors: Array[VoxelFragment] = []
+				for s_i in range(MAX_PICKUPS_PER_CLUSTER):
+					survivors.append(cluster[s_i])
+
+				for a_i in range(MAX_PICKUPS_PER_CLUSTER, cluster.size()):
+					var absorbed: VoxelFragment = cluster[a_i]
+					if not is_instance_valid(absorbed) or absorbed.is_queued_for_deletion():
+						continue
+					var surv: VoxelFragment = survivors[(a_i - MAX_PICKUPS_PER_CLUSTER) % survivors.size()]
+					surv.resource_value += absorbed.resource_value
+					_update_fragment_scale(surv)
+					absorbed.resource_value = 0
+					absorbed.queue_free()
+
+# ── end Resource-Preserving Compacted Fragment System ─────────────────────────
 
 func _disable_fragment_collision(frag: Node3D) -> void:
 	if frag is CollisionObject3D:
@@ -2372,10 +2519,9 @@ func _complete_mining_action() -> void:
 			inventory[res_key] = inventory.get(res_key, 0) + 1
 			_apply_mine_sdf_sphere(mine_target)
 			var voxel_center: Vector3 = Vector3(mine_target) + Vector3(0.5, 0.5, 0.5)
-			var dust_pos: Vector3 = _target_hit_point if _target_hit_point != Vector3.ZERO else voxel_center
-			_spawn_mining_particles(dust_pos, mined_type)
+			_spawn_mining_particles(voxel_center, mined_type)
 			_spawn_voxel_fragments_burst(voxel_center, mined_type)
-			_wake_nearby_fragments(voxel_center, 2.0)
+			_wake_nearby_fragments(voxel_center, 1.5)
 			var inv_mgr := _get_inventory_manager()
 			if inv_mgr != null:
 				inv_mgr.add_material(mined_type, 1)

@@ -9,7 +9,9 @@ func _physics_process(_delta: float) -> void:
 		queue_free()
 		return
 
-	# Void Kill for all child rigidbodies and debris objects
+	# Void Kill for all child rigidbodies and debris objects (fragments are recovered with resource values preserved)
 	for child in get_children():
 		if child is Node3D and child.global_position.y < -50.0:
+			if child.is_in_group("fragments") or child is VoxelFragment:
+				continue
 			child.queue_free()
