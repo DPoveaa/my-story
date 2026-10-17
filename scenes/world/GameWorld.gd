@@ -8,6 +8,11 @@ extends Node3D
 
 const PlayerControllerScript = preload("res://scenes/player/PlayerController.gd")
 const MortarOverlayRendererScript = preload("res://systems/rendering/MortarOverlayRenderer.gd")
+const VoxelWorldScript = preload("res://systems/terrain/VoxelWorld.gd")
+const AStarGridManagerScript = preload("res://systems/terrain/AStarGridManager.gd")
+
+enum GameMode { SURVIVAL, CREATIVE }
+@export var current_game_mode: GameMode = GameMode.SURVIVAL
 
 @onready var grid_renderer: GridRenderer = $GridRenderer
 @onready var preview_ghost: PreviewGhost = $PreviewGhost
@@ -19,14 +24,39 @@ const MortarOverlayRendererScript = preload("res://systems/rendering/MortarOverl
 
 var grid_system: Node
 var stability_system: Node
+var voxel_world: VoxelWorld = null
+## AStar3D grid pathfinder — replaces the unreliable NavigationRegion3D for voxel terrain.
+var astar_grid: Node = null
+var astar_manager: Node:
+	get: return astar_grid
+	set(val): astar_grid = val
 var _debug_camera_active: bool = false
 var _mortar_overlay_renderer: Node3D = null
+## Large XZ shift each session so the same generator yields a fresh landscape without reseeding.
+var _session_spawn_xz: Vector2 = Vector2(0.5, 0.5)
 
 func _ready() -> void:
 	if grid_system == null and has_node("/root/GridSystem"):
 		grid_system = get_node("/root/GridSystem")
 	if stability_system == null and has_node("/root/StabilitySystem"):
 		stability_system = get_node("/root/StabilitySystem")
+
+	randomize()
+	_session_spawn_xz = Vector2(
+		float(randi_range(-10000, 10000)) + 0.5,
+		float(randi_range(-10000, 10000)) + 0.5
+	)
+
+	# Instantiate 3D Chunked Voxel World
+	voxel_world = VoxelWorldScript.new()
+	voxel_world.name = "VoxelWorld"
+	voxel_world.seed_value = 1337
+	add_child(voxel_world)
+	# NOTE: do NOT call update_loaded_chunks or get_spawn_position here.
+	# VoxelChunk StaticBody3D nodes added via add_child() during _ready() have their
+	# CollisionShape3Ds deferred to PhysicsServer3D. Placing the player in this same
+	# _ready() call means no collision is registered yet — player falls through terrain.
+	# Defer all player placement to after the first physics frame (see _spawn_player_on_terrain).
 
 	# Spawn mortar overlay renderer as a child so face visuals work in-game.
 	_mortar_overlay_renderer = MortarOverlayRendererScript.new()
@@ -35,21 +65,37 @@ func _ready() -> void:
 	add_child(_mortar_overlay_renderer)
 
 	if stability_system != null:
+		stability_system.terrain_generator = voxel_world
 		stability_system.require_joints_for_lateral_support = true
+
+	# Wire Survival Objectives
+	if has_node("/root/SurvivalObjectiveManager"):
+		var obj_mgr = get_node("/root/SurvivalObjectiveManager")
+		obj_mgr.is_active = (current_game_mode == GameMode.SURVIVAL)
+		if voxel_world != null and not voxel_world.voxel_mined.is_connected(obj_mgr.on_voxel_mined):
+			voxel_world.voxel_mined.connect(obj_mgr.on_voxel_mined)
 
 	# Wire HUD
 	if build_hud != null:
 		build_hud.grid_system = grid_system
 		build_hud.orchestrator = collapse_orchestrator
 		build_hud.player = player
+		if build_hud.has_method("bind_voxel_world"):
+			build_hud.bind_voxel_world(voxel_world)
+		else:
+			build_hud.voxel_world = voxel_world
 
-	# Wire Player (primary gameplay controller)
+	# Wire Player (primary gameplay controller).
+	# Spawn on physics-validated safe surface AFTER terrain collision is committed to PhysicsServer3D.
+	# This is done via an async deferred call so VoxelChunk StaticBody3Ds are fully registered.
 	if player != null:
+		player.game_mode = current_game_mode
 		player.grid_system = grid_system
 		player.stability_system = stability_system
 		player.orchestrator = collapse_orchestrator
 		player.preview_ghost = preview_ghost
 		player.build_hud = build_hud
+
 		player.block_type_changed.connect(build_hud.set_selected_block_type)
 		player.state_changed.connect(build_hud.set_player_state)
 		if player.has_signal("carried_block_changed"):
@@ -61,8 +107,21 @@ func _ready() -> void:
 		if player.has_signal("raw_materials_changed"):
 			player.raw_materials_changed.connect(build_hud.set_raw_materials)
 		build_hud.set_selected_block_type(player.get_selected_type())
-		build_hud.set_player_state(player.current_state)
+		build_hud.set_player_mode("Survival" if current_game_mode == GameMode.SURVIVAL else "Creative")
 		build_hud.set_cement(player.get_cement_count(), player.max_cement)
+
+		# Attach viewer to player so Zylann VoxelTerrain streams around player location
+		if voxel_world.has_method("attach_viewer_to_player"):
+			voxel_world.attach_viewer_to_player(player)
+
+		if player.has_method("suspend_physics"):
+			player.suspend_physics()
+		# Hold just above the island band near the randomized session column.
+		# Y stays within collision viewer range (~96 vx); XZ is massively shifted.
+		player.global_position = Vector3(_session_spawn_xz.x, 90.0, _session_spawn_xz.y)
+		if build_hud != null and build_hud.has_method("set_loading_overlay"):
+			build_hud.set_loading_overlay(true, "Loading terrain…")
+		_spawn_player_on_terrain.call_deferred()
 
 	# Wire BuildCamera as secondary/debug tool
 	if build_camera != null:
@@ -76,8 +135,90 @@ func _ready() -> void:
 			build_camera.block_type_changed.connect(build_hud.set_selected_block_type)
 			build_hud.set_selected_block_type(build_camera.get_selected_type())
 
-	# Build an initial demonstration structure so the player immediately sees content
-	spawn_test_tower(Vector3i(0, 0, 0))
+	_setup_astar_grid()
+
+## Async: hold player still with loading UI until a validated top-surface spawn exists.
+func _spawn_player_on_terrain() -> void:
+	if player == null or voxel_world == null:
+		return
+
+	# Snap the session column onto nearby procedural land before streaming collision.
+	if voxel_world.has_method("find_nearby_land_column"):
+		var land: Vector2 = voxel_world.find_nearby_land_column(_session_spawn_xz.x, _session_spawn_xz.y, 256)
+		if land != Vector2.ZERO:
+			_session_spawn_xz = land
+
+	var hold := Vector3(_session_spawn_xz.x, 90.0, _session_spawn_xz.y)
+	player.global_position = hold
+	if player.has_method("suspend_physics"):
+		player.suspend_physics()
+	if build_hud != null and build_hud.has_method("set_loading_overlay"):
+		build_hud.set_loading_overlay(true, "Loading terrain…")
+
+	# Park viewers at spawn so streaming prioritizes the landing column.
+	if voxel_world.has_method("attach_viewer_to_player"):
+		voxel_world.attach_viewer_to_player(player)
+
+	var loaded_ok: bool = false
+	var on_load_status := func(message: String) -> void:
+		if build_hud != null and build_hud.has_method("set_loading_overlay"):
+			build_hud.set_loading_overlay(true, message)
+	if voxel_world.has_signal("terrain_loading_status"):
+		voxel_world.terrain_loading_status.connect(on_load_status)
+	var probe := Vector3(_session_spawn_xz.x, 56.0, _session_spawn_xz.y)
+	if voxel_world.has_method("wait_for_terrain_at"):
+		loaded_ok = await voxel_world.wait_for_terrain_at(probe)
+	else:
+		await voxel_world.force_sync_spawn_chunks(floori(_session_spawn_xz.x) / 16, floori(_session_spawn_xz.y) / 16)
+		loaded_ok = true
+	if voxel_world.has_signal("terrain_loading_status") and voxel_world.terrain_loading_status.is_connected(on_load_status):
+		voxel_world.terrain_loading_status.disconnect(on_load_status)
+
+	var safe_spawn := Vector3.ZERO
+	if loaded_ok:
+		await get_tree().physics_frame
+		var t_spawn_start: int = Time.get_ticks_msec()
+		if voxel_world.has_method("try_find_safe_spawn"):
+			safe_spawn = await voxel_world.try_find_safe_spawn(16, player)
+		elif voxel_world.has_method("get_spawn_position_raycast"):
+			safe_spawn = voxel_world.get_spawn_position_raycast(_session_spawn_xz.x, _session_spawn_xz.y)
+		var t_spawn_elapsed: int = Time.get_ticks_msec() - t_spawn_start
+		print("[StartupTiming] Spawn search took: %d ms, result: %s" % [t_spawn_elapsed, safe_spawn])
+
+	# try_find_safe_spawn already validates physics — no second verify pass needed.
+	var verified: bool = safe_spawn != Vector3.ZERO
+
+	if not loaded_ok or safe_spawn == Vector3.ZERO or not verified:
+		if build_hud != null and build_hud.has_method("set_loading_overlay"):
+			build_hud.set_loading_overlay(true, "Terrain load failed — press Home to retry or Esc to quit")
+		if player.has_method("suspend_physics"):
+			player.suspend_physics()
+		return
+
+	# Initialize A* centred on the confirmed spawn during the loading phase.
+	# Keep loading overlay visible until the nearby navigation graph is usable.
+	if astar_grid != null:
+		if build_hud != null and build_hud.has_method("set_loading_overlay"):
+			build_hud.set_loading_overlay(true, "Building navigation graph…")
+		astar_grid.initialize_once(safe_spawn)
+		if astar_grid.has_method("ensure_nearby_graph_ready"):
+			await astar_grid.ensure_nearby_graph_ready(safe_spawn)
+
+	# Confirmed valid spawn surface, collision, and initial navigation!
+	if player.has_method("resume_at_spawn"):
+		player.resume_at_spawn(safe_spawn)
+	else:
+		player.global_position = safe_spawn
+		if player.has_method("resume_physics"):
+			player.resume_physics()
+
+	if build_hud != null and build_hud.has_method("set_loading_overlay"):
+		build_hud.set_loading_overlay(false)
+
+func _process(_delta: float) -> void:
+	## Feed the player's current position to AStarGridManager so the graph stays centred on them.
+	if astar_grid != null and player != null and is_instance_valid(player):
+		astar_grid.update_center(player.global_position)
 
 func _unhandled_input(event: InputEvent) -> void:
 	if build_hud != null and build_hud.has_method("is_modal_open") and build_hud.is_modal_open():
@@ -86,13 +227,6 @@ func _unhandled_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		if event.is_action_pressed(&"debug_camera") or event.keycode == KEY_F1:
 			toggle_debug_camera()
-		elif event.is_action_pressed(&"save_blueprint") or event.keycode == KEY_K:
-			if build_hud != null and build_hud.has_method("open_save_blueprint_dialog"):
-				build_hud.open_save_blueprint_dialog()
-		elif event.is_action_pressed(&"load_blueprint") or event.keycode == KEY_L:
-			if build_hud != null and build_hud.has_method("open_load_blueprint_dialog"):
-				var anchor: Vector3i = player.target_place_cell if (player != null and player.has_target) else Vector3i.ZERO
-				build_hud.open_load_blueprint_dialog(anchor)
 		elif event.keycode == KEY_T:
 			spawn_test_tower(Vector3i(0, 0, 0))
 		elif event.keycode == KEY_B:
@@ -101,6 +235,11 @@ func _unhandled_input(event: InputEvent) -> void:
 			spawn_test_arch(Vector3i(6, 0, 0))
 		elif event.keycode == KEY_C:
 			clear_world()
+		elif event.keycode == KEY_HOME or event.physical_keycode == KEY_HOME:
+			if player != null and player.has_method("respawn_home"):
+				player.respawn_home()
+		elif event.keycode == KEY_ESCAPE:
+			get_tree().quit()
 
 ## Toggles the development free-flight camera without corrupting player state.
 func toggle_debug_camera() -> void:
@@ -121,10 +260,15 @@ func toggle_debug_camera() -> void:
 			build_hud.set_player_state(player.current_state)
 
 ## Spawns a tall test tower with an overhanging observation platform.
-## Demonstrates vertical support and dramatic collapse when base blocks are destroyed.
+## Automatically calculates natural surface Y coordinate if origin.y is 0.
 func spawn_test_tower(origin: Vector3i = Vector3i.ZERO) -> void:
 	if grid_system == null:
 		return
+
+	if origin.y == 0 and voxel_world != null:
+		var spawn_pos := voxel_world.get_spawn_position(origin.x, origin.z)
+		if spawn_pos != Vector3.ZERO:
+			origin.y = int(floor(spawn_pos.y - 1.2))
 
 	var placed: Array[Vector3i] = []
 	# 2x2 Pillar, 7 blocks tall
@@ -156,10 +300,14 @@ func spawn_test_tower(origin: Vector3i = Vector3i.ZERO) -> void:
 	_bond_preset_cells(placed)
 
 ## Spawns a bridge between two pillars.
-## Demonstrates lateral support propagation: horizontal walkway supported by pillars.
 func spawn_test_bridge(origin: Vector3i = Vector3i.ZERO) -> void:
 	if grid_system == null:
 		return
+
+	if origin.y == 0 and voxel_world != null:
+		var spawn_pos := voxel_world.get_spawn_position(origin.x, origin.z)
+		if spawn_pos != Vector3.ZERO:
+			origin.y = int(floor(spawn_pos.y - 1.2))
 
 	var placed: Array[Vector3i] = []
 	# Left Pillar (height 5)
@@ -186,6 +334,11 @@ func spawn_test_bridge(origin: Vector3i = Vector3i.ZERO) -> void:
 func spawn_test_arch(origin: Vector3i = Vector3i.ZERO) -> void:
 	if grid_system == null:
 		return
+
+	if origin.y == 0 and voxel_world != null:
+		var spawn_pos := voxel_world.get_spawn_position(origin.x, origin.z)
+		if spawn_pos != Vector3.ZERO:
+			origin.y = int(floor(spawn_pos.y - 1.2))
 
 	var placed: Array[Vector3i] = []
 	# Left column
@@ -229,3 +382,44 @@ func clear_world() -> void:
 		grid_system.clear()
 	if collapse_orchestrator != null:
 		collapse_orchestrator.clear_all_debris()
+
+# ==============================================================================
+# ASTAR GRID PATHFINDING  (replaces failed NavigationRegion3D / NavigationAgent3D)
+# ==============================================================================
+
+func _setup_astar_grid() -> void:
+	astar_grid = AStarGridManagerScript.new()
+	astar_grid.name = "AStarGridManager"
+	add_child(astar_grid)
+
+	# Wire VoxelWorld terrain edits so the graph rebuilds when blocks are mined
+	if voxel_world != null:
+		if not voxel_world.voxel_mined.is_connected(astar_grid._on_voxel_changed):
+			voxel_world.voxel_mined.connect(astar_grid._on_voxel_changed)
+
+	# Wire GridSystem block events so the graph rebuilds when player-placed blocks change
+	if grid_system != null:
+		if grid_system.has_signal("block_placed"):
+			grid_system.block_placed.connect(
+				func(cell: Vector3i, _data: Variant = null) -> void: astar_grid.notify_block_changed(cell)
+			)
+		if grid_system.has_signal("block_removed"):
+			grid_system.block_removed.connect(
+				func(cell: Vector3i, _data: Variant = null) -> void: astar_grid.notify_block_changed(cell)
+			)
+		if grid_system.has_signal("blocks_removed_batch"):
+			grid_system.blocks_removed_batch.connect(
+				func(cells: Array, _data_map: Dictionary = {}) -> void:
+					if astar_grid.has_method("notify_blocks_changed"):
+						astar_grid.notify_blocks_changed(cells)
+					else:
+						for c in cells:
+							astar_grid.notify_block_changed(c)
+			)
+		if grid_system.has_signal("grid_cleared"):
+			grid_system.grid_cleared.connect(
+				func() -> void: astar_grid.rebuild_graph()
+			)
+
+	# Initial graph built around origin — will shift to player after spawn
+	astar_grid.setup(voxel_world)

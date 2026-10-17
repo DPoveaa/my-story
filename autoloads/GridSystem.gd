@@ -14,8 +14,8 @@ signal grid_cleared()
 
 ## Minimum Y coordinate allowed for block placement (default: 0 = ground level)
 @export var min_y: int = 0
-## Maximum coordinate bounds for sanity limits (can be expanded)
-@export var max_coord_bound: int = 256
+## Maximum coordinate bounds for sanity limits (supports far randomized spawn offsets)
+@export var max_coord_bound: int = 100000
 
 ## Sparse dictionary storing occupied cells: Dictionary[Vector3i, BlockData]
 var _blocks: Dictionary = {}
@@ -117,7 +117,7 @@ func remove_block(cell: Vector3i) -> BlockData:
 
 ## Atomically removes a batch of cells from the grid (used during collapse).
 ## Returns a Dictionary[Vector3i, BlockData] of the removed blocks.
-func remove_cells_batch(cells: Array[Vector3i]) -> Dictionary:
+func remove_cells_batch(cells: Array) -> Dictionary:
 	var removed_map: Dictionary = {}
 	var removed_keys: Array[Vector3i] = []
 	for cell in cells:

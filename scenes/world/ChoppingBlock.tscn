@@ -1,0 +1,52 @@
+[gd_scene load_steps=8 format=3 uid="uid://chopping_block_cs"]
+
+[ext_resource type="Script" path="res://scenes/world/ChoppingBlock.gd" id="1_script"]
+
+[sub_resource type="StandardMaterial3D" id="MatStump"]
+albedo_color = Color(0.45, 0.3, 0.16, 1)
+roughness = 0.9
+
+[sub_resource type="CylinderMesh" id="MeshStump"]
+material = SubResource("MatStump")
+top_radius = 0.55
+bottom_radius = 0.6
+height = 0.55
+radial_segments = 12
+
+[sub_resource type="CylinderShape3D" id="ColStump"]
+radius = 0.58
+height = 0.55
+
+[sub_resource type="StandardMaterial3D" id="MatLog"]
+albedo_color = Color(0.42, 0.28, 0.14, 1)
+roughness = 0.9
+
+[sub_resource type="CylinderMesh" id="MeshLog"]
+material = SubResource("MatLog")
+top_radius = 0.209
+bottom_radius = 0.22
+height = 0.92
+radial_segments = 10
+
+[node name="ChoppingBlock" type="StaticBody3D" groups=["crafting_stations", "chopping_blocks"]]
+collision_layer = 1
+collision_mask = 0
+script = ExtResource("1_script")
+
+[node name="MeshInstance3D" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.275, 0)
+mesh = SubResource("MeshStump")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.275, 0)
+shape = SubResource("ColStump")
+
+[node name="VisualLog" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.025, 0)
+visible = false
+mesh = SubResource("MeshLog")
+
+[node name="NavigationObstacle3D" type="NavigationObstacle3D" parent="."]
+vertices = PackedVector3Array(-0.6, 0, -0.6, 0.6, 0, -0.6, 0.6, 0, 0.6, -0.6, 0, 0.6)
+height = 0.6
+avoidance_enabled = true

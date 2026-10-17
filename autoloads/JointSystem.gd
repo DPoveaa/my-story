@@ -431,7 +431,8 @@ func _on_joint_broken_internal(_joint: RefCounted) -> void:
 ## Returns any joints that were broken by the impact.
 func apply_impact_to_block_joints(cell: Vector3i, impact_energy: float, _hit_normal: Vector3 = Vector3.ZERO) -> Array:
 	var broken_joints: Array = []
-	if impact_energy < impact_energy_min_threshold:
+	var min_thresh: float = maxf(8.0, impact_energy_min_threshold)
+	if impact_energy < min_thresh:
 		return broken_joints
 
 	var attached := get_joints_for_cell(cell)

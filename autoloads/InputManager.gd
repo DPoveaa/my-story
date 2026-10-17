@@ -24,6 +24,7 @@ func setup_default_input_actions() -> void:
 
 	# Interaction: Grab/Release/Recover/Throw debris block
 	_add_key_action(&"interact", KEY_E)
+	_add_key_action(&"drop_carried", KEY_G)
 	_add_key_action(&"recover_block", KEY_R)
 	_add_key_action(&"throw_debris", KEY_F)
 	_add_key_action(&"apply_cement", KEY_G)
@@ -37,17 +38,31 @@ func setup_default_input_actions() -> void:
 	_add_key_action(&"save_blueprint", KEY_K)
 	_add_key_action(&"load_blueprint", KEY_L)
 
-	# Interaction
-	_add_mouse_action(&"place_block", MOUSE_BUTTON_LEFT)
-	_add_mouse_action(&"remove_block", MOUSE_BUTTON_RIGHT)
+	# Interaction — LMB = break/remove, MMB = place, RMB = context/construction radial
+	_set_mouse_action(&"remove_block", MOUSE_BUTTON_LEFT)
+	_set_mouse_action(&"place_block", MOUSE_BUTTON_MIDDLE)
+	_add_mouse_action(&"construction_menu", MOUSE_BUTTON_RIGHT)
 	_add_key_action(&"toggle_mouse_capture", KEY_TAB)
 	_add_key_action(&"toggle_mouse_capture", KEY_ESCAPE)
 
-	# Material Selection Slots
+	# Hotbar / Material Selection Slots (1–9)
 	_add_key_action(&"select_slot_1", KEY_1)
 	_add_key_action(&"select_slot_2", KEY_2)
 	_add_key_action(&"select_slot_3", KEY_3)
 	_add_key_action(&"select_slot_4", KEY_4)
+	_add_key_action(&"select_slot_5", KEY_5)
+	_add_key_action(&"select_slot_6", KEY_6)
+	_add_key_action(&"select_slot_7", KEY_7)
+	_add_key_action(&"select_slot_8", KEY_8)
+	_add_key_action(&"select_slot_9", KEY_9)
+
+	# View distance (+ / − and bracket aliases)
+	_add_key_action(&"view_distance_up", KEY_EQUAL)
+	_add_key_action(&"view_distance_up", KEY_KP_ADD)
+	_add_key_action(&"view_distance_up", KEY_BRACKETRIGHT)
+	_add_key_action(&"view_distance_down", KEY_MINUS)
+	_add_key_action(&"view_distance_down", KEY_KP_SUBTRACT)
+	_add_key_action(&"view_distance_down", KEY_BRACKETLEFT)
 
 func _add_key_action(action: StringName, keycode: Key) -> void:
 	if not InputMap.has_action(action):
@@ -71,6 +86,17 @@ func _add_mouse_action(action: StringName, button_index: MouseButton) -> void:
 		if existing is InputEventMouseButton and existing.button_index == button_index:
 			return
 
+	var ev := InputEventMouseButton.new()
+	ev.button_index = button_index
+	InputMap.action_add_event(action, ev)
+
+func _set_mouse_action(action: StringName, button_index: MouseButton) -> void:
+	if not InputMap.has_action(action):
+		InputMap.add_action(action)
+	else:
+		for existing in InputMap.action_get_events(action):
+			if existing is InputEventMouseButton:
+				InputMap.action_erase_event(action, existing)
 	var ev := InputEventMouseButton.new()
 	ev.button_index = button_index
 	InputMap.action_add_event(action, ev)

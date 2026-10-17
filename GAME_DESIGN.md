@@ -245,3 +245,80 @@ aprovação. 4. Implementar em etapas pequenas e jogáveis, validando cada
 sistema no Godot. 5. Executar testes, verificar erros e corrigir
 regressões. 6. Atualizar este documento quando requisitos forem
 explicitamente definidos ou alterados.
+
+## 12. Loop de sobrevivência com física — Mineração Gradual e Fabricação em Pallet
+
+> Mecânicas explicitamente definidas pelo usuário em outubro de 2026.
+> Substituem a destruição instantânea de blocos para o terreno natural.
+
+### 12.1 Mineração Gradual (LMB Segurado)
+
+- Blocos naturais do terreno **não quebram instantaneamente**.
+- Ao segurar o LMB mirando no terreno, um temporizador de dano acumula
+  (`mine_duration_seconds`, padrão 1,2 s por bloco).
+- Ao completar cada ciclo:
+  1. `VoxelWorld.mine_voxel()` remove o voxel (TYPE + SDF, persiste o delta).
+  2. Uma **subtração booleana de esfera SDF** (`VoxelTool.do_sphere`) é aplicada
+     no ponto de impacto (raio configurável: `mine_sdf_radius = 0.6`).
+  3. Um **fragmento físico** (`RigidBody3D`) é instanciado na posição do voxel
+     e ejetado com impulso suave na direção da normal da superfície.
+- Soltar o LMB cancela o progresso do ciclo atual.
+- Trocar de alvo durante o hold reinicia o progresso para zero.
+- Decal de rachadura em 4 estágios e barra de progresso no HUD atualizam
+  em tempo real.
+
+### 12.2 Fragmentos Físicos
+
+- Cada fragmento é um `RigidBody3D` com `BoxMesh` procedural (0,25–0,45 m)
+  colorido pelo tipo de material (pedra, terra, carvão, etc.).
+- Fragmentos possuem metadados: `mined_fragment = true`, `fragment_type = <tipo>`.
+- Uma cena personalizada (`mine_fragment_scene`) pode ser atribuída no
+  `PlayerController` para substituir o fragmento procedural.
+- Fragmentos se autodestróem após **30 segundos** para evitar acúmulo.
+
+### 12.3 Coleta Ativa de Fragmentos
+
+- O jogador **segura um botão de interação** para criar um campo de
+  "vácuo" que atrai fragmentos próximos para o inventário.
+- Fragmentos **não são coletados automaticamente** — impede roubo
+  acidental por minions de IA.
+- Escopo futuro: raio de coleta configurável, feedback sonoro/visual.
+
+### 12.4 Processamento de Madeira
+
+- Árvores derrubadas soltam **troncos físicos** (`RigidBody3D`).
+- Troncos devem ser colocados em um **bloco de corte** (chopping block).
+- A ação de cortar divide o tronco em **tábuas** (planks).
+
+### 12.5 Pallet de Fabricação
+
+- Estrutura baixa de tábuas construída e posicionada pelo jogador.
+- O jogador **lança/dropa fragmentos** sobre o pallet.
+- **Segurar RMB** sobre o pallet abre um **Radial Menu** com moldes
+  disponíveis baseados nos materiais presentes no pallet.
+- **Segurar Space** confirma e processa o lote.
+
+### 12.6 Rendimento em Lote
+
+- O pallet produz **lotes proporcionais** de blocos físicos acabados.
+  Exemplo: um lote de fragmentos de pedra bruta → oito blocos 1×1
+  empilhados fisicamente sobre o pallet.
+- A receita de cada molde define tipo e quantidade de fragmentos
+  necessários; valores finais definidos durante o balanceamento.
+
+### 12.7 Regra de Coleta pelo Topo (Top-Down Pickup Rule)
+
+- Tecla **E** → pegar bloco. Tecla **R** → colocar bloco.
+- O jogador só pode pegar um bloco se ele for o **bloco mais acima**
+  na pilha (nenhuma outra estrutura apoiada sobre ele).
+- Blocos estruturais (com outros blocos apoiados) **devem ser minerados**,
+  não simplesmente pegos.
+- Objetivo: preservar a integridade estrutural durante a manipulação manual.
+
+### 12.8 Notas de Implementação
+
+- **Milestone atual:** Mineração gradual e spawn de fragmento implementados
+  em `PlayerController.gd` (LMB hold-to-mine + `_process_lmb_mining` +
+  `_spawn_voxel_fragment`).
+- **Pendente:** Coleta ativa (campo de vácuo), troncos de árvore, bloco de
+  corte, pallet, radial menu e regra de coleta pelo topo são marcos futuros.

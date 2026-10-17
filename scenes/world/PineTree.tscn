@@ -1,0 +1,77 @@
+[gd_scene load_steps=10 format=3 uid="uid://pine_tree_cs"]
+
+[ext_resource type="Script" path="res://scenes/world/PineTree.gd" id="1_script"]
+
+[sub_resource type="StandardMaterial3D" id="MatTrunk"]
+albedo_color = Color(0.42, 0.28, 0.14, 1)
+roughness = 0.92
+
+[sub_resource type="CylinderMesh" id="MeshTrunk"]
+material = SubResource("MatTrunk")
+top_radius = 0.2
+bottom_radius = 0.28
+height = 4.0
+radial_segments = 10
+
+[sub_resource type="StandardMaterial3D" id="MatFoliage"]
+albedo_color = Color(0.18, 0.48, 0.2, 1)
+roughness = 0.88
+
+[sub_resource type="CylinderMesh" id="MeshConeBottom"]
+material = SubResource("MatFoliage")
+top_radius = 0.0
+bottom_radius = 1.35
+height = 2.2
+radial_segments = 10
+
+[sub_resource type="CylinderMesh" id="MeshConeMid"]
+material = SubResource("MatFoliage")
+top_radius = 0.0
+bottom_radius = 1.05
+height = 1.9
+radial_segments = 10
+
+[sub_resource type="CylinderMesh" id="MeshConeTop"]
+material = SubResource("MatFoliage")
+top_radius = 0.0
+bottom_radius = 0.7
+height = 1.6
+radial_segments = 10
+
+[sub_resource type="CylinderShape3D" id="ColTrunk"]
+radius = 0.32
+height = 4.0
+
+[node name="PineTree" type="RigidBody3D" groups=["tree"]]
+collision_layer = 1
+collision_mask = 1
+freeze = true
+freeze_mode = 1
+mass = 40.0
+can_sleep = true
+continuous_cd = true
+script = ExtResource("1_script")
+health = 3
+trunk_height = 4.0
+log_length = 1.0
+fell_impulse = 15.0
+
+[node name="Trunk" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 0)
+mesh = SubResource("MeshTrunk")
+
+[node name="FoliageBottom" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 3.4, 0)
+mesh = SubResource("MeshConeBottom")
+
+[node name="FoliageMid" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 4.6, 0)
+mesh = SubResource("MeshConeMid")
+
+[node name="FoliageTop" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 5.7, 0)
+mesh = SubResource("MeshConeTop")
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2, 0)
+shape = SubResource("ColTrunk")

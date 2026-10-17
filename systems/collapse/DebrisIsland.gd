@@ -106,14 +106,11 @@ func setup_island(cells: Array, block_data_map: Dictionary, p_cell_size: float, 
 		add_child(col_shape)
 		_block_col_shapes[c] = col_shape
 
-		# Visual representation with block-type color
+		# Visual representation — exact 1x1x1 + shared terrain material.
 		var mesh_instance := MeshInstance3D.new()
 		var box_mesh := BoxMesh.new()
-		box_mesh.size = Vector3.ONE * (cell_size * 0.98) # Slight edge inset for visual readability
-		var mat := StandardMaterial3D.new()
-		mat.albedo_color = BlockTypeCatalog.get_color(block_data.block_type)
-		mat.roughness = 0.85
-		box_mesh.material = mat
+		box_mesh.size = Vector3(cell_size, cell_size, cell_size)
+		box_mesh.material = TerrainBlockyLibrary.get_shared_material(block_data.block_type)
 		mesh_instance.mesh = box_mesh
 		mesh_instance.position = local_pos
 		add_child(mesh_instance)
@@ -139,8 +136,9 @@ func setup_island(cells: Array, block_data_map: Dictionary, p_cell_size: float, 
 	_awake_frames = 0
 	contact_monitor = true
 	max_contacts_reported = 6
-	# Layer 4 = debris (bit 3); mask 7 = layers 1(ground)+2(player)+4(debris)
-	collision_layer = 4
+	continuous_cd = true
+	# Layer 1 = world obstacle (obstructs helper navigation), Layer 4 = debris
+	collision_layer = 1 | 4
 	collision_mask = 7
 
 ## Sets up an island resulting from a split of an existing debris island.
@@ -173,11 +171,8 @@ func setup_island_split(cells: Array, block_data_map: Dictionary, orig_offsets: 
 
 		var mesh_instance := MeshInstance3D.new()
 		var box_mesh := BoxMesh.new()
-		box_mesh.size = Vector3.ONE * (cell_size * 0.98)
-		var mat := StandardMaterial3D.new()
-		mat.albedo_color = BlockTypeCatalog.get_color(block_data.block_type)
-		mat.roughness = 0.85
-		box_mesh.material = mat
+		box_mesh.size = Vector3(cell_size, cell_size, cell_size)
+		box_mesh.material = TerrainBlockyLibrary.get_shared_material(block_data.block_type)
 		mesh_instance.mesh = box_mesh
 		mesh_instance.position = new_local_pos
 		add_child(mesh_instance)
@@ -195,7 +190,8 @@ func setup_island_split(cells: Array, block_data_map: Dictionary, orig_offsets: 
 	_awake_frames = 0
 	contact_monitor = true
 	max_contacts_reported = 6
-	collision_layer = 4
+	continuous_cd = true
+	collision_layer = 1 | 4
 	collision_mask = 7
 
 ## Resolves the constituent cell coordinate hit by a physics raycast.
@@ -364,14 +360,18 @@ func apply_impact_damage(hit_cell: Vector3i, impact_energy: float) -> Array:
 	if impact_energy < 8.0:
 		return broken
 
+	if constituent_blocks.has(hit_cell):
+		var bd: BlockData = constituent_blocks[hit_cell]
+		var max_dur := BlockTypeCatalog.get_max_durability(bd.block_type)
+		var dmg := (impact_energy / 200.0) / maxf(0.5, max_dur)
+		bd.durability = maxf(0.05, bd.durability - dmg)
+
 	var relevant_joints: Array = []
 	for j in internal_joints.values():
 		if not j.is_broken and j.connects_cell(hit_cell):
 			relevant_joints.append(j)
 
 	if relevant_joints.is_empty():
-		# No internal joints — still damage block durability from direct impact.
-		_apply_block_durability_damage(hit_cell, impact_energy)
 		return broken
 
 	var energy_per_joint: float = impact_energy / float(relevant_joints.size())
@@ -386,25 +386,10 @@ func apply_impact_damage(hit_cell: Vector3i, impact_energy: float) -> Array:
 			if j.apply_damage(dmg):
 				broken.append(j)
 
-	# Reduce block durability: 8% of energy absorbed by the block material itself.
-	# Scaled by material resistance so durable blocks degrade more slowly.
-	_apply_block_durability_damage(hit_cell, impact_energy * 0.08)
-
 	if not broken.is_empty():
 		call_deferred("check_and_split_on_broken_joints")
 
 	return broken
-
-## Reduces the durability of a constituent block from impact energy.
-## Clamped so durability never goes below 0.0.
-func _apply_block_durability_damage(cell: Vector3i, energy: float) -> void:
-	if not constituent_blocks.has(cell):
-		return
-	var block: BlockData = constituent_blocks[cell]
-	var dur_resistance: float = maxf(0.1, BlockTypeCatalog.get_max_durability(block.block_type))
-	# Normalise: 1 unit of energy removes (1 / dur_resistance) * scale durability.
-	var dmg: float = energy / (dur_resistance * 10.0)
-	block.durability = maxf(0.0, block.durability - dmg)
 
 ## Evaluates connectivity among remaining blocks based strictly on intact internal joints.
 ## If broken joints disconnect the blocks, splits into independent compound bodies.
@@ -526,12 +511,45 @@ func wake_and_disable_sleep() -> void:
 	if sleeping:
 		sleeping = false
 
+func _exit_tree() -> void:
+	_notify_astar()
+
 func _on_sleeping_state_changed() -> void:
 	if sleeping and not is_settled:
 		is_settled = true
 		island_settled.emit(self)
+		_notify_astar()
 	elif not sleeping:
 		is_settled = false
+
+func get_global_aabb() -> AABB:
+	if constituent_blocks.is_empty():
+		return AABB(global_position - Vector3(0.5, 0.5, 0.5), Vector3.ONE)
+	var first: bool = true
+	var min_p := Vector3.ZERO
+	var max_p := Vector3.ZERO
+	for c in constituent_blocks.keys():
+		var local_pos: Vector3 = local_offsets.get(c, Vector3.ZERO)
+		var world_pos: Vector3 = global_transform * local_pos
+		var b_min := world_pos - Vector3.ONE * (cell_size * 0.5)
+		var b_max := world_pos + Vector3.ONE * (cell_size * 0.5)
+		if first:
+			min_p = b_min
+			max_p = b_max
+			first = false
+		else:
+			min_p = min_p.min(b_min)
+			max_p = max_p.max(b_max)
+	return AABB(min_p, max_p - min_p)
+
+func _notify_astar() -> void:
+	if not is_inside_tree():
+		return
+	var root := get_tree().root
+	var astar_mgr: Node = root.find_child("AStarGridManager", true, false)
+	if astar_mgr != null and astar_mgr.has_method("notify_bounds_changed"):
+		var aabb := get_global_aabb().grow(0.6)
+		astar_mgr.notify_bounds_changed(aabb)
 
 # ==============================================================================
 # MORTAR OVERLAY HELPERS (mirrors MortarOverlayRenderer geometry)

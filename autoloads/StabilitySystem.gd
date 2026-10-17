@@ -28,6 +28,9 @@ var _is_evaluating: bool = false
 
 ## Reference to GridSystem
 @export var grid_system: Node
+## Optional reference to TerrainGenerator for procedural ground support
+var terrain_generator: Node = null
+
 ## Reference to JointSystem
 @export var joint_system: Node
 ## Whether lateral / hanging support strictly requires cemented structural joints (M2.3)
@@ -117,7 +120,11 @@ func _on_grid_cleared() -> void:
 
 ## Tests whether a cell is a valid ground/foundation anchor.
 func is_anchor_cell(cell: Vector3i) -> bool:
-	return cell.y <= ground_anchor_y or _custom_anchors.has(cell)
+	if cell.y <= ground_anchor_y or _custom_anchors.has(cell):
+		return true
+	if terrain_generator != null and terrain_generator.has_method("is_ground_cell"):
+		return terrain_generator.is_ground_cell(cell)
+	return false
 
 func register_custom_anchor(cell: Vector3i) -> void:
 	_custom_anchors[cell] = true
