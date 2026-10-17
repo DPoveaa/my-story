@@ -2,7 +2,7 @@
 extends SceneTree
 
 ## Editor-side generation tool for procedural Voronoi fracture assets.
-## Fractures cubes, ramps, outer corners, and inner corners using VoronoiShatter.
+## Fractures cubes (with variants), ramps, outer corners, and inner corners using VoronoiShatter.
 ## Saves reusable ArrayMesh and ConvexPolygonShape3D assets under res://assets/generated/fractures/.
 
 const OUTPUT_DIR: String = "res://assets/generated/fractures/"
@@ -31,16 +31,21 @@ func run_generation() -> bool:
 	root.add_child(gen)
 
 	# Generate canonical watertight manifold geometries in [0, 1]^3
+	# Includes pre-generated cube fracture variants for visual variety without texture rotation.
 	var geometries: Dictionary = {
 		"cube": _build_cube_mesh(),
+		"cube_var1": _build_cube_mesh(),
+		"cube_var2": _build_cube_mesh(),
 		"ramp": _build_ramp_mesh(),
 		"corner": _build_corner_mesh(),
 		"inner_corner": _build_inner_corner_mesh()
 	}
 
-	# Configuration per shape: VoronoiShatter requires >= 6 samples to avoid incomplete geometry
+	# Configuration per shape: 8 samples yields rich visual shard detail
 	var configs: Dictionary = {
 		"cube": {"samples": 8, "seed": 42},
+		"cube_var1": {"samples": 8, "seed": 101},
+		"cube_var2": {"samples": 8, "seed": 202},
 		"ramp": {"samples": 8, "seed": 42},
 		"corner": {"samples": 8, "seed": 42},
 		"inner_corner": {"samples": 8, "seed": 42}
@@ -82,10 +87,16 @@ func run_generation() -> bool:
 			var mesh_path := OUTPUT_DIR + mesh_filename
 			var shape_path := OUTPUT_DIR + shape_filename
 
-			# Build matching ConvexPolygonShape3D from mesh geometry
+			# Build matching ConvexPolygonShape3D collecting points from all surfaces
 			var col_shape := ConvexPolygonShape3D.new()
-			var faces: PackedVector3Array = piece_mesh.get_faces()
-			col_shape.set_points(faces)
+			var all_pts := PackedVector3Array()
+			for s in range(piece_mesh.get_surface_count()):
+				var arr = piece_mesh.surface_get_arrays(s)
+				if not arr.is_empty() and arr[Mesh.ARRAY_VERTEX] != null:
+					all_pts.append_array(arr[Mesh.ARRAY_VERTEX])
+			if all_pts.is_empty():
+				all_pts = piece_mesh.get_faces()
+			col_shape.set_points(all_pts)
 
 			# Save mesh resource
 			var err_mesh := ResourceSaver.save(piece_mesh, mesh_path, ResourceSaver.FLAG_COMPRESS)
@@ -131,7 +142,7 @@ func run_generation() -> bool:
 
 # ── Geometry Builders: Watertight Manifold Polyhedra in [0, 1]^3 ───────────────
 
-## Watertight unit cube [0, 1]^3
+## Watertight unit cube [0, 1]^3 with guaranteed outward-facing winding on all 6 faces
 func _build_cube_mesh() -> ArrayMesh:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
@@ -144,18 +155,18 @@ func _build_cube_mesh() -> ArrayMesh:
 	var v111 := Vector3(1, 1, 1)
 	var v011 := Vector3(0, 1, 1)
 
-	# Bottom y=0 (DOWN)
-	_add_tri(st, v000, v001, v101); _add_tri(st, v000, v101, v100)
-	# Top y=1 (UP)
-	_add_tri(st, v010, v110, v111); _add_tri(st, v010, v111, v011)
-	# Back z=0 (FORWARD)
-	_add_tri(st, v000, v100, v110); _add_tri(st, v000, v110, v010)
-	# Front z=1 (BACK)
-	_add_tri(st, v001, v011, v111); _add_tri(st, v001, v111, v101)
-	# Left x=0 (LEFT)
-	_add_tri(st, v000, v010, v011); _add_tri(st, v000, v011, v001)
-	# Right x=1 (RIGHT)
-	_add_tri(st, v100, v101, v111); _add_tri(st, v100, v111, v110)
+	# Bottom y=0 (DOWN: 0, -1, 0)
+	_add_quad(st, v000, v100, v101, v001, Vector3.DOWN)
+	# Top y=1 (UP: 0, 1, 0)
+	_add_quad(st, v010, v011, v111, v110, Vector3.UP)
+	# Back z=0 (FORWARD: 0, 0, -1)
+	_add_quad(st, v000, v010, v110, v100, Vector3.FORWARD)
+	# Front z=1 (BACK: 0, 0, 1)
+	_add_quad(st, v001, v101, v111, v011, Vector3.BACK)
+	# Left x=0 (LEFT: -1, 0, 0)
+	_add_quad(st, v000, v001, v011, v010, Vector3.LEFT)
+	# Right x=1 (RIGHT: 1, 0, 0)
+	_add_quad(st, v100, v110, v111, v101, Vector3.RIGHT)
 
 	st.generate_normals()
 	st.index()
@@ -172,39 +183,41 @@ func _build_ramp_mesh() -> ArrayMesh:
 	var t0 := Vector3(0, 1, 0) # top back-left
 	var t3 := Vector3(0, 1, 1) # top front-left
 
-	# Bottom face (y=0, DOWN)
-	_add_tri(st, v0, v3, v2); _add_tri(st, v0, v2, v1)
-	# Back wall (x=0, LEFT)
-	_add_tri(st, v0, t0, t3); _add_tri(st, v0, t3, v3)
-	# Side wedge z=0 (FORWARD)
-	_add_tri(st, v0, v1, t0)
-	# Side wedge z=1 (BACK)
-	_add_tri(st, v3, t3, v2)
-	# Top slope (descending toward +X)
-	_add_tri(st, t0, v1, v2); _add_tri(st, t0, v2, t3)
+	# Bottom face (y=0, DOWN: 0, -1, 0)
+	_add_quad(st, v0, v1, v2, v3, Vector3.DOWN)
+	# Back wall (x=0, LEFT: -1, 0, 0)
+	_add_quad(st, v0, v3, t3, t0, Vector3.LEFT)
+	# Side forward (z=0, FORWARD: 0, 0, -1)
+	_add_tri(st, v0, t0, v1, Vector3.FORWARD)
+	# Side back (z=1, BACK: 0, 0, 1)
+	_add_tri(st, v3, v2, t3, Vector3.BACK)
+	# Top slope (descending toward +X, outward normal: 1, 1, 0)
+	_add_quad(st, t0, t3, v2, v1, Vector3(1, 1, 0))
 
 	st.generate_normals()
 	st.index()
 	return st.commit()
 
-## Watertight canonical outer corner: low corner toward (+1, +1)
+## Watertight canonical outer corner: high at (0, 1, 0), low corner toward (+1, +1)
 func _build_corner_mesh() -> ArrayMesh:
 	var st := SurfaceTool.new()
 	st.begin(Mesh.PRIMITIVE_TRIANGLES)
 	var b0 := Vector3(0, 0, 0)
 	var b1 := Vector3(1, 0, 0)
-	var b2 := Vector3(1, 0, 1)
+	var b2 := Vector3(1, 0, 1) # low corner
 	var b3 := Vector3(0, 0, 1)
 	var h  := Vector3(0, 1, 0) # single high peak at (0, 1, 0)
 
-	# Bottom (y=0, DOWN)
-	_add_tri(st, b0, b3, b2); _add_tri(st, b0, b2, b1)
-	# Back wall z=0 (FORWARD)
-	_add_tri(st, b0, b1, h)
-	# Left wall x=0 (LEFT)
-	_add_tri(st, b0, h, b3)
-	# Sloped surfaces meeting at low corner b2
-	_add_tri(st, h, b1, b2); _add_tri(st, h, b2, b3)
+	# Bottom (y=0, DOWN: 0, -1, 0)
+	_add_quad(st, b0, b1, b2, b3, Vector3.DOWN)
+	# Back wall z=0 (FORWARD: 0, 0, -1)
+	_add_tri(st, b0, h, b1, Vector3.FORWARD)
+	# Left wall x=0 (LEFT: -1, 0, 0)
+	_add_tri(st, b0, b3, h, Vector3.LEFT)
+	# Sloped face 1 (h -> b1 -> b2, outward normal: 1, 1, 0)
+	_add_tri(st, h, b2, b1, Vector3(1, 1, 0))
+	# Sloped face 2 (h -> b2 -> b3, outward normal: 0, 1, 1)
+	_add_tri(st, h, b3, b2, Vector3(0, 1, 1))
 
 	st.generate_normals()
 	st.index()
@@ -222,24 +235,40 @@ func _build_inner_corner_mesh() -> ArrayMesh:
 	var t1 := Vector3(1, 1, 0)
 	var t3 := Vector3(0, 1, 1)
 
-	# Bottom y=0 (DOWN)
-	_add_tri(st, b0, b3, b2); _add_tri(st, b0, b2, b1)
-	# Left wall x=0 (LEFT)
-	_add_tri(st, b0, t0, t3); _add_tri(st, b0, t3, b3)
-	# Back wall z=0 (FORWARD)
-	_add_tri(st, b0, b1, t1); _add_tri(st, b0, t1, t0)
-	# Right wall x=1 (RIGHT)
-	_add_tri(st, b1, b2, t1)
-	# Front wall z=1 (BACK)
-	_add_tri(st, b3, t3, b2)
-	# Top slopes descending to Low (b2)
-	_add_tri(st, t0, t1, b2); _add_tri(st, t0, b2, t3)
+	# Bottom y=0 (DOWN: 0, -1, 0)
+	_add_quad(st, b0, b1, b2, b3, Vector3.DOWN)
+	# Back wall z=0 (FORWARD: 0, 0, -1)
+	_add_quad(st, b0, t0, t1, b1, Vector3.FORWARD)
+	# Left wall x=0 (LEFT: -1, 0, 0)
+	_add_quad(st, b0, b3, t3, t0, Vector3.LEFT)
+	# Right wall x=1 (RIGHT: 1, 0, 0)
+	_add_tri(st, b1, t1, b2, Vector3.RIGHT)
+	# Front wall z=1 (BACK: 0, 0, 1)
+	_add_tri(st, b3, b2, t3, Vector3.BACK)
+	# Top slopes descending to Low (b2):
+	# Slope 1: t0, t1, b2 (outward normal: 1, 1, 0)
+	_add_tri(st, t0, t1, b2, Vector3(1, 1, 0))
+	# Slope 2: t0, b2, t3 (outward normal: 0, 1, 1)
+	_add_tri(st, t0, b2, t3, Vector3(0, 1, 1))
 
 	st.generate_normals()
 	st.index()
 	return st.commit()
 
-func _add_tri(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3) -> void:
+## Helper to emit a triangle, validating and ensuring strict outward normal winding
+func _add_tri(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, outward_normal: Vector3 = Vector3.ZERO) -> void:
+	if outward_normal != Vector3.ZERO:
+		var n := (b - a).cross(c - a)
+		if n.dot(outward_normal) < 0.0:
+			st.add_vertex(a)
+			st.add_vertex(c)
+			st.add_vertex(b)
+			return
 	st.add_vertex(a)
 	st.add_vertex(b)
 	st.add_vertex(c)
+
+## Helper to emit a quad as two outward-facing triangles
+func _add_quad(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, d: Vector3, outward_normal: Vector3 = Vector3.ZERO) -> void:
+	_add_tri(st, a, b, c, outward_normal)
+	_add_tri(st, a, c, d, outward_normal)

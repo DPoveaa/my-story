@@ -1809,7 +1809,7 @@ func _fragment_albedo(block_type: StringName) -> Color:
 ## 6. Full Vacuum Collection & Void Recovery: Fragments are vacuumed into inventory.
 ##    Out-of-bounds fragments recover to safe terrain so no resources are ever lost.
 
-const TOTAL_VOXEL_RESOURCE_YIELD: int = 12
+const TOTAL_VOXEL_RESOURCE_YIELD: int = ResourceBalance.VOXEL_RESOURCE_YIELD
 const MAX_PHYSICAL_FRAGMENTS: int = 30
 
 ## Cached Voronoi templates: Dictionary[String, Array[Dictionary]]
@@ -2190,7 +2190,15 @@ func _spawn_voxel_fragments_burst(center: Vector3, block_type: StringName, block
 	var angle_y: float = float(t_info.get("angle", 0.0))
 
 	var pieces: Array = []
-	if _cached_voronoi_templates.has(shape_name):
+	if shape_name == "cube":
+		var cube_variants: Array[String] = []
+		for vname in ["cube", "cube_var1", "cube_var2"]:
+			if _cached_voronoi_templates.has(vname) and not _cached_voronoi_templates[vname].is_empty():
+				cube_variants.append(vname)
+		if not cube_variants.is_empty():
+			var picked_var: String = cube_variants[randi() % cube_variants.size()]
+			pieces = _cached_voronoi_templates[picked_var]
+	elif _cached_voronoi_templates.has(shape_name):
 		pieces = _cached_voronoi_templates[shape_name]
 	elif _cached_voronoi_templates.has("cube"):
 		pieces = _cached_voronoi_templates["cube"]
@@ -2376,8 +2384,15 @@ func _spawn_voxel_fragment(center: Vector3, block_type: StringName) -> void:
 	_spawn_voxel_fragments_burst(center, block_type, 0)
 
 ## Detects resting fragments that have lost support when a voxel is mined and reactivates them.
-func _wake_nearby_fragments(center: Vector3, radius: float = 1.5) -> void:
-	var r2: float = radius * radius
+## Only wakes fragments directly in the mined cavity or resting in the column above it.
+func _wake_nearby_fragments(center: Vector3, _radius: float = 1.5) -> void:
+	var x_min := center.x - 0.6
+	var x_max := center.x + 0.6
+	var z_min := center.z - 0.6
+	var z_max := center.z + 0.6
+	var y_min := center.y - 0.5
+	var y_max := center.y + 1.8
+
 	for ref in _tracked_fragments:
 		if ref == null:
 			continue
@@ -2388,12 +2403,11 @@ func _wake_nearby_fragments(center: Vector3, radius: float = 1.5) -> void:
 			continue
 		var rb := node as RigidBody3D
 		var pos := rb.global_position
-		var d_xz_sq: float = (pos.x - center.x) * (pos.x - center.x) + (pos.z - center.z) * (pos.z - center.z)
-		var dy: float = pos.y - center.y
-		if d_xz_sq <= r2 and dy >= -0.2 and dy <= (radius + 0.6):
+		if pos.x >= x_min and pos.x <= x_max and pos.z >= z_min and pos.z <= z_max and pos.y >= y_min and pos.y <= y_max:
 			rb.freeze = false
 			rb.sleeping = false
-			rb.apply_central_impulse(Vector3(randf_range(-0.04, 0.04), -0.2, randf_range(-0.04, 0.04)))
+			# Minimal downward nudge to immediately engage gravity if air is beneath, without shaking
+			rb.apply_central_impulse(Vector3(0.0, -0.01, 0.0))
 
 ## Prevents fragment scaling: preserves true Voronoi geometric shape scale.
 func _update_fragment_scale(frag: Node3D) -> void:
@@ -2906,8 +2920,20 @@ func _process_body_movement(delta: float) -> void:
 				push_dir_fp = -global_transform.basis.z
 			else:
 				push_dir_fp = push_dir_fp.normalized()
+
+			var p_planar := Vector3(velocity.x, 0.0, velocity.z)
+			var p_speed := p_planar.length()
+			var push_dir: Vector3
+			if p_speed > 0.1:
+				push_dir = (push_dir_fp * 0.65 + p_planar.normalized() * 0.35).normalized()
+			else:
+				push_dir = push_dir_fp
+			push_dir.y = 0.08
 			rb_fp.sleeping = false
-			rb_fp.apply_central_impulse(push_dir_fp * 2.0 * delta)
+			if rb_fp.freeze and rb_fp.freeze_mode == RigidBody3D.FREEZE_MODE_STATIC:
+				rb_fp.freeze = false
+			var push_impulse: float = maxf(p_speed * 0.8, 1.4) * rb_fp.mass * 8.0 * delta
+			rb_fp.apply_central_impulse(push_dir * push_impulse)
 
 	# Push dynamic RigidBody3D (debris) and unbonded grid blocks upon physical contact
 	var hit_light_debris := false

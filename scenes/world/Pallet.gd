@@ -8,9 +8,9 @@ const RESOURCE_LAYER: int = 4
 const DEBRIS_LAYER: int = 8
 const RESOURCE_COLLISION_MASK: int = 1 | RESOURCE_LAYER | DEBRIS_LAYER
 const DEBRIS_COLLISION_MASK: int = 1 | RESOURCE_LAYER | DEBRIS_LAYER
-const FRAGMENTS_PER_BLOCK: int = 8
-const CRAFT_BATCH_BLOCKS: int = 8
-const FRAGMENT_WITHDRAW_BATCH: int = 8
+const FRAGMENTS_PER_BLOCK: int = ResourceBalance.FRAGMENTS_PER_BLOCK
+const CRAFT_BATCH_BLOCKS: int = ResourceBalance.PALLET_CRAFT_BATCH_BLOCKS
+const FRAGMENT_WITHDRAW_BATCH: int = ResourceBalance.PALLET_WITHDRAW_BATCH
 const MAX_VISUAL_PILE: int = 64
 const FILL_MAX_HEIGHT: float = 2.0
 const PALLET_DECK_Y: float = 0.2
@@ -425,7 +425,7 @@ func craft_batch(type: String) -> bool:
 	return true
 
 func get_craft_required_count() -> int:
-	return FRAGMENTS_PER_BLOCK * CRAFT_BATCH_BLOCKS
+	return ResourceBalance.PALLET_CRAFT_REQUIRED_UNITS
 
 func can_craft_assigned() -> bool:
 	if assigned_material != "dirt" and assigned_material != "grass" and assigned_material != "stone":
