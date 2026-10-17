@@ -97,12 +97,28 @@ func run_generation() -> bool:
 					continue
 				var verts: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
 				var norms: PackedVector3Array = arr[Mesh.ARRAY_NORMAL] if arr[Mesh.ARRAY_NORMAL] != null else PackedVector3Array()
-				var num_tris := verts.size() / 3
+				var indices: PackedInt32Array = arr[Mesh.ARRAY_INDEX] if arr[Mesh.ARRAY_INDEX] != null else PackedInt32Array()
+				var num_tris: int
+				if not indices.is_empty():
+					num_tris = indices.size() / 3
+				else:
+					num_tris = verts.size() / 3
 				for t in range(num_tris):
-					var v0: Vector3 = verts[t * 3]
-					var v1: Vector3 = verts[t * 3 + 1]
-					var v2: Vector3 = verts[t * 3 + 2]
-					var n: Vector3 = norms[t * 3] if norms.size() > t * 3 else (v1 - v0).cross(v2 - v0).normalized()
+					var i0: int
+					var i1: int
+					var i2: int
+					if not indices.is_empty():
+						i0 = indices[t * 3]
+						i1 = indices[t * 3 + 1]
+						i2 = indices[t * 3 + 2]
+					else:
+						i0 = t * 3
+						i1 = t * 3 + 1
+						i2 = t * 3 + 2
+					var v0: Vector3 = verts[i0]
+					var v1: Vector3 = verts[i1]
+					var v2: Vector3 = verts[i2]
+					var n: Vector3 = norms[i0] if norms.size() > i0 else (v1 - v0).cross(v2 - v0).normalized()
 
 					# Position of vertices in the original voxel coordinate space [0, 1]^3
 					var p0: Vector3 = v0 + piece_center_in_voxel

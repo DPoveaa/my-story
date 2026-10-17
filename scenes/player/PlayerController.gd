@@ -2280,9 +2280,8 @@ func _spawn_voxel_fragments_burst(center: Vector3, block_type: StringName, block
 				active_phys_count += 1
 				body.freeze = false
 				body.sleeping = false
-				var outward_dir: Vector3 = (rotated_offset.normalized() + Vector3(randf_range(-0.15, 0.15), randf_range(0.1, 0.35), randf_range(-0.15, 0.15))).normalized()
-				body.linear_velocity = outward_dir * randf_range(0.35, 0.8)
-				body.angular_velocity = Vector3(randf_range(-1.2, 1.2), randf_range(-1.2, 1.2), randf_range(-1.2, 1.2))
+				body.linear_velocity = Vector3.ZERO
+				body.angular_velocity = Vector3.ZERO
 			else:
 				# Frozen overflow collectible (zero physics cost, fully vacuum collectible)
 				body.freeze = true
@@ -2328,7 +2327,7 @@ func _spawn_voxel_fragments_burst(center: Vector3, block_type: StringName, block
 				active_phys_count += 1
 				body.freeze = false
 				body.sleeping = false
-				body.linear_velocity = Vector3(randf_range(-0.5, 0.5), randf_range(0.2, 0.6), randf_range(-0.5, 0.5))
+				body.linear_velocity = Vector3.ZERO
 			else:
 				body.freeze = true
 				body.freeze_mode = RigidBody3D.FREEZE_MODE_STATIC
