@@ -4,133 +4,133 @@
 			"index": 0,
 			"mesh_path": "res://assets/generated/fractures/corner_mesh_0.res",
 			"offset": [
-				-0.391475488763655,
-				0.365347124901768,
-				-0.36946307475284
+				-0.353932223789096,
+				0.31738329305211,
+				-0.321607159388071
 			],
 			"shape_path": "res://assets/generated/fractures/corner_shape_0.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 1,
 			"mesh_path": "res://assets/generated/fractures/corner_mesh_1.res",
 			"offset": [
-				-0.220968077809751,
-				0.219817332745908,
-				-0.277087312978824
+				-0.220893703170515,
+				0.219735810236863,
+				-0.277167678918075
 			],
 			"shape_path": "res://assets/generated/fractures/corner_shape_1.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 2,
 			"mesh_path": "res://assets/generated/fractures/corner_mesh_2.res",
 			"offset": [
-				-0.294854689443784,
-				0.0291714273100818,
-				-0.0509407625624075
+				-0.294871941018428,
+				0.0291817622548434,
+				-0.0509330841020668
 			],
 			"shape_path": "res://assets/generated/fractures/corner_shape_2.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 3,
 			"mesh_path": "res://assets/generated/fractures/corner_mesh_3.res",
 			"offset": [
-				0.0313200290348062,
-				-0.0576364503268932,
-				-0.168798861314143
+				0.0313450952496215,
+				-0.0576798208076057,
+				-0.147486938274944
 			],
 			"shape_path": "res://assets/generated/fractures/corner_shape_3.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 4,
 			"mesh_path": "res://assets/generated/fractures/corner_mesh_4.res",
 			"offset": [
-				-0.0212460688513639,
-				-0.25982796651793,
+				-0.021225846887559,
+				-0.259886472933376,
 				0.0121810305863619
 			],
 			"shape_path": "res://assets/generated/fractures/corner_shape_4.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 5,
 			"mesh_path": "res://assets/generated/fractures/corner_mesh_5.res",
 			"offset": [
-				-0.217396055017888,
-				0.0779908068787623,
-				-0.268350240010414
+				-0.217527239452316,
+				0.0780070736747414,
+				-0.261274603596402
 			],
 			"shape_path": "res://assets/generated/fractures/corner_shape_5.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 6,
 			"mesh_path": "res://assets/generated/fractures/corner_mesh_6.res",
 			"offset": [
-				-0.0970905062595079,
-				0.0782914628480695,
-				-0.241132194532869
+				-0.0987170453408758,
+				0.0783001680937578,
+				-0.249434683827755
 			],
 			"shape_path": "res://assets/generated/fractures/corner_shape_6.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 7,
 			"mesh_path": "res://assets/generated/fractures/corner_mesh_7.res",
 			"offset": [
-				-0.463947025073093,
-				-0.173091520829634,
-				0.138128111238119
+				-0.46969619606913,
+				-0.320514827402806,
+				0.259556892919794
 			],
 			"shape_path": "res://assets/generated/fractures/corner_shape_7.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 8,
 			"mesh_path": "res://assets/generated/fractures/corner_mesh_8.res",
 			"offset": [
 				-0.25,
-				-0.324625629339322,
-				-0.256840395149578
+				-0.324668160925192,
+				-0.257115029551996
 			],
 			"shape_path": "res://assets/generated/fractures/corner_shape_8.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 9,
 			"mesh_path": "res://assets/generated/fractures/corner_mesh_9.res",
 			"offset": [
-				-0.415950981294151,
-				0.412597980223557,
-				-0.434348372032471
+				-0.415849634810151,
+				0.412402267143227,
+				-0.434304374899279
 			],
 			"shape_path": "res://assets/generated/fractures/corner_shape_9.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 10,
 			"mesh_path": "res://assets/generated/fractures/corner_mesh_10.res",
 			"offset": [
 				0.25,
-				-0.282603944982112,
+				-0.282465485940631,
 				-0.25
 			],
 			"shape_path": "res://assets/generated/fractures/corner_shape_10.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 11,
 			"mesh_path": "res://assets/generated/fractures/corner_mesh_11.res",
 			"offset": [
-				0.375975861937081,
-				-0.388498711897122,
-				0.329379186728665
+				0.357125189732379,
+				-0.388500508139554,
+				0.25
 			],
 			"shape_path": "res://assets/generated/fractures/corner_shape_11.res",
-			"surface_count": 1
+			"surface_count": 2
 		}
 	],
 	"cube": [
@@ -138,45 +138,45 @@
 			"index": 0,
 			"mesh_path": "res://assets/generated/fractures/cube_mesh_0.res",
 			"offset": [
-				-0.393048331839483,
+				-0.39396172942277,
 				0.370782494544983,
-				-0.216966342481851
+				-0.216948523207528
 			],
 			"shape_path": "res://assets/generated/fractures/cube_shape_0.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 1,
 			"mesh_path": "res://assets/generated/fractures/cube_mesh_1.res",
 			"offset": [
 				-0.230340868234634,
-				0.21251854348158,
-				0.229284355722948
+				0.212500892942057,
+				0.229284664361243
 			],
 			"shape_path": "res://assets/generated/fractures/cube_shape_1.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 2,
 			"mesh_path": "res://assets/generated/fractures/cube_mesh_2.res",
 			"offset": [
-				-0.0981265287970282,
-				0.301108162791422,
-				-0.258683095999219
+				-0.0981330065903772,
+				0.301088877573644,
+				-0.265152537675722
 			],
 			"shape_path": "res://assets/generated/fractures/cube_shape_2.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 3,
 			"mesh_path": "res://assets/generated/fractures/cube_mesh_3.res",
 			"offset": [
 				-0.275516793131828,
-				0.160589709567275,
+				0.160595421296126,
 				0.0504081100225449
 			],
 			"shape_path": "res://assets/generated/fractures/cube_shape_3.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 4,
@@ -187,7 +187,7 @@
 				0.0
 			],
 			"shape_path": "res://assets/generated/fractures/cube_shape_4.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 5,
@@ -198,62 +198,62 @@
 				0.0121810305863619
 			],
 			"shape_path": "res://assets/generated/fractures/cube_shape_5.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 6,
 			"mesh_path": "res://assets/generated/fractures/cube_mesh_6.res",
 			"offset": [
-				-0.214201168926774,
-				0.0819306550150207,
-				-0.268350240010414
+				-0.214635047325554,
+				0.0819035904176633,
+				-0.279081226382476
 			],
 			"shape_path": "res://assets/generated/fractures/cube_shape_6.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 7,
 			"mesh_path": "res://assets/generated/fractures/cube_mesh_7.res",
 			"offset": [
-				0.0256501983073714,
+				0.0256357539638923,
 				0.222001597285271,
 				-0.0757565498352051
 			],
 			"shape_path": "res://assets/generated/fractures/cube_shape_7.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 8,
 			"mesh_path": "res://assets/generated/fractures/cube_mesh_8.res",
 			"offset": [
-				-0.283372208088238,
+				-0.283377435932074,
 				-0.25,
-				0.259500000780433
+				0.259556892919794
 			],
 			"shape_path": "res://assets/generated/fractures/cube_shape_8.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 9,
 			"mesh_path": "res://assets/generated/fractures/cube_mesh_9.res",
 			"offset": [
 				-0.25,
-				-0.324625629339322,
-				-0.256840395149578
+				-0.324668160925192,
+				-0.257115029551996
 			],
 			"shape_path": "res://assets/generated/fractures/cube_shape_9.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 10,
 			"mesh_path": "res://assets/generated/fractures/cube_mesh_10.res",
 			"offset": [
-				-0.352351523435802,
-				0.412597980223557,
-				-0.412880004525598
+				-0.352699296307405,
+				0.412402267143227,
+				-0.413101998269695
 			],
 			"shape_path": "res://assets/generated/fractures/cube_shape_10.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 11,
@@ -261,10 +261,10 @@
 			"offset": [
 				-0.25,
 				0.25,
-				0.389468927854478
+				0.389403861319144
 			],
 			"shape_path": "res://assets/generated/fractures/cube_shape_11.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 12,
@@ -275,29 +275,29 @@
 				-0.25
 			],
 			"shape_path": "res://assets/generated/fractures/cube_shape_12.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 13,
 			"mesh_path": "res://assets/generated/fractures/cube_mesh_13.res",
 			"offset": [
-				0.278976632663108,
+				0.278976132355277,
 				-0.25,
 				0.25
 			],
 			"shape_path": "res://assets/generated/fractures/cube_shape_13.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 14,
 			"mesh_path": "res://assets/generated/fractures/cube_mesh_14.res",
 			"offset": [
-				0.292041639645501,
+				0.292023492917079,
 				0.25,
-				-0.266802330779931
+				-0.266780646904839
 			],
 			"shape_path": "res://assets/generated/fractures/cube_shape_14.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 15,
@@ -305,10 +305,10 @@
 			"offset": [
 				0.25,
 				0.25,
-				0.271685988134355
+				0.271634449076905
 			],
 			"shape_path": "res://assets/generated/fractures/cube_shape_15.res",
-			"surface_count": 1
+			"surface_count": 2
 		}
 	],
 	"cube_var1": [
@@ -316,12 +316,12 @@
 			"index": 0,
 			"mesh_path": "res://assets/generated/fractures/cube_var1_mesh_0.res",
 			"offset": [
-				0.252909304196075,
+				0.25295161984049,
 				-0.220213115215302,
-				0.165694185545397
+				0.165691670963901
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var1_shape_0.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 1,
@@ -329,32 +329,32 @@
 			"offset": [
 				-0.0440042912960052,
 				-0.028481513261795,
-				0.167936812544444
+				0.167936052046501
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var1_shape_1.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 2,
 			"mesh_path": "res://assets/generated/fractures/cube_var1_mesh_2.res",
 			"offset": [
-				-0.265112172506318,
+				-0.265265446565156,
 				-0.194266855716705,
-				-0.165129072674187
+				-0.165225555567758
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var1_shape_2.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 3,
 			"mesh_path": "res://assets/generated/fractures/cube_var1_mesh_3.res",
 			"offset": [
-				0.141304129814194,
-				-0.150396760384086,
+				0.141293421261467,
+				-0.149343741607925,
 				-0.27224338054657
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var1_shape_3.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 4,
@@ -365,73 +365,73 @@
 				-0.106338232755661
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var1_shape_4.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 5,
 			"mesh_path": "res://assets/generated/fractures/cube_var1_mesh_5.res",
 			"offset": [
-				0.0149978408413403,
+				0.0149970850643263,
 				0.216376826167107,
 				-0.140057891607285
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var1_shape_5.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 6,
 			"mesh_path": "res://assets/generated/fractures/cube_var1_mesh_6.res",
 			"offset": [
 				-0.326625168323517,
-				0.284897360108981,
-				-0.332324821704935
+				0.284874158633004,
+				-0.332395750918305
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var1_shape_6.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 7,
 			"mesh_path": "res://assets/generated/fractures/cube_var1_mesh_7.res",
 			"offset": [
-				-0.310385340333292,
-				0.304821609530043,
-				-0.159442406079434
+				-0.310409561135256,
+				0.304798691507619,
+				-0.14674737411194
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var1_shape_7.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 8,
 			"mesh_path": "res://assets/generated/fractures/cube_var1_mesh_8.res",
 			"offset": [
-				-0.261130450761857,
-				-0.389595393168073,
-				-0.356741122373579
+				-0.261190371595521,
+				-0.389672558708529,
+				-0.356833289901837
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var1_shape_8.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 9,
 			"mesh_path": "res://assets/generated/fractures/cube_var1_mesh_9.res",
 			"offset": [
-				-0.26528343532179,
+				-0.265291370970788,
 				-0.25,
-				0.278503413259109
+				0.278526278890762
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var1_shape_9.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 10,
 			"mesh_path": "res://assets/generated/fractures/cube_var1_mesh_10.res",
 			"offset": [
-				-0.3123439153175,
-				0.438860437946074,
-				-0.450763832563851
+				-0.312415130705092,
+				0.426548711453427,
+				-0.45078129228362
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var1_shape_10.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 11,
@@ -439,43 +439,43 @@
 			"offset": [
 				-0.25,
 				0.25,
-				0.301186565243469
+				0.301149800923583
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var1_shape_11.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 12,
 			"mesh_path": "res://assets/generated/fractures/cube_var1_mesh_12.res",
 			"offset": [
-				0.271432275392337,
-				-0.320688919657975,
-				-0.309188922559117
+				0.271522974708529,
+				-0.318478046862618,
+				-0.309236728318778
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var1_shape_12.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 13,
 			"mesh_path": "res://assets/generated/fractures/cube_var1_mesh_13.res",
 			"offset": [
-				0.329982027058025,
+				0.305200999440236,
 				-0.25,
-				0.421097480365085
+				0.421030653842982
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var1_shape_13.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 14,
 			"mesh_path": "res://assets/generated/fractures/cube_var1_mesh_14.res",
 			"offset": [
-				0.337490450737366,
-				0.351981040846404,
-				-0.276106442099431
+				0.326370359883367,
+				0.342735180669263,
+				-0.275943974871281
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var1_shape_14.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 15,
@@ -483,10 +483,10 @@
 			"offset": [
 				0.25,
 				0.25,
-				0.260762923657546
+				0.260687769139357
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var1_shape_15.res",
-			"surface_count": 1
+			"surface_count": 2
 		}
 	],
 	"cube_var2": [
@@ -494,23 +494,23 @@
 			"index": 0,
 			"mesh_path": "res://assets/generated/fractures/cube_var2_mesh_0.res",
 			"offset": [
-				-0.159235662438568,
+				-0.159231510494957,
 				0.154300719499588,
 				0.276985287666321
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var2_shape_0.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 1,
 			"mesh_path": "res://assets/generated/fractures/cube_var2_mesh_1.res",
 			"offset": [
-				-0.243382236808555,
-				-0.241848401361279,
-				0.0766466102281789
+				-0.245622091582347,
+				-0.243261572851381,
+				0.0766268420617648
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var2_shape_1.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 2,
@@ -521,40 +521,40 @@
 				0.205478519201279
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var2_shape_2.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 3,
 			"mesh_path": "res://assets/generated/fractures/cube_var2_mesh_3.res",
 			"offset": [
-				0.00468471522679381,
-				-0.291471792292352,
+				0.00467581250610416,
+				-0.291365369608124,
 				0.215116769075394
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var2_shape_3.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 4,
 			"mesh_path": "res://assets/generated/fractures/cube_var2_mesh_4.res",
 			"offset": [
 				0.199970811605453,
-				-0.237836953858964,
-				-0.226153165102005
+				-0.23790831321246,
+				-0.226320832967758
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var2_shape_4.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 5,
 			"mesh_path": "res://assets/generated/fractures/cube_var2_mesh_5.res",
 			"offset": [
-				0.249602927513943,
+				0.24959752655981,
 				0.148608461022377,
-				-0.156273963536379
+				-0.156279274552499
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var2_shape_5.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 6,
@@ -562,109 +562,109 @@
 			"offset": [
 				-0.189257919788361,
 				0.100648194551468,
-				-0.122297416741836
+				-0.122335120192166
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var2_shape_6.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 7,
 			"mesh_path": "res://assets/generated/fractures/cube_var2_mesh_7.res",
 			"offset": [
-				-0.175900429286817,
+				-0.1759367656883,
 				0.102408371865749,
-				-0.286262109498445
+				-0.286208803616462
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var2_shape_7.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 8,
 			"mesh_path": "res://assets/generated/fractures/cube_var2_mesh_8.res",
 			"offset": [
-				-0.284710378465523,
-				-0.309020247505407,
-				-0.338032473037975
+				-0.286987387270928,
+				-0.310242436423446,
+				-0.33805002883602
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var2_shape_8.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 9,
 			"mesh_path": "res://assets/generated/fractures/cube_var2_mesh_9.res",
 			"offset": [
-				-0.363655060411079,
-				-0.251974044905123,
-				0.411903520665432
+				-0.365147297466271,
+				-0.253541484679379,
+				0.411584381017933
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var2_shape_9.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 10,
 			"mesh_path": "res://assets/generated/fractures/cube_var2_mesh_10.res",
 			"offset": [
-				-0.322369379195722,
-				0.367536915114889,
-				-0.311243042185173
+				-0.322688301019362,
+				0.368359604694149,
+				-0.266015485427405
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var2_shape_10.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 11,
 			"mesh_path": "res://assets/generated/fractures/cube_var2_mesh_11.res",
 			"offset": [
-				-0.311761817415468,
-				0.298741737696866,
-				0.288291480497801
+				-0.311995424170213,
+				0.25681137569551,
+				0.260229378029378
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var2_shape_11.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 12,
 			"mesh_path": "res://assets/generated/fractures/cube_var2_mesh_12.res",
 			"offset": [
-				0.451395760956308,
-				-0.407150679848516,
-				-0.362371667886574
+				0.451466764569517,
+				-0.407226730185262,
+				-0.279821990968639
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var2_shape_12.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 13,
 			"mesh_path": "res://assets/generated/fractures/cube_var2_mesh_13.res",
 			"offset": [
-				0.368157250412504,
-				-0.254851638232027,
-				0.250974557205794
+				0.368166989378719,
+				-0.254776308552381,
+				0.250944529670244
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var2_shape_13.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 14,
 			"mesh_path": "res://assets/generated/fractures/cube_var2_mesh_14.res",
 			"offset": [
-				0.376790720890803,
-				0.359812356254939,
-				-0.349274774118652
+				0.286076768952617,
+				0.266032583844784,
+				-0.330899638228663
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var2_shape_14.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 15,
 			"mesh_path": "res://assets/generated/fractures/cube_var2_mesh_15.res",
 			"offset": [
-				0.297586699608008,
-				0.329971201185407,
-				0.287218355722909
+				0.297457948761339,
+				0.257079335602611,
+				0.287109335478947
 			],
 			"shape_path": "res://assets/generated/fractures/cube_var2_shape_15.res",
-			"surface_count": 1
+			"surface_count": 2
 		}
 	],
 	"inner_corner": [
@@ -672,56 +672,56 @@
 			"index": 0,
 			"mesh_path": "res://assets/generated/fractures/inner_corner_mesh_0.res",
 			"offset": [
-				-0.403334156746495,
+				-0.40335862758738,
 				0.370782494544983,
-				-0.22401229230078
+				-0.224004429845953
 			],
 			"shape_path": "res://assets/generated/fractures/inner_corner_shape_0.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 1,
 			"mesh_path": "res://assets/generated/fractures/inner_corner_mesh_1.res",
 			"offset": [
-				-0.30125560042777,
-				0.21251854348158,
-				0.229284355722948
+				-0.301262075213934,
+				0.212500892942057,
+				0.229284664361243
 			],
 			"shape_path": "res://assets/generated/fractures/inner_corner_shape_1.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 2,
 			"mesh_path": "res://assets/generated/fractures/inner_corner_mesh_2.res",
 			"offset": [
-				-0.101211951227623,
-				0.301108162791422,
-				-0.342990932414599
+				-0.101218425980984,
+				0.301088877573644,
+				-0.342941711366256
 			],
 			"shape_path": "res://assets/generated/fractures/inner_corner_shape_2.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 3,
 			"mesh_path": "res://assets/generated/fractures/inner_corner_mesh_3.res",
 			"offset": [
-				-0.292812853827042,
-				0.133354707138938,
+				-0.292824335719754,
+				0.133363512566236,
 				0.0504081100225449
 			],
 			"shape_path": "res://assets/generated/fractures/inner_corner_shape_3.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 4,
 			"mesh_path": "res://assets/generated/fractures/inner_corner_mesh_4.res",
 			"offset": [
 				0.170997396111488,
-				-0.014979105010689,
+				-0.0149737085296821,
 				0.0
 			],
 			"shape_path": "res://assets/generated/fractures/inner_corner_shape_4.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 5,
@@ -732,73 +732,73 @@
 				0.0121810305863619
 			],
 			"shape_path": "res://assets/generated/fractures/inner_corner_shape_5.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 6,
 			"mesh_path": "res://assets/generated/fractures/inner_corner_mesh_6.res",
 			"offset": [
-				-0.214201168926774,
-				0.0819306550150207,
-				-0.268350240010414
+				-0.214635047325554,
+				0.0819035904176633,
+				-0.279081226382476
 			],
 			"shape_path": "res://assets/generated/fractures/inner_corner_shape_6.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 7,
 			"mesh_path": "res://assets/generated/fractures/inner_corner_mesh_7.res",
 			"offset": [
-				0.0028257588437437,
-				0.193274656662786,
-				-0.265379489638449
+				0.00278621686715574,
+				0.193275424742871,
+				-0.269004688006857
 			],
 			"shape_path": "res://assets/generated/fractures/inner_corner_shape_7.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 8,
 			"mesh_path": "res://assets/generated/fractures/inner_corner_mesh_8.res",
 			"offset": [
-				-0.283372208088238,
+				-0.283377435932074,
 				-0.25,
-				0.259500000780433
+				0.259556892919794
 			],
 			"shape_path": "res://assets/generated/fractures/inner_corner_shape_8.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 9,
 			"mesh_path": "res://assets/generated/fractures/inner_corner_mesh_9.res",
 			"offset": [
 				-0.25,
-				-0.324625629339322,
-				-0.256840395149578
+				-0.324668160925192,
+				-0.257115029551996
 			],
 			"shape_path": "res://assets/generated/fractures/inner_corner_shape_9.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 10,
 			"mesh_path": "res://assets/generated/fractures/inner_corner_mesh_10.res",
 			"offset": [
-				-0.352351523435802,
-				0.412597980223557,
-				-0.412880004525598
+				-0.364550893966423,
+				0.412402267143227,
+				-0.413101998269695
 			],
 			"shape_path": "res://assets/generated/fractures/inner_corner_shape_10.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 11,
 			"mesh_path": "res://assets/generated/fractures/inner_corner_mesh_11.res",
 			"offset": [
-				-0.380692212556023,
+				-0.317283300355529,
 				0.25,
-				0.389468927854478
+				0.414487808171041
 			],
 			"shape_path": "res://assets/generated/fractures/inner_corner_shape_11.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 12,
@@ -809,29 +809,29 @@
 				-0.25
 			],
 			"shape_path": "res://assets/generated/fractures/inner_corner_shape_12.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 13,
 			"mesh_path": "res://assets/generated/fractures/inner_corner_mesh_13.res",
 			"offset": [
-				0.278976632663108,
-				-0.316175714939273,
+				0.278976132355277,
+				-0.31622466688443,
 				0.25
 			],
 			"shape_path": "res://assets/generated/fractures/inner_corner_shape_13.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 14,
 			"mesh_path": "res://assets/generated/fractures/inner_corner_mesh_14.res",
 			"offset": [
-				0.292041639645501,
+				0.297941278329997,
 				0.25,
-				-0.358790337514592
+				-0.358792837955472
 			],
 			"shape_path": "res://assets/generated/fractures/inner_corner_shape_14.res",
-			"surface_count": 1
+			"surface_count": 2
 		}
 	],
 	"ramp": [
@@ -839,155 +839,155 @@
 			"index": 0,
 			"mesh_path": "res://assets/generated/fractures/ramp_mesh_0.res",
 			"offset": [
-				-0.403334156746495,
+				-0.40335862758738,
 				0.370782494544983,
-				-0.212801254174753
+				-0.212892460724423
 			],
 			"shape_path": "res://assets/generated/fractures/ramp_shape_0.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 1,
 			"mesh_path": "res://assets/generated/fractures/ramp_mesh_1.res",
 			"offset": [
-				-0.30125560042777,
-				0.21251854348158,
-				0.229284355722948
+				-0.301262075213934,
+				0.212500892942057,
+				0.229284664361243
 			],
 			"shape_path": "res://assets/generated/fractures/ramp_shape_1.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 2,
 			"mesh_path": "res://assets/generated/fractures/ramp_mesh_2.res",
 			"offset": [
-				-0.221072183228776,
-				0.219817332745908,
-				-0.266485037374844
+				-0.220994524611497,
+				0.220272194841764,
+				-0.266547138375646
 			],
 			"shape_path": "res://assets/generated/fractures/ramp_shape_2.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 3,
 			"mesh_path": "res://assets/generated/fractures/ramp_mesh_3.res",
 			"offset": [
-				-0.292812853827042,
-				0.133354707138938,
+				-0.292824335719754,
+				0.133363512566236,
 				0.0504081100225449
 			],
 			"shape_path": "res://assets/generated/fractures/ramp_shape_3.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 4,
 			"mesh_path": "res://assets/generated/fractures/ramp_mesh_4.res",
 			"offset": [
-				0.0153445226170452,
-				-0.0359283771413875,
-				0.00244508313919811
+				0.0154061114636237,
+				-0.0359828402961082,
+				0.0236946549266577
 			],
 			"shape_path": "res://assets/generated/fractures/ramp_shape_4.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 5,
 			"mesh_path": "res://assets/generated/fractures/ramp_mesh_5.res",
 			"offset": [
-				-0.0212460688513639,
+				-0.021225846887559,
 				-0.246198922395706,
 				0.0121810305863619
 			],
 			"shape_path": "res://assets/generated/fractures/ramp_shape_5.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 6,
 			"mesh_path": "res://assets/generated/fractures/ramp_mesh_6.res",
 			"offset": [
-				-0.217396055017888,
-				0.0819306550150207,
-				-0.268350240010414
+				-0.217527239452316,
+				0.0819035904176633,
+				-0.279081226382476
 			],
 			"shape_path": "res://assets/generated/fractures/ramp_shape_6.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 7,
 			"mesh_path": "res://assets/generated/fractures/ramp_mesh_7.res",
 			"offset": [
-				-0.0979667027742362,
-				0.0829640701261495,
-				-0.225847414610514
+				-0.0995965739000528,
+				0.0829939104553732,
+				-0.23413009755189
 			],
 			"shape_path": "res://assets/generated/fractures/ramp_shape_7.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 8,
 			"mesh_path": "res://assets/generated/fractures/ramp_mesh_8.res",
 			"offset": [
-				-0.283372208088238,
+				-0.283377435932074,
 				-0.25,
-				0.259500000780433
+				0.259556892919794
 			],
 			"shape_path": "res://assets/generated/fractures/ramp_shape_8.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 9,
 			"mesh_path": "res://assets/generated/fractures/ramp_mesh_9.res",
 			"offset": [
 				-0.25,
-				-0.324625629339322,
-				-0.256840395149578
+				-0.324668160925192,
+				-0.257115029551996
 			],
 			"shape_path": "res://assets/generated/fractures/ramp_shape_9.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 10,
 			"mesh_path": "res://assets/generated/fractures/ramp_mesh_10.res",
 			"offset": [
-				-0.415950981294151,
-				0.412597980223557,
-				-0.412880004525598
+				-0.415849634810151,
+				0.412402267143227,
+				-0.422500988833519
 			],
 			"shape_path": "res://assets/generated/fractures/ramp_shape_10.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 11,
 			"mesh_path": "res://assets/generated/fractures/ramp_mesh_11.res",
 			"offset": [
-				-0.380692212556023,
+				-0.317283300355529,
 				0.25,
-				0.389468927854478
+				0.414487808171041
 			],
 			"shape_path": "res://assets/generated/fractures/ramp_shape_11.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 12,
 			"mesh_path": "res://assets/generated/fractures/ramp_mesh_12.res",
 			"offset": [
 				0.25,
-				-0.282603944982112,
+				-0.282465485940631,
 				-0.25
 			],
 			"shape_path": "res://assets/generated/fractures/ramp_shape_12.res",
-			"surface_count": 1
+			"surface_count": 2
 		},
 		{
 			"index": 13,
 			"mesh_path": "res://assets/generated/fractures/ramp_mesh_13.res",
 			"offset": [
-				0.278976632663108,
-				-0.388498711897122,
-				0.375975861937081
+				0.278976132355277,
+				-0.31622466688443,
+				0.25
 			],
 			"shape_path": "res://assets/generated/fractures/ramp_shape_13.res",
-			"surface_count": 1
+			"surface_count": 2
 		}
 	]
 }

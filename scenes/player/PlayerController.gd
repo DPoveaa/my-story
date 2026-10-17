@@ -2261,7 +2261,7 @@ func _spawn_voxel_fragments_burst(center: Vector3, block_type: StringName, block
 				mesh_inst.set_surface_override_material(0, inner_mat)
 				mesh_inst.set_surface_override_material(1, outer_mat)
 			else:
-				mesh_inst.set_surface_override_material(0, inner_mat)
+				mesh_inst.set_surface_override_material(0, outer_mat)
 
 			var col := CollisionShape3D.new()
 			col.shape = p_shape
@@ -2380,7 +2380,7 @@ func _spawn_single_shard_fragment(pos: Vector3, toss_velocity: Vector3, ftype: S
 		mesh_inst.set_surface_override_material(0, inner_mat)
 		mesh_inst.set_surface_override_material(1, outer_mat)
 	else:
-		mesh_inst.set_surface_override_material(0, inner_mat)
+		mesh_inst.set_surface_override_material(0, outer_mat)
 
 	var col := CollisionShape3D.new()
 	col.shape = p_shape

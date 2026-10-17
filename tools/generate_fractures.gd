@@ -81,7 +81,61 @@ func run_generation() -> bool:
 			if vm == null or vm.mesh == null or vm.mesh.get_surface_count() == 0:
 				continue
 
-			var piece_mesh: ArrayMesh = vm.mesh
+			var raw_mesh: ArrayMesh = vm.mesh
+			var piece_center_in_voxel: Vector3 = -vm.position
+			var rel_offset: Vector3 = piece_center_in_voxel - Vector3(0.5, 0.5, 0.5)
+
+			# Classify triangles into interior (fracture cleavage) and exterior (original voxel surface)
+			var int_verts := PackedVector3Array()
+			var int_norms := PackedVector3Array()
+			var ext_verts := PackedVector3Array()
+			var ext_norms := PackedVector3Array()
+
+			for s in range(raw_mesh.get_surface_count()):
+				var arr := raw_mesh.surface_get_arrays(s)
+				if arr.is_empty():
+					continue
+				var verts: PackedVector3Array = arr[Mesh.ARRAY_VERTEX]
+				var norms: PackedVector3Array = arr[Mesh.ARRAY_NORMAL] if arr[Mesh.ARRAY_NORMAL] != null else PackedVector3Array()
+				var num_tris := verts.size() / 3
+				for t in range(num_tris):
+					var v0: Vector3 = verts[t * 3]
+					var v1: Vector3 = verts[t * 3 + 1]
+					var v2: Vector3 = verts[t * 3 + 2]
+					var n: Vector3 = norms[t * 3] if norms.size() > t * 3 else (v1 - v0).cross(v2 - v0).normalized()
+
+					# Position of vertices in the original voxel coordinate space [0, 1]^3
+					var p0: Vector3 = v0 + piece_center_in_voxel
+					var p1: Vector3 = v1 + piece_center_in_voxel
+					var p2: Vector3 = v2 + piece_center_in_voxel
+
+					if _is_exterior_triangle(shape_name, p0, p1, p2, n):
+						ext_verts.append(v0); ext_verts.append(v1); ext_verts.append(v2)
+						ext_norms.append(n); ext_norms.append(n); ext_norms.append(n)
+					else:
+						int_verts.append(v0); int_verts.append(v1); int_verts.append(v2)
+						int_norms.append(n); int_norms.append(n); int_norms.append(n)
+
+			var piece_mesh := ArrayMesh.new()
+			# Surface 0: Interior fracture faces
+			if not int_verts.is_empty():
+				var i_arr: Array = []
+				i_arr.resize(Mesh.ARRAY_MAX)
+				i_arr[Mesh.ARRAY_VERTEX] = int_verts
+				i_arr[Mesh.ARRAY_NORMAL] = int_norms
+				piece_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, i_arr)
+
+			# Surface 1: Exterior voxel faces (retains grass/dirt/stone terrain material)
+			if not ext_verts.is_empty():
+				var e_arr: Array = []
+				e_arr.resize(Mesh.ARRAY_MAX)
+				e_arr[Mesh.ARRAY_VERTEX] = ext_verts
+				e_arr[Mesh.ARRAY_NORMAL] = ext_norms
+				piece_mesh.add_surface_from_arrays(Mesh.PRIMITIVE_TRIANGLES, e_arr)
+
+			if piece_mesh.get_surface_count() == 0:
+				piece_mesh = raw_mesh
+
 			var mesh_filename := "%s_mesh_%d.res" % [shape_name, i]
 			var shape_filename := "%s_shape_%d.res" % [shape_name, i]
 			var mesh_path := OUTPUT_DIR + mesh_filename
@@ -111,11 +165,6 @@ func run_generation() -> bool:
 				printerr("[FractureGenerator] Failed to save shape: ", shape_path, " error: ", err_shape)
 				root.free()
 				return false
-
-			# Piece center relative to voxel center (0.5, 0.5, 0.5)
-			# vm.position is -offset, where offset is the center in voxel [0, 1]^3 space
-			var piece_center_in_voxel: Vector3 = -vm.position
-			var rel_offset: Vector3 = piece_center_in_voxel - Vector3(0.5, 0.5, 0.5)
 
 			pieces_data.append({
 				"index": i,
@@ -246,10 +295,10 @@ func _build_inner_corner_mesh() -> ArrayMesh:
 	# Front wall z=1 (BACK: 0, 0, 1)
 	_add_tri(st, b3, b2, t3, Vector3.BACK)
 	# Top slopes descending to Low (b2):
-	# Slope 1: t0, t1, b2 (outward normal: 1, 1, 0)
-	_add_tri(st, t0, t1, b2, Vector3(1, 1, 0))
-	# Slope 2: t0, b2, t3 (outward normal: 0, 1, 1)
-	_add_tri(st, t0, b2, t3, Vector3(0, 1, 1))
+	# Slope 1: t0, b2, t1 (outward normal: 0, 1, 1)
+	_add_tri(st, t0, b2, t1, Vector3(0, 1, 1))
+	# Slope 2: t0, t3, b2 (outward normal: 1, 1, 0)
+	_add_tri(st, t0, t3, b2, Vector3(1, 1, 0))
 
 	st.generate_normals()
 	st.index()
@@ -272,3 +321,28 @@ func _add_tri(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, outward_norma
 func _add_quad(st: SurfaceTool, a: Vector3, b: Vector3, c: Vector3, d: Vector3, outward_normal: Vector3 = Vector3.ZERO) -> void:
 	_add_tri(st, a, b, c, outward_normal)
 	_add_tri(st, a, c, d, outward_normal)
+
+## Determines if a triangle in voxel space [0, 1]^3 lies on an exterior boundary face of the canonical shape
+func _is_exterior_triangle(shape_name: String, p0: Vector3, p1: Vector3, p2: Vector3, n: Vector3) -> bool:
+	const EPS := 0.015
+	var is_bottom := p0.y < EPS and p1.y < EPS and p2.y < EPS and n.y < -0.6
+	var is_back_wall := p0.x < EPS and p1.x < EPS and p2.x < EPS and n.x < -0.6
+	var is_side_forward := p0.z < EPS and p1.z < EPS and p2.z < EPS and n.z < -0.6
+	var is_side_back := p0.z > (1.0 - EPS) and p1.z > (1.0 - EPS) and p2.z > (1.0 - EPS) and n.z > 0.6
+	var is_right_wall := p0.x > (1.0 - EPS) and p1.x > (1.0 - EPS) and p2.x > (1.0 - EPS) and n.x > 0.6
+	var is_top_flat := p0.y > (1.0 - EPS) and p1.y > (1.0 - EPS) and p2.y > (1.0 - EPS) and n.y > 0.6
+
+	if shape_name.begins_with("cube"):
+		return is_bottom or is_top_flat or is_back_wall or is_right_wall or is_side_forward or is_side_back
+	elif shape_name == "ramp":
+		var is_slope := absf(p0.x + p0.y - 1.0) < 0.03 and absf(p1.x + p1.y - 1.0) < 0.03 and absf(p2.x + p2.y - 1.0) < 0.03 and n.x > 0.35 and n.y > 0.35
+		return is_bottom or is_back_wall or is_side_forward or is_side_back or is_slope
+	elif shape_name == "corner":
+		var is_slope1 := absf(p0.x + p0.y - 1.0) < 0.03 and absf(p1.x + p1.y - 1.0) < 0.03 and absf(p2.x + p2.y - 1.0) < 0.03 and n.x > 0.35 and n.y > 0.35
+		var is_slope2 := absf(p0.z + p0.y - 1.0) < 0.03 and absf(p1.z + p1.y - 1.0) < 0.03 and absf(p2.z + p2.y - 1.0) < 0.03 and n.z > 0.35 and n.y > 0.35
+		return is_bottom or is_back_wall or is_side_forward or is_slope1 or is_slope2
+	elif shape_name == "inner_corner":
+		var is_slope1 := absf(p0.y + p0.z - 1.0) < 0.03 and absf(p1.y + p1.z - 1.0) < 0.03 and absf(p2.y + p2.z - 1.0) < 0.03 and n.y > 0.35 and n.z > 0.35
+		var is_slope2 := absf(p0.x + p0.y - 1.0) < 0.03 and absf(p1.x + p1.y - 1.0) < 0.03 and absf(p2.x + p2.y - 1.0) < 0.03 and n.x > 0.35 and n.y > 0.35
+		return is_bottom or is_back_wall or is_side_forward or is_right_wall or is_side_back or is_slope1 or is_slope2
+	return false

@@ -29,6 +29,7 @@ func _ready() -> void:
 	axis_lock_angular_x = false
 	axis_lock_angular_y = false
 	axis_lock_angular_z = false
+	center_of_mass_mode = RigidBody3D.CENTER_OF_MASS_MODE_CUSTOM
 	center_of_mass = Vector3(0.0, trunk_height * 0.45, 0.0)
 
 ## amount: axe damage. hit_direction: vector from player toward/away (tree - player).
@@ -139,12 +140,12 @@ func _fell(hit_direction: Vector3) -> void:
 
 	# 1. Apply moderate lateral impulse on upper trunk for natural toppling leverage
 	var top_offset := Vector3(0.0, trunk_height * 0.65, 0.0)
-	apply_impulse(push_dir * (fell_impulse * 0.8), top_offset)
+	apply_impulse(push_dir * fell_impulse, top_offset)
 
 	# 2. Moderate torque impulse — initiates clean, natural toppling rotation without violent flipping
 	var fall_dir: Vector3 = push_dir
-	var torque_axis: Vector3 = fall_dir.cross(Vector3.UP).normalized()
-	apply_torque_impulse(torque_axis * 40.0)
+	var torque_axis: Vector3 = Vector3.UP.cross(fall_dir).normalized()
+	apply_torque_impulse(torque_axis * (fell_impulse * 2.5))
 
 	# 3. Fallback timer (2.0 seconds) in case tree snags without triggering body_entered
 	if is_inside_tree():
