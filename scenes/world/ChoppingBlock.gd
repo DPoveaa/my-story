@@ -60,6 +60,16 @@ func can_accept_log(for_worker: Node = null) -> bool:
 				return true
 			else:
 				return false
+		elif w == null:
+			pass
+		else:
+			set_meta("worker_reserved_by", null)
+
+	# Clean up any stale worker_assigned metadata if there is no valid active reservation
+	if reserved_worker == null and (not has_meta("worker_reserved_by") or get_meta("worker_reserved_by") == null):
+		if has_meta("worker_assigned") and bool(get_meta("worker_assigned")):
+			set_meta("worker_assigned", false)
+
 	return true
 
 func reserve(worker: Node) -> bool:
@@ -82,6 +92,9 @@ func try_place_log() -> bool:
 	has_log = true
 	if visual_log != null:
 		visual_log.visible = true
+	reserved_worker = null
+	set_meta("worker_reserved_by", null)
+	set_meta("worker_assigned", false)
 	return true
 
 func try_chop() -> bool:

@@ -195,7 +195,16 @@ func _spawn_player_on_terrain() -> void:
 			player.suspend_physics()
 		return
 
-	# Confirmed valid spawn surface and collision!
+	# Initialize A* centred on the confirmed spawn during the loading phase.
+	# Keep loading overlay visible until the nearby navigation graph is usable.
+	if astar_grid != null:
+		if build_hud != null and build_hud.has_method("set_loading_overlay"):
+			build_hud.set_loading_overlay(true, "Building navigation graph…")
+		astar_grid.initialize_once(safe_spawn)
+		if astar_grid.has_method("ensure_nearby_graph_ready"):
+			await astar_grid.ensure_nearby_graph_ready(safe_spawn)
+
+	# Confirmed valid spawn surface, collision, and initial navigation!
 	if player.has_method("resume_at_spawn"):
 		player.resume_at_spawn(safe_spawn)
 	else:
@@ -205,12 +214,6 @@ func _spawn_player_on_terrain() -> void:
 
 	if build_hud != null and build_hud.has_method("set_loading_overlay"):
 		build_hud.set_loading_overlay(false)
-
-	# Initialize A* exactly once, centred on the confirmed spawn.
-	# initialize_once() is a no-op if called a second time, so late chunk_loaded
-	# signals cannot trigger a redundant full rebuild.
-	if astar_grid != null:
-		astar_grid.initialize_once(safe_spawn)
 
 func _process(_delta: float) -> void:
 	## Feed the player's current position to AStarGridManager so the graph stays centred on them.

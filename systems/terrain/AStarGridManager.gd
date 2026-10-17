@@ -157,6 +157,30 @@ const FRAME_BUDGET_MS: float = 2.0
 func _ready() -> void:
 	pass  ## No startup delay needed — physics queries are skipped during initial bake.
 
+var _rebuild_emit_pending: bool = false
+
+func _notify_graph_changed() -> void:
+	if _rebuild_emit_pending:
+		return
+	_rebuild_emit_pending = true
+	call_deferred("_do_emit_graph_rebuilt")
+
+func _do_emit_graph_rebuilt() -> void:
+	_rebuild_emit_pending = false
+	graph_rebuilt.emit()
+
+func ensure_nearby_graph_ready(spawn_pos: Vector3) -> void:
+	var center_cp := Vector2i(floori(spawn_pos.x / float(CHUNK_SIZE)), floori(spawn_pos.z / float(CHUNK_SIZE)))
+	# Incrementally bake chunks until the center spawn chunk is complete
+	var max_wait_frames: int = 120
+	while max_wait_frames > 0:
+		if _baked_chunks.has(center_cp) and not (_is_chunk_active and _active_chunk == center_cp):
+			break
+		_step_bake_slice(6.0)
+		if is_inside_tree():
+			await get_tree().process_frame
+		max_wait_frames -= 1
+
 func _physics_process(_delta: float) -> void:
 	if not _is_chunk_active and _pending_chunks.is_empty():
 		# Queue just drained — emit graph_rebuilt once and mark initial bake complete.
@@ -167,15 +191,18 @@ func _physics_process(_delta: float) -> void:
 				if _t_bake_start > 0:
 					var elapsed: int = Time.get_ticks_msec() - _t_bake_start
 					print("[StartupTiming] A* baking took: %d ms" % elapsed)
-			graph_rebuilt.emit()
+			_notify_graph_changed()
 		return
 
 	# Incrementally process chunk baking stages within the per-frame time budget.
+	_step_bake_slice(FRAME_BUDGET_MS)
+
+func _step_bake_slice(budget_ms: float) -> bool:
 	var frame_start_ms: int = Time.get_ticks_msec()
 	while true:
 		if not _is_chunk_active:
 			if _pending_chunks.is_empty():
-				break
+				return false
 			var next_chunk = _pending_chunks.pop_front()
 			_begin_chunk_bake(next_chunk)
 			if not _is_chunk_active:
@@ -197,7 +224,7 @@ func _physics_process(_delta: float) -> void:
 				var z: int = start_z + lz
 
 				var surf_y: int = -1
-				if _voxel_world.has_method("get_highest_solid_y"):
+				if _voxel_world != null and _voxel_world.has_method("get_highest_solid_y"):
 					surf_y = _voxel_world.get_highest_solid_y(x, z)
 
 				if surf_y >= min_y:
@@ -220,9 +247,9 @@ func _physics_process(_delta: float) -> void:
 						else:
 							y += 1
 
-				if _active_col_idx % 8 == 0:
-					if float(Time.get_ticks_msec() - frame_start_ms) >= FRAME_BUDGET_MS:
-						return
+				if _active_col_idx % 2 == 0:
+					if float(Time.get_ticks_msec() - frame_start_ms) >= budget_ms:
+						return true
 
 			_bake_stage = BakeStage.REGISTERING_POINTS
 			_active_node_idx = 0
@@ -245,9 +272,9 @@ func _physics_process(_delta: float) -> void:
 					_column_to_cells[col] = []
 				_column_to_cells[col].append(cell)
 
-				if _active_node_idx % 16 == 0:
-					if float(Time.get_ticks_msec() - frame_start_ms) >= FRAME_BUDGET_MS:
-						return
+				if _active_node_idx % 4 == 0:
+					if float(Time.get_ticks_msec() - frame_start_ms) >= budget_ms:
+						return true
 
 			var cp: Vector2i = _active_chunk
 			if not _chunk_points.has(cp):
@@ -265,9 +292,9 @@ func _physics_process(_delta: float) -> void:
 				_active_node_idx += 1
 				_connect_point_neighbors(cell)
 
-				if _active_node_idx % 8 == 0:
-					if float(Time.get_ticks_msec() - frame_start_ms) >= FRAME_BUDGET_MS:
-						return
+				if _active_node_idx % 2 == 0:
+					if float(Time.get_ticks_msec() - frame_start_ms) >= budget_ms:
+						return true
 
 			# Chunk bake completely finished!
 			_is_chunk_active = false
@@ -275,8 +302,10 @@ func _physics_process(_delta: float) -> void:
 			_physics_blocked_cache.clear()
 			_graph_rebuilt_pending = true
 
-		if float(Time.get_ticks_msec() - frame_start_ms) >= FRAME_BUDGET_MS:
-			break
+		if float(Time.get_ticks_msec() - frame_start_ms) >= budget_ms:
+			return true
+
+	return false
 
 func _is_position_blocked_by_physics(cell: Vector3i) -> bool:
 	if not _initial_bake_done:
@@ -376,10 +405,21 @@ func rebuild_graph() -> void:
 	var min_cz: int = floori(float(cz - half_xz) / float(CHUNK_SIZE))
 	var max_cz: int = floori(float(cz + half_xz) / float(CHUNK_SIZE))
 
+	var center_cp := Vector2i(floori(float(cx) / float(CHUNK_SIZE)), floori(float(cz) / float(CHUNK_SIZE)))
+	var chunk_list: Array[Vector2i] = []
 	for cz_idx in range(min_cz, max_cz + 1):
 		for cx_idx in range(min_cx, max_cx + 1):
-			var cp := Vector2i(cx_idx, cz_idx)
-			queue_chunk(cp)
+			chunk_list.append(Vector2i(cx_idx, cz_idx))
+
+	# Radial sort: nearest chunks to player spawn are baked first!
+	chunk_list.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+		var da: int = (a.x - center_cp.x) * (a.x - center_cp.x) + (a.y - center_cp.y) * (a.y - center_cp.y)
+		var db: int = (b.x - center_cp.x) * (b.x - center_cp.x) + (b.y - center_cp.y) * (b.y - center_cp.y)
+		return da < db
+	)
+
+	for cp in chunk_list:
+		queue_chunk(cp)
 
 ## Begin an incremental chunk bake (used by _physics_process for the 2ms budget loop).
 func _begin_chunk_bake(current_chunk: Variant) -> void:
@@ -487,7 +527,7 @@ func _update_columns_batch(cols: Array[Vector2i]) -> void:
 	for adj_col in neighbor_cols.keys():
 		_reconnect_column(adj_col.x, adj_col.y)
 
-	graph_rebuilt.emit()
+	_notify_graph_changed()
 
 func _update_local_column(x: int, z: int) -> void:
 	if _voxel_world == null:
@@ -659,7 +699,7 @@ func find_astar_path(from_world: Vector3, to_world: Vector3) -> PackedVector3Arr
 func get_astar_path(from_world: Vector3, to_world: Vector3) -> PackedVector3Array:
 	return find_astar_path(from_world, to_world)
 
-func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: float = 0.8, max_dist: float = 2.4) -> PackedVector3Array:
+func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: float = 0.8, max_dist: float = 1.5, max_vert: float = 1.3) -> PackedVector3Array:
 	## Finds an optimized path from from_world to a valid, walkable approach node beside target_world.
 	var from_id := _closest_point_id(from_world)
 	if from_id < 0:
@@ -682,7 +722,7 @@ func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: fl
 				var horiz_d: float = Vector2(cand_pos.x - target_world.x, cand_pos.z - target_world.z).length()
 				var y_diff: float = absf(cand_pos.y - target_world.y)
 				# Ensure candidate is outside the obstacle boundary and within reachable distance
-				if horiz_d >= min_dist and horiz_d <= max_dist and y_diff <= 1.5:
+				if horiz_d >= min_dist and horiz_d <= max_dist and y_diff <= max_vert:
 					if _is_position_blocked_by_physics(cell):
 						continue
 					var d_from: float = cand_pos.distance_squared_to(from_world)
@@ -695,11 +735,17 @@ func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: fl
 		return a["dist_from"] < b["dist_from"]
 	)
 
-	for i in range(mini(6, candidates.size())):
+	for i in range(mini(8, candidates.size())):
 		var cand_id: int = candidates[i]["id"]
 		var raw: PackedVector3Array = _astar.get_point_path(from_id, cand_id)
 		if not raw.is_empty():
-			return optimize_path(raw)
+			var opt: PackedVector3Array = optimize_path(raw)
+			if not opt.is_empty():
+				var end_pt: Vector3 = opt[opt.size() - 1]
+				var end_horiz: float = Vector2(end_pt.x - target_world.x, end_pt.z - target_world.z).length()
+				var end_vert: float = absf(end_pt.y - target_world.y)
+				if end_horiz <= max_dist + 0.15 and end_vert <= max_vert:
+					return opt
 
 	return PackedVector3Array()
 

@@ -4331,7 +4331,19 @@ func _update_station_ghost() -> void:
 		return
 	if has_target and _craft_floor_valid:
 		station_ghost_mesh.visible = true
-		station_ghost_mesh.global_transform = _align_station_transform(_target_hit_point, _target_hit_normal)
+		var xform: Transform3D = _align_station_transform(_target_hit_point, _target_hit_normal)
+		if station_to_place == "Spawn Worker":
+			var fwd: Vector3 = -xform.basis.z
+			fwd.y = 0.0
+			if fwd.length_squared() < 0.0001:
+				fwd = -global_transform.basis.z
+				fwd.y = 0.0
+			if fwd.length_squared() < 0.0001:
+				fwd = Vector3.FORWARD
+			fwd = fwd.normalized()
+			var yaw: float = atan2(-fwd.x, -fwd.z)
+			xform.basis = Basis(Vector3.UP, yaw)
+		station_ghost_mesh.global_transform = xform
 	else:
 		station_ghost_mesh.visible = false
 
@@ -4383,7 +4395,16 @@ func _confirm_station_placement() -> void:
 		if parent_node != null:
 			var worker: Node3D = WorkerScene.instantiate() as Node3D
 			parent_node.add_child(worker)
-			var w_xform: Transform3D = place_xform
+			var fwd: Vector3 = -place_xform.basis.z
+			fwd.y = 0.0
+			if fwd.length_squared() < 0.0001:
+				fwd = -global_transform.basis.z
+				fwd.y = 0.0
+			if fwd.length_squared() < 0.0001:
+				fwd = Vector3.FORWARD
+			fwd = fwd.normalized()
+			var yaw: float = atan2(-fwd.x, -fwd.z)
+			var w_xform: Transform3D = Transform3D(Basis(Vector3.UP, yaw), place_xform.origin)
 			var nav_map: RID = get_world_3d().navigation_map if get_world_3d() != null else RID()
 			if nav_map.is_valid():
 				var closest: Vector3 = NavigationServer3D.map_get_closest_point(nav_map, w_xform.origin)
@@ -4409,7 +4430,13 @@ func spawn_worker_at_cursor() -> Node3D:
 			spawn_pos = closest + Vector3.UP * 0.05
 	var worker: Node3D = WorkerScene.instantiate() as Node3D
 	parent_node.add_child(worker)
-	worker.global_position = spawn_pos
+	var fwd: Vector3 = -global_transform.basis.z
+	fwd.y = 0.0
+	if fwd.length_squared() < 0.0001:
+		fwd = Vector3.FORWARD
+	fwd = fwd.normalized()
+	var yaw: float = atan2(-fwd.x, -fwd.z)
+	worker.global_transform = Transform3D(Basis(Vector3.UP, yaw), spawn_pos)
 	return worker
 
 func _cancel_station_placement() -> void:
