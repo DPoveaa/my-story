@@ -3067,7 +3067,7 @@ func _process_flying_movement(delta: float) -> void:
 	move_and_slide()
 
 func _try_step_up(move_dir: Vector3, _delta: float) -> void:
-	if not is_inside_tree():
+	if not is_inside_tree() or get_world_3d() == null or not get_world_3d().space.is_valid():
 		return
 	var space := get_world_3d().direct_space_state
 	if space == null:
@@ -3154,8 +3154,12 @@ func _update_raycast() -> void:
 	var cam := get_active_camera()
 	if cam == null or not is_instance_valid(cam):
 		return
+	if not is_inside_tree() or get_world_3d() == null or not get_world_3d().space.is_valid():
+		return
 
 	var space_state := get_world_3d().direct_space_state
+	if space_state == null:
+		return
 	var ray_origin: Vector3
 	var ray_dir: Vector3
 
@@ -3680,6 +3684,8 @@ func _process_held_item_snagging(_delta: float) -> void:
 	var up: Vector3 = cam.global_transform.basis.y
 	var hold_target: Vector3 = cam_pos + right * 0.35 - up * 0.4 + fwd * 0.65
 
+	if not is_inside_tree() or get_world_3d() == null or not get_world_3d().space.is_valid():
+		return
 	var space_state := get_world_3d().direct_space_state
 	if space_state == null:
 		return
@@ -3918,13 +3924,14 @@ func _drop_one_held_item_instance(item: RigidBody3D) -> void:
 	var drop_pos: Vector3 = cam_pos + aim_dir * 1.5
 
 	# Clamp to raycast hit if obstacle/floor is closer than 1.5m (Task 4)
-	var space_state := get_world_3d().direct_space_state
-	if space_state != null:
-		var ray_query := PhysicsRayQueryParameters3D.create(cam_pos, cam_pos + aim_dir * 1.5, 1)
-		ray_query.exclude = [self.get_rid()]
-		var res := space_state.intersect_ray(ray_query)
-		if not res.is_empty():
-			drop_pos = (res.position as Vector3) - aim_dir * 0.15
+	if is_inside_tree() and get_world_3d() != null and get_world_3d().space.is_valid():
+		var space_state := get_world_3d().direct_space_state
+		if space_state != null:
+			var ray_query := PhysicsRayQueryParameters3D.create(cam_pos, cam_pos + aim_dir * 1.5, 1)
+			ray_query.exclude = [self.get_rid()]
+			var res := space_state.intersect_ray(ray_query)
+			if not res.is_empty():
+				drop_pos = (res.position as Vector3) - aim_dir * 0.15
 
 	# Reset scale to full size before returning to the world.
 	item.scale = Vector3.ONE

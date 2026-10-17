@@ -342,7 +342,7 @@ func _update_recovery_preview(cam: Camera3D) -> void:
 	var ray_dir := -cam.global_transform.basis.z
 	var ray_end := ray_origin + ray_dir * recovery_max_distance
 
-	if not is_inside_tree():
+	if not is_inside_tree() or get_world_3d() == null or not get_world_3d().space.is_valid():
 		preview_ghost.hide_preview()
 		return
 

@@ -316,16 +316,19 @@ func _is_position_blocked_by_physics(cell: Vector3i) -> bool:
 	_physics_blocked_cache[cell] = res
 	return res
 
-func _query_position_blocked_by_physics(cell: Vector3i) -> bool:
+func _get_direct_space_state() -> PhysicsDirectSpaceState3D:
 	if not is_inside_tree():
-		return false
+		return null
 	var viewport := get_viewport()
 	if viewport == null:
-		return false
+		return null
 	var world_3d: World3D = viewport.find_world_3d()
 	if world_3d == null or not world_3d.space.is_valid():
-		return false
-	var direct_state: PhysicsDirectSpaceState3D = world_3d.direct_space_state
+		return null
+	return world_3d.direct_space_state
+
+func _query_position_blocked_by_physics(cell: Vector3i) -> bool:
+	var direct_state := _get_direct_space_state()
 	if direct_state == null:
 		return false
 
@@ -699,7 +702,7 @@ func find_astar_path(from_world: Vector3, to_world: Vector3) -> PackedVector3Arr
 func get_astar_path(from_world: Vector3, to_world: Vector3) -> PackedVector3Array:
 	return find_astar_path(from_world, to_world)
 
-func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: float = 0.8, max_dist: float = 1.5, max_vert: float = 1.3) -> PackedVector3Array:
+func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: float = 0.8, max_dist: float = 1.5, max_vert: float = 1.3, half_extents: Vector2 = Vector2.ZERO) -> PackedVector3Array:
 	## Finds an optimized path from from_world to a valid, walkable approach node beside target_world.
 	var from_id := _closest_point_id(from_world)
 	if from_id < 0:
@@ -708,9 +711,10 @@ func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: fl
 	var target_col := Vector2i(floori(target_world.x), floori(target_world.z))
 	var candidates: Array[Dictionary] = []
 
-	# Check columns in a 5x5 grid around target (up to 2 blocks away horizontally)
-	for dx in range(-2, 3):
-		for dz in range(-2, 3):
+	var search_radius: int = maxi(2, int(ceil(max_dist + maxf(half_extents.x, half_extents.y))))
+
+	for dx in range(-search_radius, search_radius + 1):
+		for dz in range(-search_radius, search_radius + 1):
 			var col := Vector2i(target_col.x + dx, target_col.y + dz)
 			if not _column_to_cells.has(col):
 				continue
@@ -719,7 +723,17 @@ func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: fl
 					continue
 				var cand_id: int = _point_ids[cell]
 				var cand_pos: Vector3 = _astar.get_point_position(cand_id)
-				var horiz_d: float = Vector2(cand_pos.x - target_world.x, cand_pos.z - target_world.z).length()
+				var horiz_d: float
+				if half_extents != Vector2.ZERO:
+					# Reject positions that lie within the station bounds
+					if absf(cand_pos.x - target_world.x) < half_extents.x + 0.05 and absf(cand_pos.z - target_world.z) < half_extents.y + 0.05:
+						continue
+					var edx := maxf(0.0, absf(cand_pos.x - target_world.x) - half_extents.x)
+					var edz := maxf(0.0, absf(cand_pos.z - target_world.z) - half_extents.y)
+					horiz_d = Vector2(edx, edz).length()
+				else:
+					horiz_d = Vector2(cand_pos.x - target_world.x, cand_pos.z - target_world.z).length()
+
 				var y_diff: float = absf(cand_pos.y - target_world.y)
 				# Ensure candidate is outside the obstacle boundary and within reachable distance
 				if horiz_d >= min_dist and horiz_d <= max_dist and y_diff <= max_vert:
@@ -742,9 +756,18 @@ func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: fl
 			var opt: PackedVector3Array = optimize_path(raw)
 			if not opt.is_empty():
 				var end_pt: Vector3 = opt[opt.size() - 1]
-				var end_horiz: float = Vector2(end_pt.x - target_world.x, end_pt.z - target_world.z).length()
+				var end_horiz: float
+				if half_extents != Vector2.ZERO:
+					if absf(end_pt.x - target_world.x) < half_extents.x and absf(end_pt.z - target_world.z) < half_extents.y:
+						continue
+					var edx := maxf(0.0, absf(end_pt.x - target_world.x) - half_extents.x)
+					var edz := maxf(0.0, absf(end_pt.z - target_world.z) - half_extents.y)
+					end_horiz = Vector2(edx, edz).length()
+				else:
+					end_horiz = Vector2(end_pt.x - target_world.x, end_pt.z - target_world.z).length()
+
 				var end_vert: float = absf(end_pt.y - target_world.y)
-				if end_horiz <= max_dist + 0.15 and end_vert <= max_vert:
+				if end_horiz <= max_dist + 0.2 and end_vert <= max_vert:
 					return opt
 
 	return PackedVector3Array()
@@ -757,13 +780,7 @@ func optimize_path(raw_path: PackedVector3Array) -> PackedVector3Array:
 	if raw_path.size() <= 2:
 		return raw_path
 
-	var viewport := get_viewport()
-	if viewport == null:
-		return raw_path
-	var world_3d: World3D = viewport.find_world_3d()
-	if world_3d == null or not world_3d.space.is_valid():
-		return raw_path
-	var direct_state: PhysicsDirectSpaceState3D = world_3d.direct_space_state
+	var direct_state := _get_direct_space_state()
 	if direct_state == null:
 		return raw_path
 
@@ -786,6 +803,9 @@ func optimize_path(raw_path: PackedVector3Array) -> PackedVector3Array:
 	return optimized
 
 func _is_shortcut_safe(space: PhysicsDirectSpaceState3D, path: PackedVector3Array, from_idx: int, to_idx: int) -> bool:
+	if space == null:
+		return false
+
 	var start: Vector3 = path[from_idx]
 	var end: Vector3 = path[to_idx]
 
@@ -807,6 +827,8 @@ func _is_shortcut_safe(space: PhysicsDirectSpaceState3D, path: PackedVector3Arra
 	sweep_query.transform = Transform3D(Basis.IDENTITY, start + Vector3(0.0, 0.75, 0.0))
 	sweep_query.motion = delta
 
+	if space == null:
+		return false
 	var cast_res := space.cast_motion(sweep_query)
 	if cast_res.is_empty() or cast_res[0] < 0.99:
 		return false
@@ -819,6 +841,8 @@ func _is_shortcut_safe(space: PhysicsDirectSpaceState3D, path: PackedVector3Arra
 		var ray_from := sample_pt + Vector3(0.0, 0.5, 0.0)
 		var ray_to := sample_pt - Vector3(0.0, 1.2, 0.0)
 		var ray_q := _get_ray_query(ray_from, ray_to)
+		if space == null:
+			return false
 		var ground_hit := space.intersect_ray(ray_q)
 		if ground_hit.is_empty():
 			return false

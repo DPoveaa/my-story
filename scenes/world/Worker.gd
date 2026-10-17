@@ -192,28 +192,42 @@ func _get_astar() -> Node:
 func _get_target_approach_tolerances(target_node: Node3D) -> Dictionary:
 	if target_node is ChoppingBlock:
 		return {
-			"min_dist": 0.6,
-			"max_dist": 1.4,
+			"half_extents": Vector2(0.58, 0.58),
+			"min_dist": 0.25,
+			"max_dist": 0.85,
 			"max_vert": 1.1,
-			"horiz_tol": STATION_DEPOSIT_HORIZ_TOLERANCE,
+			"horiz_tol": 0.95,
 			"vert_tol": STATION_DEPOSIT_VERT_TOLERANCE
 		}
 	elif target_node is Pallet:
 		return {
-			"min_dist": 1.1,
-			"max_dist": 1.8,
+			"half_extents": Vector2(1.1, 1.1),
+			"min_dist": 0.3,
+			"max_dist": 0.9,
 			"max_vert": 1.1,
-			"horiz_tol": PALLET_DEPOSIT_HORIZ_TOLERANCE,
+			"horiz_tol": 1.05,
 			"vert_tol": STATION_DEPOSIT_VERT_TOLERANCE
 		}
 	else:
 		return {
+			"half_extents": Vector2.ZERO,
 			"min_dist": 0.2,
 			"max_dist": 1.15,
 			"max_vert": 0.9,
 			"horiz_tol": ITEM_PICKUP_HORIZ_TOLERANCE,
 			"vert_tol": ITEM_PICKUP_VERT_TOLERANCE
 		}
+
+func _get_distance_to_station_edge(station: Node3D, pos: Vector3) -> float:
+	if station == null or not is_instance_valid(station):
+		return INF
+	var tol := _get_target_approach_tolerances(station)
+	var he: Vector2 = tol.get("half_extents", Vector2.ZERO)
+	if he == Vector2.ZERO:
+		return Vector2(pos.x - station.global_position.x, pos.z - station.global_position.z).length()
+	var dx := maxf(0.0, absf(pos.x - station.global_position.x) - he.x)
+	var dz := maxf(0.0, absf(pos.z - station.global_position.z) - he.y)
+	return Vector2(dx, dz).length()
 
 func _request_path(to: Vector3, target_node: Node3D = null) -> bool:
 	var mgr := _get_astar()
@@ -235,7 +249,7 @@ func _request_path(to: Vector3, target_node: Node3D = null) -> bool:
 	var path: PackedVector3Array = PackedVector3Array()
 	if t_node != null and mgr.has_method("find_approach_path"):
 		var tol := _get_target_approach_tolerances(t_node)
-		path = mgr.find_approach_path(global_position, to, tol["min_dist"], tol["max_dist"], tol["max_vert"])
+		path = mgr.find_approach_path(global_position, to, tol["min_dist"], tol["max_dist"], tol["max_vert"], tol.get("half_extents", Vector2.ZERO))
 	elif mgr.has_method("find_approach_path"):
 		path = mgr.find_approach_path(global_position, to, 0.4, 1.3, 1.0)
 
@@ -249,10 +263,15 @@ func _request_path(to: Vector3, target_node: Node3D = null) -> bool:
 		return false
 
 	var final_wp: Vector3 = path[path.size() - 1]
-	var h_dist: float = Vector2(final_wp.x - to.x, final_wp.z - to.z).length()
 	var v_dist: float = absf(final_wp.y - to.y)
 	if t_node != null:
 		var tol := _get_target_approach_tolerances(t_node)
+		var h_dist: float
+		if tol.get("half_extents", Vector2.ZERO) != Vector2.ZERO:
+			h_dist = _get_distance_to_station_edge(t_node, final_wp)
+		else:
+			h_dist = Vector2(final_wp.x - to.x, final_wp.z - to.z).length()
+
 		if h_dist > tol["horiz_tol"] or v_dist > tol["vert_tol"]:
 			_current_path = PackedVector3Array()
 			_path_index = 0
@@ -406,24 +425,32 @@ func _physics_process(delta: float) -> void:
 	else:
 		_wall_stuck_timer = 0.0
 
-func _has_jump_headroom() -> bool:
+func _get_direct_space_state() -> PhysicsDirectSpaceState3D:
 	if not is_inside_tree():
-		return true
-	var space := get_world_3d().direct_space_state
+		return null
+	var world := get_world_3d()
+	if world == null or not world.space.is_valid():
+		return null
+	return world.direct_space_state
+
+func _has_jump_headroom() -> bool:
+	var space := _get_direct_space_state()
 	if space == null:
-		return true
+		return false
 	var ray := PhysicsRayQueryParameters3D.create(
 		global_position + Vector3(0.0, 1.0, 0.0),
 		global_position + Vector3(0.0, 2.2, 0.0)
 	)
 	ray.collision_mask = collision_mask
 	ray.exclude = [get_rid()]
+	if space == null:
+		return false
 	return space.intersect_ray(ray).is_empty()
 
 func _try_step_up(move_dir: Vector3) -> bool:
 	if not is_inside_tree() or not is_on_floor():
 		return false
-	var space := get_world_3d().direct_space_state
+	var space := _get_direct_space_state()
 	if space == null:
 		return false
 
@@ -432,6 +459,8 @@ func _try_step_up(move_dir: Vector3) -> bool:
 	var params := PhysicsRayQueryParameters3D.create(test_up, test_fwd)
 	params.exclude = [get_rid()]
 	params.collision_mask = collision_mask
+	if space == null:
+		return false
 	var hit := space.intersect_ray(params)
 	if not hit.is_empty():
 		return false
@@ -440,6 +469,8 @@ func _try_step_up(move_dir: Vector3) -> bool:
 	var floor_params := PhysicsRayQueryParameters3D.create(test_fwd, check_to)
 	floor_params.exclude = [get_rid()]
 	floor_params.collision_mask = collision_mask
+	if space == null:
+		return false
 	var floor_hit := space.intersect_ray(floor_params)
 	if floor_hit.is_empty():
 		return false
@@ -663,12 +694,16 @@ func _find_best_candidate_item(group_names: Array, same_type: String = "") -> No
 		var mat: String = _resolve_item_material(node)
 		if astar_mgr != null and astar_mgr.has_method("find_approach_path"):
 			var tol := _get_target_approach_tolerances(node)
-			var test_path: PackedVector3Array = astar_mgr.find_approach_path(global_position, node.global_position, tol["min_dist"], tol["max_dist"], tol["max_vert"])
+			var test_path: PackedVector3Array = astar_mgr.find_approach_path(global_position, node.global_position, tol["min_dist"], tol["max_dist"], tol["max_vert"], tol.get("half_extents", Vector2.ZERO))
 			if test_path.is_empty():
 				_blacklist_target(node, TARGET_BLACKLIST_COOLDOWN)
 				continue
 			var final_pt: Vector3 = test_path[test_path.size() - 1]
-			var f_h: float = Vector2(final_pt.x - node.global_position.x, final_pt.z - node.global_position.z).length()
+			var f_h: float
+			if tol.get("half_extents", Vector2.ZERO) != Vector2.ZERO:
+				f_h = _get_distance_to_station_edge(node, final_pt)
+			else:
+				f_h = Vector2(final_pt.x - node.global_position.x, final_pt.z - node.global_position.z).length()
 			var f_v: float = absf(final_pt.y - node.global_position.y)
 			if f_h > tol["horiz_tol"] or f_v > tol["vert_tol"]:
 				_blacklist_target(node, TARGET_BLACKLIST_COOLDOWN)
@@ -778,11 +813,15 @@ func _find_nearest_station_for_material(mat: String, amount: int = -1) -> Node3D
 	for station in candidates:
 		if astar_mgr != null and astar_mgr.has_method("find_approach_path"):
 			var tol := _get_target_approach_tolerances(station)
-			var p: PackedVector3Array = astar_mgr.find_approach_path(global_position, station.global_position, tol["min_dist"], tol["max_dist"], tol["max_vert"])
+			var p: PackedVector3Array = astar_mgr.find_approach_path(global_position, station.global_position, tol["min_dist"], tol["max_dist"], tol["max_vert"], tol.get("half_extents", Vector2.ZERO))
 			if p.is_empty():
 				continue
 			var final_pt: Vector3 = p[p.size() - 1]
-			var f_h: float = Vector2(final_pt.x - station.global_position.x, final_pt.z - station.global_position.z).length()
+			var f_h: float
+			if tol.get("half_extents", Vector2.ZERO) != Vector2.ZERO:
+				f_h = _get_distance_to_station_edge(station, final_pt)
+			else:
+				f_h = Vector2(final_pt.x - station.global_position.x, final_pt.z - station.global_position.z).length()
 			var f_v: float = absf(final_pt.y - station.global_position.y)
 			if f_h > tol["horiz_tol"] or f_v > tol["vert_tol"]:
 				continue
@@ -816,7 +855,7 @@ func _process_moving_to_item(delta: float) -> void:
 	var in_pickup_range: bool = (horiz_dist <= ITEM_PICKUP_HORIZ_TOLERANCE) and (vert_dist <= ITEM_PICKUP_VERT_TOLERANCE)
 	var at_approach: bool = (dist_to_approach <= APPROACH_POINT_REACH)
 
-	if in_pickup_range and (at_approach or horiz_dist <= ITEM_PICKUP_HORIZ_TOLERANCE * 0.85):
+	if in_pickup_range and at_approach:
 		if _is_item_physically_reachable(target_item):
 			_transition_to(State.PICKUP_ITEM)
 			return
@@ -834,34 +873,51 @@ func _process_moving_to_item(delta: float) -> void:
 	_follow_path(delta)
 
 func _is_item_physically_reachable(item: Node3D) -> bool:
-	if item == null or not is_inside_tree():
+	if item == null or not is_inside_tree() or not is_instance_valid(item) or item.is_queued_for_deletion():
 		return false
-	var space := get_world_3d().direct_space_state
+	var space := _get_direct_space_state()
 	if space == null:
-		return true
-	var from_pt := global_position + Vector3(0.0, 0.5, 0.0)
-	var to_pt := item.global_position + Vector3(0.0, 0.1, 0.0)
+		return false
+	var from_pt := global_position + Vector3(0.0, 0.6, 0.0)
+	var to_pt := item.global_position + Vector3(0.0, 0.2, 0.0)
 	var ray := PhysicsRayQueryParameters3D.create(from_pt, to_pt, 1)  # Mask 1 = solid terrain/structures
-	ray.exclude = [get_rid()]
+	var excludes: Array[RID] = [get_rid()]
 	if item is CollisionObject3D:
-		ray.exclude.append((item as CollisionObject3D).get_rid())
+		excludes.append((item as CollisionObject3D).get_rid())
+	for child in item.get_children():
+		if child is CollisionObject3D:
+			excludes.append((child as CollisionObject3D).get_rid())
+	ray.exclude = excludes
+	if space == null:
+		return false
 	var hit := space.intersect_ray(ray)
 	if not hit.is_empty():
 		return false
 	return true
 
 func _is_station_physically_reachable(station: Node3D) -> bool:
-	if station == null or not is_inside_tree():
+	if station == null or not is_inside_tree() or not is_instance_valid(station) or station.is_queued_for_deletion():
 		return false
-	var space := get_world_3d().direct_space_state
+	var space := _get_direct_space_state()
 	if space == null:
-		return true
-	var from_pt := global_position + Vector3(0.0, 0.5, 0.0)
-	var to_pt := station.global_position + Vector3(0.0, 0.3, 0.0)
+		return false
+
+	# Ray travels at an interaction height above terrain to avoid floor clipping
+	var from_pt := global_position + Vector3(0.0, 0.85, 0.0)
+	var target_y_offset: float = 0.55 if (station is Pallet) else 0.65
+	var to_pt := station.global_position + Vector3(0.0, target_y_offset, 0.0)
 	var ray := PhysicsRayQueryParameters3D.create(from_pt, to_pt, 1)  # Mask 1 = solid terrain/structures
-	ray.exclude = [get_rid()]
+
+	var excludes: Array[RID] = [get_rid()]
 	if station is CollisionObject3D:
-		ray.exclude.append((station as CollisionObject3D).get_rid())
+		excludes.append((station as CollisionObject3D).get_rid())
+	for child in station.get_children():
+		if child is CollisionObject3D:
+			excludes.append((child as CollisionObject3D).get_rid())
+	ray.exclude = excludes
+
+	if space == null:
+		return false
 	var hit := space.intersect_ray(ray)
 	return hit.is_empty()
 
@@ -881,20 +937,24 @@ func _process_moving_to_station(delta: float) -> void:
 	if target_station.global_position.distance_squared_to(_last_target_pos) > 0.36:
 		_last_target_pos = target_station.global_position
 		if not _request_path(target_station.global_position, target_station):
-			_cancel_job("Path blocked to station!")
+			_blacklist_target(target_station, 4.0)
+			_release_station_reservation(target_station)
+			target_station = null
+			_set_status("[REPLANNING] Station path blocked, seeking alternative...", 2.0, true)
+			_go_to_station_or_idle(carried_material)
 			return
 
-	var horiz_dist: float = Vector2(global_position.x - target_station.global_position.x, global_position.z - target_station.global_position.z).length()
+	var edge_dist: float = _get_distance_to_station_edge(target_station, global_position)
 	var vert_dist: float = absf(global_position.y - target_station.global_position.y)
 	var dist_to_approach: float = Vector2(global_position.x - _approach_target_point.x, global_position.z - _approach_target_point.z).length() if _approach_target_point != Vector3.INF else INF
 
-	_set_status("[CARRYING] Transporting %d %s(s) to %s (%.1fm)" % [carried_items.size(), carried_material, target_station.name, horiz_dist], 0.0)
+	_set_status("[CARRYING] Transporting %d %s(s) to %s (%.1fm)" % [carried_items.size(), carried_material, target_station.name, edge_dist], 0.0)
 
-	var max_station_horiz := PALLET_DEPOSIT_HORIZ_TOLERANCE if (target_station is Pallet) else STATION_DEPOSIT_HORIZ_TOLERANCE
-	var in_station_range: bool = (horiz_dist <= max_station_horiz) and (vert_dist <= STATION_DEPOSIT_VERT_TOLERANCE)
+	var tol := _get_target_approach_tolerances(target_station)
+	var in_station_range: bool = (edge_dist <= tol["horiz_tol"]) and (vert_dist <= tol["vert_tol"])
 	var at_approach: bool = (dist_to_approach <= APPROACH_POINT_REACH)
 
-	if in_station_range and (at_approach or horiz_dist <= max_station_horiz * 0.85):
+	if in_station_range and at_approach:
 		if _is_station_physically_reachable(target_station):
 			_transition_to(State.DEPOSIT_ITEM)
 			return
@@ -1241,6 +1301,14 @@ func _process_deposit_item() -> void:
 			else:
 				# Pallet full or rejected — keep remaining items in cargo!
 				break
+	else:
+		# Station has no valid deposit handler for this material: retain cargo and replan
+		_blacklist_target(target_station, 5.0)
+		_release_station_reservation(target_station)
+		target_station = null
+		_set_status("[REPLANNING] Station cannot accept %s, replanning..." % carried_material, 2.0, true)
+		_go_to_station_or_idle(carried_material)
+		return
 
 	_refresh_carrier_visuals()
 

@@ -608,7 +608,7 @@ func _expected_surface_y(x: int, z: int) -> int:
 	return get_highest_solid_y(x, z)
 
 func _raycast_top_surface(x: float, z: float) -> Dictionary:
-	if not is_inside_tree() or get_world_3d() == null:
+	if not is_inside_tree() or get_world_3d() == null or not get_world_3d().space.is_valid():
 		return {}
 	var space_state := get_world_3d().direct_space_state
 	if space_state == null:
@@ -639,7 +639,7 @@ func _feet_from_surface_hit(x: float, z: float, hit_y: float) -> Vector3:
 func _verify_capsule_clearance(candidate_pos: Vector3, exclude_rids: Array[RID] = []) -> bool:
 	if not is_inside_tree():
 		return true
-	var space := get_world_3d().direct_space_state if get_world_3d() != null else null
+	var space := get_world_3d().direct_space_state if (get_world_3d() != null and get_world_3d().space.is_valid()) else null
 	if space == null:
 		return true
 

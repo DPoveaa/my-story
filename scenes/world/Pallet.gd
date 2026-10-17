@@ -202,7 +202,7 @@ func _set_crate_frame_visible(show_frame: bool) -> void:
 			child.visible = show_frame
 
 func _on_catch_zone_body_entered(body: Node3D) -> void:
-	if body == null or not is_instance_valid(body):
+	if body == null or not is_instance_valid(body) or body.is_queued_for_deletion():
 		return
 	if body is CollisionObject3D and (body as CollisionObject3D).collision_layer == 0:
 		return
@@ -217,9 +217,32 @@ func _on_catch_zone_body_entered(body: Node3D) -> void:
 	var mat: String = _resolve_body_material(body)
 	if mat.is_empty():
 		return
-	if not _try_accept_material(mat):
+
+	# Determine the exact resource value of the incoming body
+	var rv: int = 1
+	if body is VoxelFragment:
+		rv = (body as VoxelFragment).resource_value
+	elif body.has_meta("resource_value"):
+		rv = int(body.get_meta("resource_value"))
+
+	var rem_cap: int = get_remaining_capacity(mat)
+	if rem_cap <= 0:
 		return
-	body.queue_free()
+
+	var to_absorb: int = mini(rv, rem_cap)
+	if to_absorb <= 0:
+		return
+
+	if not _try_accept_material_amount(mat, to_absorb):
+		return
+
+	if to_absorb >= rv:
+		body.queue_free()
+	else:
+		var remainder: int = rv - to_absorb
+		if body is VoxelFragment:
+			(body as VoxelFragment).resource_value = remainder
+		body.set_meta("resource_value", remainder)
 
 func _resolve_body_material(body: Node3D) -> String:
 	if body.has_meta("material"):

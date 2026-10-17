@@ -30,11 +30,11 @@ size = Vector3(0.08, 2.0, 2.04)
 material = SubResource("MatFill")
 size = Vector3(2.0, 1.0, 2.0)
 
-[sub_resource type="BoxShape3D" id="ColPallet"]
-size = Vector3(2.1, 1.6, 2.1)
+[sub_resource type="BoxShape3D" id="ColSlat"]
+size = Vector3(0.42, 0.1, 2.2)
 
 [sub_resource type="BoxShape3D" id="ColCatch"]
-size = Vector3(2.1, 2.4, 2.1)
+size = Vector3(2.2, 0.8, 2.2)
 
 [sub_resource type="BoxShape3D" id="ColFill"]
 size = Vector3(2.0, 1.0, 2.0)
@@ -64,6 +64,26 @@ mesh = SubResource("MeshSlat")
 transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.88, 0.1, 0)
 mesh = SubResource("MeshSlat")
 
+[node name="ColSlat0" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.88, 0.1, 0)
+shape = SubResource("ColSlat")
+
+[node name="ColSlat1" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.44, 0.1, 0)
+shape = SubResource("ColSlat")
+
+[node name="ColSlat2" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.1, 0)
+shape = SubResource("ColSlat")
+
+[node name="ColSlat3" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.44, 0.1, 0)
+shape = SubResource("ColSlat")
+
+[node name="ColSlat4" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.88, 0.1, 0)
+shape = SubResource("ColSlat")
+
 [node name="CrateFrame" type="Node3D" parent="."]
 
 [node name="WallNorth" type="MeshInstance3D" parent="CrateFrame"]
@@ -86,10 +106,6 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.06, 1.2, 0)
 visible = false
 mesh = SubResource("MeshWallShort")
 
-[node name="CollisionShape3D" type="CollisionShape3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.8, 0)
-shape = SubResource("ColPallet")
-
 [node name="FillVolume" type="MeshInstance3D" parent="."]
 transform = Transform3D(1, 0, 0, 0, 0.001, 0, 0, 0, 1, 0, 0.2, 0)
 visible = false
@@ -105,9 +121,9 @@ disabled = true
 shape = SubResource("ColFill")
 
 [node name="CatchZone" type="Area3D" parent="."]
-transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.4, 0)
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.55, 0)
 collision_layer = 0
-collision_mask = 4
+collision_mask = 12
 monitoring = true
 monitorable = false
 

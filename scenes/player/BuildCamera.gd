@@ -140,7 +140,12 @@ func _update_raycast() -> void:
 	if grid == null:
 		return
 
+	if not is_inside_tree() or get_world_3d() == null or not get_world_3d().space.is_valid():
+		return
+
 	var space_state := get_world_3d().direct_space_state
+	if space_state == null:
+		return
 	var ray_origin: Vector3
 	var ray_dir: Vector3
 
@@ -285,4 +290,3 @@ func _handle_remove_action() -> void:
 			grid = get_node("/root/GridSystem")
 		if grid != null and grid.has_block(target_remove_cell):
 			grid.remove_block(target_remove_cell)
-
