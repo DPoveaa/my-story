@@ -111,6 +111,23 @@ var _active_node_idx: int = 0
 var _bake_stage: BakeStage = BakeStage.SCANNING_COLUMNS
 var _active_chunk_new_cells: Array[Vector3i] = []
 var _physics_blocked_cache: Dictionary = {}
+var _path_cache: Dictionary = {}
+var _route_request_queue: Array[Dictionary] = []
+var _pending_dirty_cols: Dictionary = {}
+const MAX_ASYNC_ROUTES_PER_FRAME: int = 2
+
+func clear_path_cache() -> void:
+	_path_cache.clear()
+	_physics_blocked_cache.clear()
+
+func _make_path_cache_key(from_world: Vector3, to_world: Vector3, min_d: float, max_d: float, max_v: float, he: Vector2) -> String:
+	var fx: int = int(round(from_world.x * 2.0))
+	var fy: int = int(round(from_world.y * 2.0))
+	var fz: int = int(round(from_world.z * 2.0))
+	var tx: int = int(round(to_world.x * 2.0))
+	var ty: int = int(round(to_world.y * 2.0))
+	var tz: int = int(round(to_world.z * 2.0))
+	return "%d,%d,%d_%d,%d,%d_%.1f,%.1f,%.1f_%.1f,%.1f" % [fx, fy, fz, tx, ty, tz, min_d, max_d, max_v, he.x, he.y]
 
 var _sweep_shape: CapsuleShape3D = null
 var _sweep_query: PhysicsShapeQueryParameters3D = null
@@ -199,6 +216,9 @@ func ensure_nearby_graph_ready(spawn_pos: Vector3) -> void:
 		max_wait_frames -= 1
 
 func _physics_process(_delta: float) -> void:
+	_flush_pending_dirty_cols()
+	_process_async_routes()
+
 	if not _is_chunk_active and _pending_chunks.is_empty():
 		# Queue just drained — emit graph_rebuilt once and mark initial bake complete.
 		if _graph_rebuilt_pending:
@@ -213,6 +233,26 @@ func _physics_process(_delta: float) -> void:
 
 	# Incrementally process chunk baking stages within the per-frame time budget.
 	_step_bake_slice(FRAME_BUDGET_MS)
+
+func _flush_pending_dirty_cols() -> void:
+	if _pending_dirty_cols.is_empty():
+		return
+	var cols: Array[Vector2i] = []
+	for col in _pending_dirty_cols.keys():
+		cols.append(col)
+	_pending_dirty_cols.clear()
+	_update_columns_batch(cols)
+
+func _process_async_routes() -> void:
+	var routes_done: int = 0
+	while not _route_request_queue.is_empty() and routes_done < MAX_ASYNC_ROUTES_PER_FRAME:
+		var req: Dictionary = _route_request_queue.pop_front()
+		var requester: Object = req.get("requester")
+		var cb: Callable = req.get("callback")
+		if requester != null and is_instance_valid(requester) and cb.is_valid():
+			var p: PackedVector3Array = find_approach_path(req["from"], req["target"], req["min_d"], req["max_d"], req["max_v"], req["half_extents"])
+			cb.call(p)
+			routes_done += 1
 
 func _step_bake_slice(budget_ms: float) -> bool:
 	var start_us: int = Time.get_ticks_usec()
@@ -531,12 +571,13 @@ func bake_chunk_if_needed(cp: Vector2i) -> void:
 	queue_chunk(cp)
 
 func notify_block_changed(world_cell: Vector3i) -> void:
+	clear_path_cache()
 	notify_blocks_changed([world_cell])
 
 func notify_blocks_changed(cells: Array) -> void:
 	if cells.is_empty():
 		return
-	var unique_cols: Dictionary = {}
+	clear_path_cache()
 	for c in cells:
 		var cell: Vector3i
 		if c is Vector3i:
@@ -545,26 +586,20 @@ func notify_blocks_changed(cells: Array) -> void:
 			cell = Vector3i(floori(c.x), floori(c.y), floori(c.z))
 		else:
 			continue
-		unique_cols[Vector2i(cell.x, cell.z)] = true
-
-	var cols: Array[Vector2i] = []
-	for col in unique_cols.keys():
-		cols.append(col)
-	_update_columns_batch(cols)
+		_pending_dirty_cols[Vector2i(cell.x, cell.z)] = true
 
 func notify_bounds_changed(aabb: AABB) -> void:
+	clear_path_cache()
 	var min_cell := Vector3i(floori(aabb.position.x), floori(aabb.position.y), floori(aabb.position.z))
 	var max_cell := Vector3i(ceili(aabb.end.x), ceili(aabb.end.y), ceili(aabb.end.z))
-	var cols: Array[Vector2i] = []
 	for x in range(min_cell.x, max_cell.x + 1):
 		for z in range(min_cell.z, max_cell.z + 1):
-			cols.append(Vector2i(x, z))
-	_update_columns_batch(cols)
+			_pending_dirty_cols[Vector2i(x, z)] = true
 
 func _update_columns_batch(cols: Array[Vector2i]) -> void:
 	if cols.is_empty():
 		return
-	_physics_blocked_cache.clear()
+	clear_path_cache()
 
 	for col in cols:
 		_update_local_column(col.x, col.y)
@@ -737,6 +772,10 @@ func _connect_point_neighbors(cell: Vector3i) -> void:
 # ---------------------------------------------------------------------------
 func find_astar_path(from_world: Vector3, to_world: Vector3) -> PackedVector3Array:
 	## Returns the world-space waypoint array from AStar3D, optimized for natural routes.
+	var cache_key := _make_path_cache_key(from_world, to_world, 0.0, 0.0, 0.0, Vector2.ZERO)
+	if _path_cache.has(cache_key):
+		return (_path_cache[cache_key] as PackedVector3Array).duplicate()
+
 	var from_id := _closest_point_id(from_world)
 	var to_id   := _closest_point_id(to_world)
 	if from_id < 0 or to_id < 0:
@@ -744,13 +783,38 @@ func find_astar_path(from_world: Vector3, to_world: Vector3) -> PackedVector3Arr
 	var raw := _astar.get_point_path(from_id, to_id)
 	if raw.is_empty():
 		return raw
-	return optimize_path(raw)
+	var opt := optimize_path(raw)
+	if _path_cache.size() < 1000:
+		_path_cache[cache_key] = opt
+	return opt
 
 func get_astar_path(from_world: Vector3, to_world: Vector3) -> PackedVector3Array:
 	return find_astar_path(from_world, to_world)
 
+func request_approach_path(requester: Object, callback: Callable, from_world: Vector3, target_world: Vector3, min_dist: float = 0.8, max_dist: float = 1.5, max_vert: float = 1.3, half_extents: Vector2 = Vector2.ZERO) -> void:
+	if requester == null or not is_instance_valid(requester) or not callback.is_valid():
+		return
+	var cache_key := _make_path_cache_key(from_world, target_world, min_dist, max_dist, max_vert, half_extents)
+	if _path_cache.has(cache_key):
+		callback.call((_path_cache[cache_key] as PackedVector3Array).duplicate())
+		return
+	_route_request_queue.append({
+		"requester": requester,
+		"callback": callback,
+		"from": from_world,
+		"target": target_world,
+		"min_d": min_dist,
+		"max_d": max_dist,
+		"max_v": max_vert,
+		"half_extents": half_extents
+	})
+
 func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: float = 0.8, max_dist: float = 1.5, max_vert: float = 1.3, half_extents: Vector2 = Vector2.ZERO) -> PackedVector3Array:
 	## Finds an optimized path from from_world to a valid, walkable approach node beside target_world.
+	var cache_key := _make_path_cache_key(from_world, target_world, min_dist, max_dist, max_vert, half_extents)
+	if _path_cache.has(cache_key):
+		return (_path_cache[cache_key] as PackedVector3Array).duplicate()
+
 	var from_id := _closest_point_id(from_world)
 	if from_id < 0:
 		return PackedVector3Array()
@@ -796,26 +860,45 @@ func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: fl
 		return a["dist_from"] < b["dist_from"]
 	)
 
-	for i in range(mini(8, candidates.size())):
+	# Evaluate candidate reachability and cost cheaply without optimizing multiple complete paths:
+	var best_raw: PackedVector3Array = PackedVector3Array()
+	var best_cost: float = INF
+	var max_to_eval: int = mini(8, candidates.size())
+
+	for i in range(max_to_eval):
 		var cand_id: int = candidates[i]["id"]
 		var raw: PackedVector3Array = _astar.get_point_path(from_id, cand_id)
-		if not raw.is_empty():
-			var opt: PackedVector3Array = optimize_path(raw)
-			if not opt.is_empty():
-				var end_pt: Vector3 = opt[opt.size() - 1]
-				var end_horiz: float
-				if half_extents != Vector2.ZERO:
-					if absf(end_pt.x - target_world.x) < half_extents.x and absf(end_pt.z - target_world.z) < half_extents.y:
-						continue
-					var edx := maxf(0.0, absf(end_pt.x - target_world.x) - half_extents.x)
-					var edz := maxf(0.0, absf(end_pt.z - target_world.z) - half_extents.y)
-					end_horiz = Vector2(edx, edz).length()
-				else:
-					end_horiz = Vector2(end_pt.x - target_world.x, end_pt.z - target_world.z).length()
+		if raw.is_empty():
+			continue
+		var cost: float = float(raw.size()) * 1.0 + sqrt(candidates[i]["dist_from"]) * 0.1
+		if cost < best_cost:
+			best_cost = cost
+			best_raw = raw
 
-				var end_vert: float = absf(end_pt.y - target_world.y)
-				if end_horiz <= max_dist + 0.35 and end_vert <= max_vert + 0.25:
-					return opt
+	if best_raw.is_empty():
+		return PackedVector3Array()
+
+	# Optimize only the single chosen path:
+	var opt: PackedVector3Array = optimize_path(best_raw)
+	if opt.is_empty():
+		return PackedVector3Array()
+
+	var end_pt: Vector3 = opt[opt.size() - 1]
+	var end_horiz: float
+	if half_extents != Vector2.ZERO:
+		if absf(end_pt.x - target_world.x) < half_extents.x and absf(end_pt.z - target_world.z) < half_extents.y:
+			return PackedVector3Array()
+		var edx := maxf(0.0, absf(end_pt.x - target_world.x) - half_extents.x)
+		var edz := maxf(0.0, absf(end_pt.z - target_world.z) - half_extents.y)
+		end_horiz = Vector2(edx, edz).length()
+	else:
+		end_horiz = Vector2(end_pt.x - target_world.x, end_pt.z - target_world.z).length()
+
+	var end_vert: float = absf(end_pt.y - target_world.y)
+	if end_horiz <= max_dist + 0.35 and end_vert <= max_vert + 0.25:
+		if _path_cache.size() < 1000:
+			_path_cache[cache_key] = opt
+		return opt
 
 	return PackedVector3Array()
 

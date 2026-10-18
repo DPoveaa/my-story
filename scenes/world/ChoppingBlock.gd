@@ -129,11 +129,19 @@ func dismantle() -> void:
 static func wake_nearby_bodies(tree: SceneTree, center: Vector3, radius: float = 2.5) -> void:
 	if tree == null:
 		return
+	_wake_nearby_bodies_async(tree, center, radius)
+
+static func _wake_nearby_bodies_async(tree: SceneTree, center: Vector3, radius: float) -> void:
+	if tree == null or not is_instance_valid(tree):
+		return
+	await tree.physics_frame
+	if tree == null or not is_instance_valid(tree):
+		return
 	var root: Window = tree.root
-	if root != null:
+	if root != null and is_instance_valid(root):
 		var world_3d: World3D = root.get_world_3d()
 		if world_3d != null and world_3d.space.is_valid():
-			var direct_state: PhysicsDirectSpaceState3D = PhysicsServer3D.space_get_direct_state(world_3d.space)
+			var direct_state: PhysicsDirectSpaceState3D = world_3d.direct_space_state
 			if direct_state != null:
 				var sphere := SphereShape3D.new()
 				sphere.radius = radius

@@ -3323,12 +3323,16 @@ func _update_raycast() -> void:
 		target_debris_cell = null
 		target_is_terrain = false
 		can_place_target = false
-		if _held_is_type("plank") or _held_is_type("log"):
-			target_face_status = "Pallet (E: Store | Hold RMB: Craft)"
-		elif is_instance_valid(target_carryable) and _can_pick_up_carryable(target_carryable):
-			target_face_status = _carryable_status_text(target_carryable)
+		# Give pallet interactions explicit priority when targeted:
+		target_carryable = null
+		target_log = null
+		if not _held_logs.is_empty():
+			var held_type: String = _current_held_type()
+			target_face_status = "Pallet (E: Withdraw | F: Deposit %s)" % held_type.capitalize()
+		elif target_pallet.has_method("can_withdraw") and bool(target_pallet.call("can_withdraw")):
+			target_face_status = "Pallet (E: Withdraw)"
 		else:
-			target_face_status = "Pallet (E: Withdraw | Hold RMB: Craft)"
+			target_face_status = "Pallet"
 		target_face_changed.emit(true, Vector3i.ZERO, Vector3i.ZERO, target_face_status)
 		_hide_terrain_target_visuals()
 		if preview_ghost != null and (debris_grabber == null or not debris_grabber.is_grabbing):
@@ -4103,8 +4107,8 @@ func _can_open_craft_radial() -> bool:
 		return false
 	if _radial_menu != null and is_instance_valid(_radial_menu):
 		return false
-	# Aiming at a station → station radial (craft / chop / dismantle).
-	if is_instance_valid(target_pallet) or is_instance_valid(target_chopping_block):
+	# Aiming at a station → station radial (chop / dismantle).
+	if is_instance_valid(target_chopping_block):
 		return true
 	# Slot 2 dumps on RMB; don't open construction radial unless on a station (above).
 	if current_slot == 2:
@@ -4116,37 +4120,6 @@ func _can_open_craft_radial() -> bool:
 
 func _craft_radial_option_count() -> int:
 	return _build_craft_radial_options().size()
-
-func _pallet_craft_required_count() -> int:
-	if is_instance_valid(target_pallet) and target_pallet.has_method("get_craft_required_count"):
-		return int(target_pallet.call("get_craft_required_count"))
-	return ResourceBalance.PALLET_CRAFT_REQUIRED_UNITS
-
-func _build_pallet_craft_options() -> Array:
-	var options: Array = []
-	if not is_instance_valid(target_pallet):
-		return options
-	var stored: Dictionary = {}
-	var stored_variant: Variant = target_pallet.get("stored_materials")
-	if stored_variant is Dictionary:
-		stored = stored_variant
-	var assigned: String = str(target_pallet.get("assigned_material"))
-	var required_count: int = _pallet_craft_required_count()
-	var stone_n: int = int(stored.get("stone", 0))
-	var dirt_n: int = int(stored.get("dirt", 0))
-	if assigned == "" or assigned == "stone":
-		options.append({
-			"id": "Craft Stone Blocks",
-			"text": "Craft Stone Blocks (Cost: %d)" % required_count,
-			"enabled": assigned == "stone" and stone_n >= required_count,
-		})
-	if assigned == "" or assigned == "dirt":
-		options.append({
-			"id": "Craft Dirt Blocks",
-			"text": "Craft Dirt Blocks (Cost: %d)" % required_count,
-			"enabled": assigned == "dirt" and dirt_n >= required_count,
-		})
-	return options
 
 func _build_chopping_block_options() -> Array:
 	var has_log_on_block: bool = false
@@ -4169,10 +4142,6 @@ func _build_craft_radial_options() -> Array:
 	# Station radials take priority when aiming at a crafting station.
 	if is_instance_valid(target_chopping_block):
 		return _build_chopping_block_options()
-	if is_instance_valid(target_pallet):
-		var pallet_opts: Array = _build_pallet_craft_options()
-		if not pallet_opts.is_empty():
-			return pallet_opts
 	# Universal Construction Menu: always list stations with costs; disable if unaffordable.
 	var can_chop: bool = _held_is_type("log")
 	var can_pallet: bool = _held_count_of("plank") >= 4
@@ -4214,14 +4183,6 @@ func _open_craft_radial_menu() -> void:
 	_radial_menu.tree_exiting.connect(_on_craft_radial_closed)
 
 func _on_craft_option_selected(option_name: String) -> void:
-	if option_name == "Craft Stone Blocks":
-		if is_instance_valid(target_pallet) and target_pallet.has_method("craft_batch"):
-			target_pallet.call("craft_batch", "stone")
-		return
-	if option_name == "Craft Dirt Blocks":
-		if is_instance_valid(target_pallet) and target_pallet.has_method("craft_batch"):
-			target_pallet.call("craft_batch", "dirt")
-		return
 	if option_name == "Chop Log":
 		if is_instance_valid(target_chopping_block) and target_chopping_block.has_method("try_chop"):
 			target_chopping_block.call("try_chop")
@@ -4455,24 +4416,18 @@ func _handle_interact_action() -> void:
 	if current_state != State.BODY_CONTROL:
 		return
 
-	# Manual carry grab (E) first — pallet craft blocks must be harvestable before withdraw.
+	# Explicit priority when the pallet itself is targeted (E: Withdraw):
+	if is_instance_valid(target_pallet):
+		_try_withdraw_from_pallet()
+		return
+
+	# Manual carry grab (E) for loose/crafted items when pallet is not targeted:
 	if is_instance_valid(target_carryable) and _can_pick_up_carryable(target_carryable):
 		_pick_up_carryable(target_carryable)
 		return
 	if is_instance_valid(target_log) and _can_pick_up_carryable(target_log):
 		_pick_up_carryable(target_log)
 		return
-
-	# Manual store onto pallet (plank, log, or ANY 1x1x1 building block).
-	if is_instance_valid(target_pallet) and target_pallet.has_method("try_store"):
-		if not _held_logs.is_empty():
-			var store_type: String = _current_held_type()
-			if bool(target_pallet.call("try_store", store_type)):
-				_consume_one_held_item()
-				return
-		# Empty hands / bag space: withdraw assigned material from pallet.
-		if _try_withdraw_from_pallet():
-			return
 
 	# Place a held log onto a chopping block.
 	if is_instance_valid(target_chopping_block) and _held_is_type("log") \
@@ -4510,6 +4465,28 @@ func _try_withdraw_from_pallet() -> bool:
 		return false
 	if not bool(target_pallet.call("can_withdraw")):
 		return false
+
+	var assigned: String = str(target_pallet.get("assigned_material"))
+	if assigned.is_empty():
+		return false
+
+	# Respect carry capacities and material compatibility before withdrawing
+	if assigned == "log" or assigned == "plank":
+		var max_n: int = _max_for_carry_type(assigned)
+		if not _held_logs.is_empty():
+			if _current_held_type() != assigned:
+				return false
+			if _held_logs.size() >= max_n:
+				return false
+	elif assigned == "dirt" or assigned == "grass" or assigned == "stone":
+		if _bag_total() >= bag_max_capacity:
+			return false
+	else:
+		var max_b: int = _max_for_carry_type(assigned)
+		if max_b > 0 and not _held_logs.is_empty():
+			if _current_held_type() != assigned or _held_logs.size() >= max_b:
+				return false
+
 	var result: Variant = target_pallet.call("try_withdraw")
 	if not (result is Dictionary) or result.is_empty():
 		return false
@@ -4532,6 +4509,7 @@ func _try_withdraw_from_pallet() -> bool:
 		if take < count and target_pallet.has_method("refund_material"):
 			target_pallet.call("refund_material", mat, count - take)
 		return true
+
 	# kind == "item": spawn a physical log/plank and pick it up if carry space allows.
 	var body: RigidBody3D = null
 	if mat == "log":
@@ -4556,6 +4534,11 @@ func _try_withdraw_from_pallet() -> bool:
 	body.angular_velocity = Vector3.ZERO
 	if _can_pick_up_carryable(body):
 		_pick_up_carryable(body)
+	else:
+		if target_pallet.has_method("try_store"):
+			target_pallet.call("try_store", mat)
+		body.queue_free()
+		return false
 	return true
 
 ## Returns true if there is a solid block or collision shape directly above `cell`
@@ -4717,6 +4700,15 @@ func _handle_remove_action() -> void:
 func _handle_throw_action() -> void:
 	if current_state != State.BODY_CONTROL:
 		return
+	# Pallet deposit priority when targeting a pallet (F: Deposit):
+	if is_instance_valid(target_pallet) and target_pallet.has_method("try_store"):
+		if not _held_logs.is_empty():
+			var store_type: String = _current_held_type()
+			if bool(target_pallet.call("try_store", store_type)):
+				_consume_one_held_item()
+			# Retain held item on failure; do NOT throw into pallet when deposit fails
+			return
+
 	# Prefer throwing carried logs/planks/blocks.
 	if not _held_logs.is_empty():
 		_throw_one_held_item()

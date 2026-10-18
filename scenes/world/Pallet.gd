@@ -505,50 +505,12 @@ func _get_assigned_count() -> int:
 		return int(stored_materials.get("dirt", 0)) + int(stored_materials.get("grass", 0))
 	return int(stored_materials.get(assigned_material, 0))
 
-## Spend FRAGMENTS_PER_BLOCK * 8 of assigned dirt/stone and spawn a 2x2x2 grid of blocks.
-func craft_batch(type: String) -> bool:
-	var is_soil_target: bool = (type == "dirt" or type == "grass")
-	var is_soil_assigned: bool = (assigned_material == "dirt" or assigned_material == "grass")
-	if not is_soil_target and type != "stone":
-		return false
-	if assigned_material.is_empty() or _auto_converted:
-		return false
-	if is_soil_target != is_soil_assigned and type != assigned_material:
-		return false
-	var required_count: int = FRAGMENTS_PER_BLOCK * CRAFT_BATCH_BLOCKS
-	if _get_assigned_count() < required_count:
-		return false
-
-	if is_soil_target:
-		var rem: int = required_count
-		var g_count: int = int(stored_materials.get("grass", 0))
-		var d_count: int = int(stored_materials.get("dirt", 0))
-		var sub_g: int = mini(rem, g_count)
-		stored_materials["grass"] = g_count - sub_g
-		rem -= sub_g
-		if rem > 0:
-			stored_materials["dirt"] = maxi(0, d_count - rem)
-	else:
-		stored_materials[type] = int(stored_materials.get(type, 0)) - required_count
-
-	_clear_if_empty()
-	_refresh_visuals()
-	_spawn_craft_grid(type)
-	return true
-
-func get_craft_required_count() -> int:
-	return ResourceBalance.PALLET_CRAFT_REQUIRED_UNITS
-
-func can_craft_assigned() -> bool:
-	if assigned_material != "dirt" and assigned_material != "grass" and assigned_material != "stone":
-		return false
-	return _get_assigned_count() >= get_craft_required_count()
 
 func _update_label() -> void:
 	if status_label == null:
 		return
 	if assigned_material.is_empty():
-		status_label.text = "Empty Pallet\n(Assign with E / fragments)"
+		status_label.text = "Empty Pallet\n(F: Store item | fragments)"
 	elif _auto_converted:
 		status_label.text = "Blocks Ready\n(E: Pick up)"
 	elif assigned_material == "dirt" or assigned_material == "grass":
@@ -787,29 +749,6 @@ func _spawn_grabbable_fill_blocks(type: String) -> void:
 					float(y) * 1.0 + half,
 					(float(z) - 0.5) * 1.0
 				)
-
-func _spawn_craft_grid(type: String) -> void:
-	var parent: Node = get_parent()
-	if parent == null and is_inside_tree():
-		parent = get_tree().current_scene
-	if parent == null:
-		return
-	var deck_anchor: Vector3 = global_transform * Vector3(0.0, PALLET_DECK_Y + 0.5, 0.0)
-	var base_center: Vector3 = TerrainBlockyLibrary.snap_world_to_grid_center(deck_anchor)
-	for y in range(2):
-		for z in range(2):
-			for x in range(2):
-				var block := make_craft_block_body(type)
-				parent.add_child(block)
-				var center := Vector3(
-					base_center.x + (float(x) - 0.5),
-					base_center.y + float(y),
-					base_center.z + (float(z) - 0.5)
-				)
-				center = TerrainBlockyLibrary.snap_world_to_grid_center(center)
-				block.global_transform = Transform3D(Basis.IDENTITY, center)
-				block.linear_velocity = Vector3.ZERO
-				block.angular_velocity = Vector3.ZERO
 
 static func make_craft_block_body(type: String) -> RigidBody3D:
 	var body := RigidBody3D.new()

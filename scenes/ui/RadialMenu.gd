@@ -636,26 +636,90 @@ func _draw_icon_pallet(pos: Vector2, r: float, is_large: bool, affordable: bool,
 
 func _draw_icon_chop(pos: Vector2, r: float, is_large: bool, affordable: bool, alpha: float) -> void:
 	var tint: Color = Color(1, 1, 1, alpha) if affordable else Color(0.7, 0.7, 0.75, alpha * 0.7)
-	var log_col: Color = Color(0.48, 0.32, 0.18) * tint
-	var cut_col: Color = Color(0.78, 0.62, 0.42) * tint
-	var lx: float = pos.x - r * 0.75
-	var ly: float = pos.y + r * 0.05
-	var lw: float = r * 1.5
-	var lh: float = r * 0.45
-	draw_rect(Rect2(lx, ly, lw, lh), log_col)
-	_draw_ellipse(Vector2(lx + lw, ly + lh * 0.5), r * 0.18, lh * 0.5, cut_col)
-	_draw_ellipse(Vector2(lx, ly + lh * 0.5), r * 0.18, lh * 0.5, cut_col)
+	var bark_col: Color = Color(0.44, 0.28, 0.16) * tint
+	var bark_dark: Color = Color(0.28, 0.18, 0.10) * tint
+	var bark_hi: Color = Color(0.58, 0.40, 0.24) * tint
+	var cut_wood: Color = Color(0.80, 0.64, 0.44) * tint
+	var cut_ring: Color = Color(0.62, 0.48, 0.32) * tint
+	var cut_pith: Color = Color(0.48, 0.34, 0.20) * tint
+	var handle_col: Color = Color(0.68, 0.46, 0.26) * tint
+	var steel_body: Color = Color(0.52, 0.56, 0.64) * tint
+	var steel_bevel: Color = Color(0.92, 0.95, 1.0) * tint
+	var steel_dark: Color = Color(0.32, 0.35, 0.42) * tint
 
-	var blade_col: Color = Color(0.9, 0.92, 0.98) * tint
-	var handle_col: Color = Color(0.55, 0.35, 0.18) * tint
-	draw_line(pos + Vector2(0.0, ly + lh * 0.2), pos + Vector2(-r * 0.6, -r * 0.75), handle_col, maxf(1.5, r * 0.12))
-	var head_pts := PackedVector2Array([
-		pos + Vector2(0.05 * r, ly + lh * 0.25),
-		pos + Vector2(-r * 0.2, -r * 0.25),
-		pos + Vector2(r * 0.25, -r * 0.5),
-		pos + Vector2(r * 0.45, -r * 0.1)
+	# 1. Horizontal log base
+	var log_lx: float = pos.x - r * 0.66
+	var log_rx: float = pos.x + r * 0.52
+	var log_y: float = pos.y + r * 0.13
+	var log_h: float = r * 0.38
+	var log_cy: float = log_y + log_h * 0.5
+
+	# Log Bark cylinder
+	draw_rect(Rect2(log_lx, log_y, log_rx - log_lx, log_h), bark_col)
+	_draw_ellipse(Vector2(log_lx, log_cy), r * 0.10, log_h * 0.5, bark_dark)
+	draw_line(Vector2(log_lx, log_y), Vector2(log_rx, log_y), bark_hi, maxf(1.0, r * 0.05))
+	draw_line(Vector2(log_lx + r * 0.15, log_cy - r * 0.05), Vector2(log_lx + r * 0.42, log_cy - r * 0.05), bark_dark, maxf(1.0, r * 0.04))
+
+	# Right log end cross-section
+	_draw_ellipse(Vector2(log_rx, log_cy), r * 0.15, log_h * 0.5, cut_wood)
+	_draw_ellipse_outline(Vector2(log_rx, log_cy), r * 0.09, log_h * 0.32, cut_ring, maxf(1.0, r * 0.04))
+	draw_circle(Vector2(log_rx, log_cy), maxf(1.0, r * 0.04), cut_pith)
+
+	# V-Notch cut where the axe strikes
+	var notch_pts := PackedVector2Array([
+		Vector2(pos.x - r * 0.14, log_y),
+		Vector2(pos.x - r * 0.02, log_y + r * 0.15),
+		Vector2(pos.x + r * 0.10, log_y)
 	])
-	draw_colored_polygon(head_pts, blade_col)
+	draw_colored_polygon(notch_pts, cut_wood)
+	draw_line(Vector2(pos.x - r * 0.14, log_y), Vector2(pos.x - r * 0.02, log_y + r * 0.15), cut_ring, maxf(1.0, r * 0.04))
+
+	# 2. Axe Handle (angled cleanly from top-left into notch)
+	var h_start := pos + Vector2(-r * 0.52, -r * 0.70)
+	var h_end := pos + Vector2(r * 0.12, log_y + r * 0.12)
+	draw_line(h_start, h_end, handle_col, maxf(2.0, r * 0.12))
+	draw_circle(h_start, maxf(1.5, r * 0.08), handle_col * 0.85)
+
+	# 3. Axe Head (iron axe head mounted on handle striking down)
+	var p_poll_top := pos + Vector2(-r * 0.22, -r * 0.28)
+	var p_poll_bot := pos + Vector2(-r * 0.26, -r * 0.19)
+	var p_blade_top := pos + Vector2(r * 0.24, -r * 0.05)
+	var p_blade_tip := pos + Vector2(r * 0.02, log_y + r * 0.14)
+	var p_eye_bot := pos + Vector2(r * 0.04, -r * 0.02)
+
+	var head_poly := PackedVector2Array([
+		p_poll_top,
+		p_blade_top,
+		p_blade_tip,
+		p_eye_bot,
+		p_poll_bot
+	])
+	draw_colored_polygon(head_poly, steel_body)
+	draw_line(p_poll_top, p_poll_bot, steel_dark, maxf(1.5, r * 0.10))
+
+	# Sharpened cutting edge / bevel highlight
+	var bevel_poly := PackedVector2Array([
+		pos + Vector2(r * 0.13, -r * 0.07),
+		p_blade_top,
+		p_blade_tip,
+		pos + Vector2(0.0, log_y + r * 0.04)
+	])
+	draw_colored_polygon(bevel_poly, steel_bevel)
+
+	# 4. Flying wood chips from the chop impact
+	var chip1 := PackedVector2Array([
+		pos + Vector2(r * 0.22, r * 0.04),
+		pos + Vector2(r * 0.32, r * 0.01),
+		pos + Vector2(r * 0.26, r * 0.10)
+	])
+	draw_colored_polygon(chip1, cut_wood)
+
+	var chip2 := PackedVector2Array([
+		pos + Vector2(-r * 0.18, r * 0.04),
+		pos + Vector2(-r * 0.26, 0.0),
+		pos + Vector2(-r * 0.21, r * 0.10)
+	])
+	draw_colored_polygon(chip2, cut_wood)
 
 func _draw_icon_dismantle(pos: Vector2, r: float, is_large: bool, affordable: bool, alpha: float) -> void:
 	var tint: Color = Color(1, 1, 1, alpha)
