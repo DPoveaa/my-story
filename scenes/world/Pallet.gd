@@ -437,14 +437,19 @@ func can_accept_material(item_material: String, amount: int = 1, for_worker: Nod
 		return false
 	var cap: int = get_capacity(item_material)
 	var reserved_others: int = get_total_reserved_amount(for_worker)
-	if _get_assigned_count() + reserved_others + amount > cap:
+	# Accept if pallet has at least 1 unit of remaining capacity (allows partial cargo deliveries)
+	if _get_assigned_count() + reserved_others >= cap:
 		return false
 	return true
 
 func reserve(worker: Node, mat: String, amount: int) -> bool:
-	if not can_accept_material(mat, amount, worker):
+	if not can_accept_material(mat, 1, worker):
 		return false
-	active_reservations[worker] = {"material": mat, "amount": amount}
+	var rem: int = get_remaining_capacity(mat, worker)
+	if rem <= 0:
+		return false
+	var actual_amount: int = mini(amount, rem)
+	active_reservations[worker] = {"material": mat, "amount": actual_amount}
 	set_meta("worker_assigned", true)
 	return true
 
@@ -453,6 +458,13 @@ func release_reservation(worker: Node = null) -> void:
 		active_reservations.erase(worker)
 	elif worker == null:
 		active_reservations.clear()
+	# Purge any stale/freed workers from reservations
+	var stale_keys: Array = []
+	for w in active_reservations.keys():
+		if not is_instance_valid(w) or not (w is Node and (w as Node).is_inside_tree()):
+			stale_keys.append(w)
+	for w in stale_keys:
+		active_reservations.erase(w)
 	if active_reservations.is_empty():
 		set_meta("worker_assigned", false)
 

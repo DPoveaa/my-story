@@ -258,6 +258,7 @@ var bag: Dictionary:
 		_sync_bag_count()
 var current_volume: int = 0
 var max_volume: int = 30
+var _pending_drop_count: int = 0
 
 ## Removes `amount` of resource `type` from the bag to be used later in the Pallet radial menu.
 func dump_resource(type: String, amount: int) -> int:
@@ -849,8 +850,9 @@ func _unhandled_input(event: InputEvent) -> void:
 			return
 		elif event.is_action_pressed(&"drop_carried") or event.keycode == KEY_G:
 			# G: drop carried item (log, plank, building block) if holding one; otherwise mortar brush.
+			# Scheduled for safe physics-phase execution to prevent Jolt space state errors.
 			if not _held_logs.is_empty():
-				_drop_one_held_item()
+				_pending_drop_count += 1
 			else:
 				_handle_cement_action()
 			return
@@ -1241,6 +1243,12 @@ func _physics_process(delta: float) -> void:
 			pass
 
 	_update_raycast()
+	if _pending_drop_count > 0:
+		while _pending_drop_count > 0 and not _held_logs.is_empty():
+			_pending_drop_count -= 1
+			_drop_one_held_item()
+		_pending_drop_count = 0
+
 	if not _held_logs.is_empty() and current_state == State.BODY_CONTROL:
 		_process_held_item_snagging(delta)
 	if is_placing_station:
@@ -3932,10 +3940,6 @@ func _drop_one_held_item_instance(item: RigidBody3D) -> void:
 	if world_parent == null:
 		item.queue_free()
 		return
-	var holder: Node = item.get_parent()
-	if holder != null:
-		holder.remove_child(item)
-	world_parent.add_child(item)
 
 	var ctype: String = _get_carry_type(item)
 	var cam := get_active_camera()
@@ -3943,15 +3947,27 @@ func _drop_one_held_item_instance(item: RigidBody3D) -> void:
 	var aim_dir: Vector3 = -cam.global_transform.basis.z if cam != null else -global_transform.basis.z
 	var drop_pos: Vector3 = cam_pos + aim_dir * 1.5
 
-	# Clamp to raycast hit if obstacle/floor is closer than 1.5m (Task 4)
+	# Query space state BEFORE tree reparenting while space is clean and accessible
 	if is_inside_tree() and get_world_3d() != null and get_world_3d().space.is_valid():
 		var space_state := get_world_3d().direct_space_state
 		if space_state != null:
 			var ray_query := PhysicsRayQueryParameters3D.create(cam_pos, cam_pos + aim_dir * 1.5, 1)
-			ray_query.exclude = [self.get_rid()]
+			var excl: Array[RID] = [get_rid()]
+			if is_instance_valid(item):
+				excl.append(item.get_rid())
+			ray_query.exclude = excl
 			var res := space_state.intersect_ray(ray_query)
 			if not res.is_empty():
 				drop_pos = (res.position as Vector3) - aim_dir * 0.15
+	elif has_target and _target_hit_point != Vector3.ZERO:
+		var target_dist: float = cam_pos.distance_to(_target_hit_point)
+		if target_dist < 1.5:
+			drop_pos = _target_hit_point - aim_dir * 0.15
+
+	var holder: Node = item.get_parent()
+	if holder != null:
+		holder.remove_child(item)
+	world_parent.add_child(item)
 
 	# Reset scale to full size before returning to the world.
 	item.scale = Vector3.ONE

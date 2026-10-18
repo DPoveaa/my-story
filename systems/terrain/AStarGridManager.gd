@@ -856,11 +856,13 @@ func _has_unobstructed_access(from_pos: Vector3, target_pos: Vector3) -> bool:
 
 	return true
 
-func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: float = 0.8, max_dist: float = 1.5, max_vert: float = 1.3, half_extents: Vector2 = Vector2.ZERO) -> PackedVector3Array:
+func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: float = 0.8, max_dist: float = 1.5, max_vert: float = 1.3, half_extents: Vector2 = Vector2.ZERO, excluded_positions: Array = []) -> PackedVector3Array:
 	## Finds an optimized path from from_world to a valid, walkable approach node beside target_world.
-	var cache_key := _make_path_cache_key(from_world, target_world, min_dist, max_dist, max_vert, half_extents)
-	if _path_cache.has(cache_key):
-		return (_path_cache[cache_key] as PackedVector3Array).duplicate()
+	var cache_key: String = ""
+	if excluded_positions.is_empty():
+		cache_key = _make_path_cache_key(from_world, target_world, min_dist, max_dist, max_vert, half_extents)
+		if _path_cache.has(cache_key):
+			return (_path_cache[cache_key] as PackedVector3Array).duplicate()
 
 	var from_id := _closest_point_id(from_world)
 	if from_id < 0:
@@ -881,6 +883,16 @@ func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: fl
 					continue
 				var cand_id: int = _point_ids[cell]
 				var cand_pos: Vector3 = _astar.get_point_position(cand_id)
+
+				if not excluded_positions.is_empty():
+					var is_excluded: bool = false
+					for excl in excluded_positions:
+						if excl is Vector3 and cand_pos.distance_squared_to(excl as Vector3) < 0.64:
+							is_excluded = true
+							break
+					if is_excluded:
+						continue
+
 				var horiz_d: float
 				if half_extents != Vector2.ZERO:
 					# Reject positions that lie within the station bounds
@@ -909,9 +921,9 @@ func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: fl
 		return a["dist_from"] < b["dist_from"]
 	)
 
-	# Pick the closest reachable candidate node without unnecessary combinatorial searches
+	# Evaluate reachable candidate nodes across alternative sides
 	var best_raw: PackedVector3Array = PackedVector3Array()
-	var max_to_eval: int = mini(3, candidates.size())
+	var max_to_eval: int = mini(8, candidates.size())
 
 	for i in range(max_to_eval):
 		var cand_id: int = candidates[i]["id"]
