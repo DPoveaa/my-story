@@ -383,7 +383,7 @@ func _physics_process(delta: float) -> void:
 
 			# Takeoff window: initiate jump when approaching ledge (between 0.45m and 1.45m) with forward movement
 			if moving_towards and xz_to_elev >= 0.45 and xz_to_elev <= 1.45:
-				if _has_jump_headroom():
+				if _has_jump_headroom() and _is_jump_landing_safe(target_elevated_wp):
 					if _path_index != _last_jump_waypoint_idx:
 						_last_jump_waypoint_idx = _path_index
 						_jump_count_at_waypoint = 0
@@ -482,6 +482,49 @@ func _has_jump_headroom() -> bool:
 	if space == null:
 		return false
 	return space.intersect_ray(ray).is_empty()
+
+func _is_jump_landing_safe(landing_pos: Vector3) -> bool:
+	if not is_inside_tree():
+		return true
+	var space := _get_direct_space_state()
+	if space == null:
+		return true
+
+	# Ground support check: verify floor exists at landing waypoint
+	var ray_from := landing_pos + Vector3(0.0, 0.5, 0.0)
+	var ray_to := landing_pos - Vector3(0.0, 1.4, 0.0)
+	var ray := PhysicsRayQueryParameters3D.create(ray_from, ray_to, collision_mask)
+	ray.exclude = [get_rid()]
+	var hit := space.intersect_ray(ray)
+	if hit.is_empty():
+		return false
+
+	# Headroom clearance check at landing spot
+	var head_from := landing_pos + Vector3(0.0, 0.5, 0.0)
+	var head_to := landing_pos + Vector3(0.0, 1.8, 0.0)
+	var head_ray := PhysicsRayQueryParameters3D.create(head_from, head_to, collision_mask)
+	head_ray.exclude = [get_rid()]
+	return space.intersect_ray(head_ray).is_empty()
+
+func _is_ground_ahead_safe(move_dir: Vector3) -> bool:
+	if not is_inside_tree() or not is_on_floor():
+		return true
+	var space := _get_direct_space_state()
+	if space == null:
+		return true
+
+	# Probe floor 0.45m ahead in movement direction
+	var probe_ahead := global_position + (move_dir.normalized() * 0.45)
+	var ray_from := probe_ahead + Vector3(0.0, 0.4, 0.0)
+	var ray_to := probe_ahead - Vector3(0.0, 1.8, 0.0)
+	var ray := PhysicsRayQueryParameters3D.create(ray_from, ray_to, collision_mask)
+	ray.exclude = [get_rid()]
+	var hit := space.intersect_ray(ray)
+	if hit.is_empty():
+		return false
+	if hit.position.y < global_position.y - 1.4:
+		return false
+	return true
 
 func _try_step_up(move_dir: Vector3) -> bool:
 	if not is_inside_tree() or not is_on_floor():
@@ -676,7 +719,7 @@ func _process_search_job() -> void:
 
 	var path_ok: bool = _request_path(item.global_position, item)
 	if path_ok:
-		var station := _find_nearest_station_for_material(mat)
+		var station := _find_nearest_station_for_material(mat, -1, false)
 		if station != null:
 			_stop_wandering()
 			target_item = item
@@ -928,24 +971,25 @@ func _get_candidate_stations_for_material(mat: String, amount: int = -1) -> Arra
 
 	return result
 
-func _find_nearest_station_for_material(mat: String, amount: int = -1) -> Node3D:
+func _find_nearest_station_for_material(mat: String, amount: int = -1, check_full_route: bool = true) -> Node3D:
 	var astar_mgr := _get_astar()
 	var candidates: Array[Node3D] = _get_candidate_stations_for_material(mat, amount)
 	for station in candidates:
-		if astar_mgr != null and astar_mgr.has_method("find_approach_path"):
-			var tol := _get_target_approach_tolerances(station)
-			var p: PackedVector3Array = astar_mgr.find_approach_path(global_position, station.global_position, tol["min_dist"], tol["max_dist"], tol["max_vert"], tol.get("half_extents", Vector2.ZERO))
-			if p.is_empty():
-				continue
-			var final_pt: Vector3 = p[p.size() - 1]
-			var f_h: float
-			if tol.get("half_extents", Vector2.ZERO) != Vector2.ZERO:
-				f_h = _get_distance_to_station_edge(station, final_pt)
-			else:
-				f_h = Vector2(final_pt.x - station.global_position.x, final_pt.z - station.global_position.z).length()
-			var f_v: float = absf(final_pt.y - station.global_position.y)
-			if f_h > tol["horiz_tol"] or f_v > tol["vert_tol"]:
-				continue
+		if check_full_route:
+			if astar_mgr != null and astar_mgr.has_method("find_approach_path"):
+				var tol := _get_target_approach_tolerances(station)
+				var p: PackedVector3Array = astar_mgr.find_approach_path(global_position, station.global_position, tol["min_dist"], tol["max_dist"], tol["max_vert"], tol.get("half_extents", Vector2.ZERO))
+				if p.is_empty():
+					continue
+				var final_pt: Vector3 = p[p.size() - 1]
+				var f_h: float
+				if tol.get("half_extents", Vector2.ZERO) != Vector2.ZERO:
+					f_h = _get_distance_to_station_edge(station, final_pt)
+				else:
+					f_h = Vector2(final_pt.x - station.global_position.x, final_pt.z - station.global_position.z).length()
+				var f_v: float = absf(final_pt.y - station.global_position.y)
+				if f_h > tol["horiz_tol"] or f_v > tol["vert_tol"]:
+					continue
 		return station
 	return null
 
@@ -960,43 +1004,30 @@ func _process_moving_to_item(delta: float) -> void:
 		_cancel_job("Target taken by player/worker!")
 		return
 
-	# Handle moving target with debouncing
 	if _target_repath_cooldown > 0.0:
 		_target_repath_cooldown -= delta
 
 	var target_pos: Vector3 = target_item.global_position
-	var target_moved_dist_sq: float = target_pos.distance_squared_to(_last_target_pos)
-	if target_moved_dist_sq > 0.64 and _target_repath_cooldown <= 0.0:
-		_target_repath_cooldown = 0.45
-		_last_target_pos = target_pos
-		var repath_ok := _request_path(target_pos, target_item)
-		if not repath_ok:
-			var is_rolling := (target_item is RigidBody3D) and ((target_item as RigidBody3D).linear_velocity.length_squared() > 0.04)
-			if not is_rolling:
-				_cancel_job("Path blocked to moved item!")
-				return
+	var is_rolling := (target_item is RigidBody3D) and ((target_item as RigidBody3D).linear_velocity.length_squared() > 0.04)
 
 	var horiz_dist: float = Vector2(global_position.x - target_pos.x, global_position.z - target_pos.z).length()
 	var vert_dist: float = absf(global_position.y - target_pos.y)
-	var dist_to_approach: float = Vector2(global_position.x - _approach_target_point.x, global_position.z - _approach_target_point.z).length() if _approach_target_point != Vector3.INF else INF
+	var y_diff_item: float = global_position.y - target_pos.y
+	var vert_ok: bool = (y_diff_item >= -1.4 and y_diff_item <= 2.2)
 
 	_set_status("[COLLECTING] Moving to %s (%.1fm)" % [target_item.name, horiz_dist], 0.0)
 
 	# Proximity damping for rolling bodies: help rolling items settle naturally when near
-	if horiz_dist <= 2.2 and vert_dist <= 1.8 and (target_item is RigidBody3D):
+	if horiz_dist <= 2.5 and vert_dist <= 1.8 and (target_item is RigidBody3D):
 		var rb := target_item as RigidBody3D
 		if not rb.freeze and not rb.sleeping:
 			var spd := rb.linear_velocity.length()
 			if spd > 0.02 and spd < 4.0:
-				rb.linear_velocity = rb.linear_velocity.move_toward(Vector3.ZERO, delta * 4.0)
+				rb.linear_velocity = rb.linear_velocity.move_toward(Vector3.ZERO, delta * 4.5)
 				rb.angular_velocity = rb.angular_velocity.move_toward(Vector3.ZERO, delta * 5.0)
 
-	# Allow height differences: vertical tolerance of up to 2.2m below and 1.4m above
-	var y_diff_item: float = global_position.y - target_pos.y
-	var vert_ok: bool = (y_diff_item >= -1.4 and y_diff_item <= 2.2)
+	# Arrival verification: confirm actual interaction limits and physical line of access
 	var in_pickup_range: bool = (horiz_dist <= 2.0) and vert_ok
-
-	# If within pickup range and physically reachable, pick up (allowing moving items to settle)!
 	if in_pickup_range:
 		if _is_item_physically_reachable(target_item):
 			var rb_speed: float = (target_item as RigidBody3D).linear_velocity.length() if (target_item is RigidBody3D) else 0.0
@@ -1004,9 +1035,9 @@ func _process_moving_to_item(delta: float) -> void:
 				_transition_to(State.PICKUP_ITEM)
 				return
 			else:
-				# Allow moving item a brief settle window before picking up
+				# Allow rolling item a brief settle window before picking up
 				_rolling_settle_timer += delta
-				if _rolling_settle_timer >= 1.0:
+				if _rolling_settle_timer >= 0.8:
 					_rolling_settle_timer = 0.0
 					_transition_to(State.PICKUP_ITEM)
 					return
@@ -1015,27 +1046,55 @@ func _process_moving_to_item(delta: float) -> void:
 	else:
 		_rolling_settle_timer = 0.0
 
-	# When path has ended (or bot reached destination)
+	# Dynamic target tracking: update destination and replan without restarting the route unnecessarily
+	var target_moved_dist_sq: float = target_pos.distance_squared_to(_last_target_pos)
+	if target_moved_dist_sq > 0.64 and _target_repath_cooldown <= 0.0:
+		_target_repath_cooldown = 0.4
+		_last_target_pos = target_pos
+
+		if horiz_dist <= 3.0 and vert_ok and _is_item_physically_reachable(target_item):
+			# Close range pursuit: steer directly towards target approach point
+			_destination = target_pos
+			_approach_target_point = target_pos
+			_current_path = PackedVector3Array([target_pos])
+			_path_index = 0
+			_path_dirty = true
+		elif target_moved_dist_sq < 4.0 and _has_valid_path() and (_current_path.size() - _path_index) > 1:
+			# Minor displacement en route: update destination without resetting progress
+			_destination = target_pos
+			_approach_target_point = target_pos
+			_current_path[_current_path.size() - 1] = target_pos
+			_path_dirty = true
+		else:
+			# Substantial displacement: replan approach path smoothly
+			var repath_ok := _request_path(target_pos, target_item)
+			if not repath_ok and not is_rolling:
+				_cancel_job("Path blocked to moved item!")
+				return
+
+	# Handle end of path waypoints
 	if not _has_valid_path():
 		if in_pickup_range and _is_item_physically_reachable(target_item):
 			_transition_to(State.PICKUP_ITEM)
 			return
-		elif horiz_dist <= 2.6 and vert_ok:
-			# Close to item: try to replan a direct approach path before declaring stuck
+		elif horiz_dist <= 2.6 and vert_ok and _is_item_physically_reachable(target_item):
+			# Fine approach: step closer toward visible target at controlled speed
+			var approach_dir := (target_pos - global_position)
+			approach_dir.y = 0.0
+			if approach_dir.length_squared() > 0.01:
+				velocity.x = approach_dir.normalized().x * (move_speed * 0.6)
+				velocity.z = approach_dir.normalized().z * (move_speed * 0.6)
+				return
+		elif horiz_dist <= 3.0 and is_rolling and _rolling_settle_timer < 1.0:
+			_rolling_settle_timer += delta
+			return
+		else:
 			if _recovery_attempts < MAX_RECOVERY_ATTEMPTS:
 				_trigger_stuck_recovery("Fine-tuning approach to item")
 				return
 			else:
 				_trigger_stuck_recovery("Item unreachable at approach point")
 				return
-		else:
-			# If target is still rolling/settling, allow brief settle period
-			var is_rolling := (target_item is RigidBody3D) and ((target_item as RigidBody3D).linear_velocity.length_squared() > 0.04)
-			if is_rolling and _rolling_settle_timer < 1.0:
-				_rolling_settle_timer += delta
-				return
-			_trigger_stuck_recovery("Item unreachable at approach point")
-			return
 
 	_monitor_stuck_progress(delta)
 	_follow_path(delta)
@@ -1176,6 +1235,14 @@ func _process_moving_to_station(delta: float) -> void:
 		if in_station_range and _is_station_physically_reachable(target_station):
 			_transition_to(State.DEPOSIT_ITEM)
 			return
+		elif edge_dist <= tol["horiz_tol"] + 0.6 and _is_station_physically_reachable(target_station):
+			# Fine approach: step closer toward station edge
+			var to_st := (target_station.global_position - global_position)
+			to_st.y = 0.0
+			if to_st.length_squared() > 0.01:
+				velocity.x = to_st.normalized().x * (move_speed * 0.5)
+				velocity.z = to_st.normalized().z * (move_speed * 0.5)
+				return
 		else:
 			_trigger_stuck_recovery("Station unreachable at approach point")
 			return
@@ -1224,24 +1291,40 @@ func _follow_path(delta: float, speed_mult: float = 1.0) -> void:
 
 	dir = dir.normalized()
 
+	# Ledge / Void safety guard:
+	# If the current waypoint does not intend a downward step (y_diff >= -0.3),
+	# check that moving forward does not step off into void or a deep pit!
+	if is_on_floor() and y_diff >= -0.3:
+		if not _is_ground_ahead_safe(dir):
+			velocity.x = move_toward(velocity.x, 0.0, move_speed * delta * 10.0)
+			velocity.z = move_toward(velocity.z, 0.0, move_speed * delta * 10.0)
+			if _has_valid_path():
+				_trigger_stuck_recovery("Unsafe ledge/void detected ahead")
+			return
+
 	# Smooth steering when approaching current waypoint towards next waypoint
-	if _path_index + 1 < _current_path.size() and xz_dist < 0.8:
+	if _path_index + 1 < _current_path.size() and xz_dist < 0.85:
 		var next_wp := _current_path[_path_index + 1]
 		var dir_next := next_wp - global_position
 		dir_next.y = 0.0
 		if dir_next.length_squared() > 0.001:
-			var blend: float = clampf(1.0 - (xz_dist / 0.8), 0.0, 0.45)
+			var blend: float = clampf(1.0 - (xz_dist / 0.85), 0.0, 0.5)
 			dir = dir.lerp(dir_next.normalized(), blend).normalized()
 
 	# Smooth rotation towards movement direction
 	var target_yaw: float = atan2(-dir.x, -dir.z)
-	rotation.y = lerp_angle(rotation.y, target_yaw, 10.0 * delta)
+	rotation.y = lerp_angle(rotation.y, target_yaw, 12.0 * delta)
 
 	var effective_speed: float = move_speed * speed_mult
+	# Arrival deceleration near final destination
+	if _path_index == _current_path.size() - 1:
+		if xz_dist < 0.9:
+			effective_speed *= clampf(xz_dist / 0.9, 0.35, 1.0)
+
 	var target_vx := dir.x * effective_speed
 	var target_vz := dir.z * effective_speed
-	velocity.x = move_toward(velocity.x, target_vx, effective_speed * delta * 10.0)
-	velocity.z = move_toward(velocity.z, target_vz, effective_speed * delta * 10.0)
+	velocity.x = move_toward(velocity.x, target_vx, effective_speed * delta * 12.0)
+	velocity.z = move_toward(velocity.z, target_vz, effective_speed * delta * 12.0)
 
 func _monitor_stuck_progress(delta: float) -> void:
 	_stuck_timer += delta
@@ -1400,7 +1483,7 @@ func _process_pickup_item() -> void:
 	# Batch collection plan: if helper can carry more, collect from nearby cluster without global re-scan
 	if _can_carry_more(carried_material):
 		var next_val: int = _get_carried_resource_value() + 1
-		var st := _find_nearest_station_for_material(carried_material, next_val)
+		var st := _find_nearest_station_for_material(carried_material, next_val, false)
 		if st != null:
 			var next_candidate: Node3D = null
 			while not _collection_cluster.is_empty():

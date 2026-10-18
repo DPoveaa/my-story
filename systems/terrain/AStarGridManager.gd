@@ -736,6 +736,15 @@ func _connect_point_neighbors(cell: Vector3i) -> void:
 			var pos_b: Vector3 = _astar.get_point_position(to_id)
 			if absf(pos_a.y - pos_b.y) > 1.1:
 				continue
+
+			# Vertical headroom checks: reject step-ups where ceiling blocks the 2-block body
+			if dy == 1:
+				if _is_cell_solid(Vector3i(cell.x, cell.y + 2, cell.z)):
+					continue
+			elif dy == -1:
+				if _is_cell_solid(Vector3i(neighbor.x, cell.y + 1, neighbor.z)):
+					continue
+
 			_astar.connect_points(from_id, to_id, true)
 			if dy > 0:
 				_astar.set_point_weight_scale(to_id, 1.4)
@@ -763,6 +772,16 @@ func _connect_point_neighbors(cell: Vector3i) -> void:
 			var pos_b: Vector3 = _astar.get_point_position(to_id)
 			if absf(pos_a.y - pos_b.y) > 1.1:
 				continue
+
+			if dy == 1:
+				if _is_cell_solid(Vector3i(cell.x, cell.y + 2, cell.z)):
+					continue
+				if _is_cell_solid(Vector3i(ortho1.x, cell.y + 2, ortho1.z)) or _is_cell_solid(Vector3i(ortho2.x, cell.y + 2, ortho2.z)):
+					continue
+			elif dy == -1:
+				if _is_cell_solid(Vector3i(target.x, cell.y + 1, target.z)):
+					continue
+
 			_astar.connect_points(from_id, to_id, true)
 			if dy > 0:
 				_astar.set_point_weight_scale(to_id, 1.6)
@@ -809,6 +828,34 @@ func request_approach_path(requester: Object, callback: Callable, from_world: Ve
 		"half_extents": half_extents
 	})
 
+func _has_unobstructed_access(from_pos: Vector3, target_pos: Vector3) -> bool:
+	var delta := target_pos - from_pos
+	var horiz_d := Vector2(delta.x, delta.z).length()
+	if horiz_d < 0.6:
+		return true
+
+	# Ray march through voxel space at waist height to verify no wall separates the approach node from the target
+	var start_pt := from_pos + Vector3(0.0, 0.65, 0.0)
+	var end_pt := target_pos + Vector3(0.0, 0.35, 0.0)
+	var dir := end_pt - start_pt
+	var total_len := dir.length()
+	if total_len < 0.1:
+		return true
+
+	var steps: int = int(ceil(total_len / 0.5))
+	var target_cell := Vector3i(floori(target_pos.x), floori(target_pos.y), floori(target_pos.z))
+	var from_cell := Vector3i(floori(from_pos.x), floori(from_pos.y), floori(from_pos.z))
+
+	for s in range(1, steps):
+		var pt := start_pt + dir * (float(s) / float(steps))
+		var cell := Vector3i(floori(pt.x), floori(pt.y), floori(pt.z))
+		if cell == from_cell or cell == target_cell or cell == target_cell + Vector3i(0, 1, 0):
+			continue
+		if _is_cell_solid(cell):
+			return false
+
+	return true
+
 func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: float = 0.8, max_dist: float = 1.5, max_vert: float = 1.3, half_extents: Vector2 = Vector2.ZERO) -> PackedVector3Array:
 	## Finds an optimized path from from_world to a valid, walkable approach node beside target_world.
 	var cache_key := _make_path_cache_key(from_world, target_world, min_dist, max_dist, max_vert, half_extents)
@@ -846,8 +893,10 @@ func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: fl
 					horiz_d = Vector2(cand_pos.x - target_world.x, cand_pos.z - target_world.z).length()
 
 				var y_diff: float = absf(cand_pos.y - target_world.y)
-				# Ensure candidate is outside the obstacle boundary and within reachable distance
+				# Ensure candidate is outside the obstacle boundary, within reachable limits, and has unobstructed access
 				if horiz_d >= min_dist and horiz_d <= max_dist and y_diff <= max_vert:
+					if not _has_unobstructed_access(cand_pos, target_world):
+						continue
 					if _is_position_blocked_by_physics(cell):
 						continue
 					var d_from: float = cand_pos.distance_squared_to(from_world)
@@ -860,20 +909,16 @@ func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: fl
 		return a["dist_from"] < b["dist_from"]
 	)
 
-	# Evaluate candidate reachability and cost cheaply without optimizing multiple complete paths:
+	# Pick the closest reachable candidate node without unnecessary combinatorial searches
 	var best_raw: PackedVector3Array = PackedVector3Array()
-	var best_cost: float = INF
-	var max_to_eval: int = mini(8, candidates.size())
+	var max_to_eval: int = mini(3, candidates.size())
 
 	for i in range(max_to_eval):
 		var cand_id: int = candidates[i]["id"]
 		var raw: PackedVector3Array = _astar.get_point_path(from_id, cand_id)
-		if raw.is_empty():
-			continue
-		var cost: float = float(raw.size()) * 1.0 + sqrt(candidates[i]["dist_from"]) * 0.1
-		if cost < best_cost:
-			best_cost = cost
+		if not raw.is_empty():
 			best_raw = raw
+			break
 
 	if best_raw.is_empty():
 		return PackedVector3Array()
@@ -902,18 +947,15 @@ func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: fl
 
 	return PackedVector3Array()
 
-const MAX_SHORTCUT_LOOKAHEAD: int = 6
-const MAX_SHORTCUT_HORIZ_DIST: float = 6.0
+const MAX_SHORTCUT_LOOKAHEAD: int = 5
+const MAX_SHORTCUT_HORIZ_DIST: float = 5.0
 
 func optimize_path(raw_path: PackedVector3Array) -> PackedVector3Array:
-	## Removes redundant waypoints using bounded-lookahead capsule sweep and ground support checks.
+	## Removes redundant waypoints using fast voxel clearance, ground support, and bounded-lookahead checks.
 	if raw_path.size() <= 2:
 		return raw_path
 
 	var direct_state := _get_direct_space_state()
-	if direct_state == null:
-		return raw_path
-
 	var optimized: PackedVector3Array = PackedVector3Array()
 	optimized.append(raw_path[0])
 
@@ -923,9 +965,11 @@ func optimize_path(raw_path: PackedVector3Array) -> PackedVector3Array:
 	while current_idx < n - 1:
 		var best_idx: int = current_idx + 1
 		var max_lookahead_idx: int = mini(n - 1, current_idx + MAX_SHORTCUT_LOOKAHEAD)
-		for test_idx in range(max_lookahead_idx, current_idx + 1, -1):
+		# Search forward: if a short shortcut is blocked, longer shortcuts in the same direction will also be blocked
+		for test_idx in range(current_idx + 2, max_lookahead_idx + 1):
 			if _is_shortcut_safe(direct_state, raw_path, current_idx, test_idx):
 				best_idx = test_idx
+			else:
 				break
 		optimized.append(raw_path[best_idx])
 		current_idx = best_idx
@@ -933,8 +977,8 @@ func optimize_path(raw_path: PackedVector3Array) -> PackedVector3Array:
 	return optimized
 
 func _is_shortcut_safe(space: PhysicsDirectSpaceState3D, path: PackedVector3Array, from_idx: int, to_idx: int) -> bool:
-	if space == null:
-		return false
+	if to_idx == from_idx + 1:
+		return true
 
 	var start: Vector3 = path[from_idx]
 	var end: Vector3 = path[to_idx]
@@ -952,32 +996,46 @@ func _is_shortcut_safe(space: PhysicsDirectSpaceState3D, path: PackedVector3Arra
 	if horiz_dist > MAX_SHORTCUT_HORIZ_DIST:
 		return false
 
-	# 2. Capsule sweep clearance check from start to end using reusable query
-	var sweep_query := _get_sweep_query()
-	sweep_query.transform = Transform3D(Basis.IDENTITY, start + Vector3(0.0, 0.75, 0.0))
-	sweep_query.motion = delta
+	# 2. Fast voxel-level ground support and body clearance (instant integer checks)
+	var steps: int = maxi(1, int(ceil(horiz_dist / 0.5)))
+	var floor_y_int := floori(base_y) - 1
+	var walk_y_int := floori(base_y)
+	var head_y_int := floori(base_y) + 1
 
-	if space == null:
-		return false
-	var cast_res := space.cast_motion(sweep_query)
-	if cast_res.is_empty() or cast_res[0] < 0.99:
-		return false
-
-	# 3. Ground support check: verify floor exists along shortcut to prevent walking off ledges
-	var steps: int = maxi(1, int(ceil(horiz_dist / 0.7)))
 	for s in range(1, steps):
 		var frac: float = float(s) / float(steps)
 		var sample_pt: Vector3 = start.lerp(end, frac)
-		var ray_from := sample_pt + Vector3(0.0, 0.5, 0.0)
-		var ray_to := sample_pt - Vector3(0.0, 1.2, 0.0)
-		var ray_q := _get_ray_query(ray_from, ray_to)
-		if space == null:
+		var col_x := floori(sample_pt.x)
+		var col_z := floori(sample_pt.z)
+
+		# Ground support: floor must exist along shortcut; prevent walking off into void or pit
+		var has_ground: bool = _is_cell_solid(Vector3i(col_x, floor_y_int, col_z)) or _is_cell_solid(Vector3i(col_x, floor_y_int - 1, col_z))
+		if not has_ground:
 			return false
-		var ground_hit := space.intersect_ray(ray_q)
-		if ground_hit.is_empty():
+
+		# Body clearance: walk and head cells must not be solid
+		if _is_cell_solid(Vector3i(col_x, walk_y_int, col_z)) or _is_cell_solid(Vector3i(col_x, head_y_int, col_z)):
 			return false
-		var hit_y: float = ground_hit.position.y
-		if absf(hit_y - base_y) > 0.5:
+
+		# Corner clearance: check if body capsule would cut too close (< 0.32m) to adjacent solid wall corners
+		var fx: float = sample_pt.x - float(col_x)
+		var fz: float = sample_pt.z - float(col_z)
+		if fx < 0.32 and _is_cell_solid(Vector3i(col_x - 1, walk_y_int, col_z)):
+			return false
+		if fx > 0.68 and _is_cell_solid(Vector3i(col_x + 1, walk_y_int, col_z)):
+			return false
+		if fz < 0.32 and _is_cell_solid(Vector3i(col_x, walk_y_int, col_z - 1)):
+			return false
+		if fz > 0.68 and _is_cell_solid(Vector3i(col_x, walk_y_int, col_z + 1)):
+			return false
+
+	# 3. Dynamic physics clearance check (only runs if voxel clearance already passed)
+	if space != null and _initial_bake_done:
+		var sweep_query := _get_sweep_query()
+		sweep_query.transform = Transform3D(Basis.IDENTITY, start + Vector3(0.0, 0.75, 0.0))
+		sweep_query.motion = delta
+		var cast_res := space.cast_motion(sweep_query)
+		if cast_res.is_empty() or cast_res[0] < 0.99:
 			return false
 
 	return true
