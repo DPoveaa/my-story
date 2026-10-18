@@ -77,6 +77,10 @@ var target_item: Node3D = null
 var carried_items: Array[Node3D] = []
 var carried_material: String = ""
 var target_station: Node3D = null
+var fragment_bag: Dictionary = {}
+
+static var _station_cache_timestamp: int = 0
+static var _station_exists_cache: Dictionary = {}
 
 var _idle_timer: float = 0.0
 var _abort_cooldown: float = 0.0
@@ -227,10 +231,10 @@ func _get_target_approach_tolerances(target_node: Node3D) -> Dictionary:
 		return {
 			"half_extents": Vector2.ZERO,
 			"min_dist": 0.1,
-			"max_dist": 1.6,
-			"max_vert": 1.5,
-			"horiz_tol": ITEM_PICKUP_HORIZ_TOLERANCE,
-			"vert_tol": ITEM_PICKUP_VERT_TOLERANCE
+			"max_dist": 2.0,
+			"max_vert": 2.2,
+			"horiz_tol": 2.0,
+			"vert_tol": 2.2
 		}
 
 func _get_distance_to_station_edge(station: Node3D, pos: Vector3) -> float:
@@ -287,7 +291,9 @@ func _request_path(to: Vector3, target_node: Node3D = null) -> bool:
 		else:
 			h_dist = Vector2(final_wp.x - to.x, final_wp.z - to.z).length()
 
-		if h_dist > tol["horiz_tol"] or v_dist > tol["vert_tol"]:
+		# Allow up to 2.2m downward vertical difference when bot approach point is above the item
+		var max_v_tol: float = 2.2 if final_wp.y >= to.y else float(tol["vert_tol"])
+		if h_dist > tol["horiz_tol"] or v_dist > max_v_tol:
 			_current_path = PackedVector3Array()
 			_path_index = 0
 			_destination = Vector3.INF
@@ -411,7 +417,7 @@ func _physics_process(delta: float) -> void:
 			if _idle_timer <= 0.0 and _abort_cooldown <= 0.0:
 				_process_search_job()
 
-			if not _is_wandering and carried_items.is_empty():
+			if not _is_wandering and not _has_any_cargo():
 				_wander_cooldown -= delta
 				if _wander_cooldown <= 0.0:
 					_try_idle_wander()
@@ -601,7 +607,7 @@ func _transition_to(new_state: State) -> void:
 			if not _is_wandering:
 				_clear_route_line()
 			if _status_hold_timer <= 0.0:
-				if carried_items.is_empty():
+				if not _has_any_cargo():
 					_set_status("[IDLE] Waiting for work...", 0.0, false)
 				else:
 					_set_status("[IDLE] Waiting for station for %s..." % carried_material, 0.0, false)
@@ -619,13 +625,13 @@ func _transition_to(new_state: State) -> void:
 		State.MOVING_TO_STATION:
 			if is_instance_valid(target_station):
 				var d: float = Vector2(global_position.x - target_station.global_position.x, global_position.z - target_station.global_position.z).length()
-				_set_status("[CARRYING] Transporting %d %s(s) to %s (%.1fm)" % [carried_items.size(), carried_material, target_station.name, d], 0.0, true)
+				_set_status("[CARRYING] Transporting %d %s(s) to %s (%.1fm)" % [_get_cargo_count(), carried_material, target_station.name, d], 0.0, true)
 		State.DEPOSIT_ITEM:
 			_clear_route_line()
 			if is_instance_valid(target_station):
-				_set_status("[DELIVERING] Depositing %d %s(s) at %s..." % [carried_items.size(), carried_material, target_station.name], 0.0, true)
+				_set_status("[DELIVERING] Depositing %d %s(s) at %s..." % [_get_cargo_count(), carried_material, target_station.name], 0.0, true)
 			else:
-				_set_status("[DELIVERING] Depositing %d item(s)..." % carried_items.size(), 0.0, true)
+				_set_status("[DELIVERING] Depositing %d item(s)..." % _get_cargo_count(), 0.0, true)
 
 # ---------------------------------------------------------------------------
 # Job Search & Destination Validation
@@ -636,7 +642,7 @@ func _process_search_job() -> void:
 		return
 
 	# Priority 1: If carrying cargo, always find a destination station first
-	if not carried_items.is_empty():
+	if _has_any_cargo():
 		_go_to_station_or_idle(carried_material)
 		return
 
@@ -686,22 +692,35 @@ func _process_search_job() -> void:
 			_transition_to(State.MOVING_TO_ITEM)
 			return
 
-	# Candidate failed route check or station unavailable: blacklist briefly and try alternatives over subsequent frames!
+	# Candidate failed route check or station unavailable: blacklist briefly and stagger retry
 	_blacklist_target(item, TARGET_BLACKLIST_COOLDOWN)
-	_idle_timer = 0.05
+	_idle_timer = randf_range(0.2, 0.4)
 	_transition_to(State.IDLE)
 
 func _has_any_compatible_station_for(mat: String) -> bool:
+	var now: int = Time.get_ticks_msec()
+	if now - _station_cache_timestamp < 1000 and _station_exists_cache.has(mat):
+		return bool(_station_exists_cache[mat])
+
+	var exists: bool = false
 	if mat == "log":
 		for block in get_tree().get_nodes_in_group("chopping_blocks"):
 			if is_instance_valid(block) and not _is_target_blacklisted(block):
 				if _can_station_accept_material(block, "log", 1):
-					return true
-	for pallet in get_tree().get_nodes_in_group("pallets"):
-		if is_instance_valid(pallet) and not _is_target_blacklisted(pallet):
-			if _can_station_accept_material(pallet, mat, 1):
-				return true
-	return false
+					exists = true
+					break
+	if not exists:
+		for pallet in get_tree().get_nodes_in_group("pallets"):
+			if is_instance_valid(pallet) and not _is_target_blacklisted(pallet):
+				if _can_station_accept_material(pallet, mat, 1):
+					exists = true
+					break
+
+	if now - _station_cache_timestamp >= 1000:
+		_station_cache_timestamp = now
+		_station_exists_cache.clear()
+	_station_exists_cache[mat] = exists
+	return exists
 
 func _get_filtered_candidates(group_names: Array, same_type: String = "") -> Array[Node3D]:
 	var best_dist_sq: float = search_radius * search_radius
@@ -753,7 +772,7 @@ func _get_filtered_candidates(group_names: Array, same_type: String = "") -> Arr
 					continue
 
 			# Fast broad check: ensure a destination station exists (cached per material)
-			if carried_items.is_empty():
+			if not _has_any_cargo():
 				if not station_exists_cache.has(mat):
 					station_exists_cache[mat] = _has_any_compatible_station_for(mat)
 				if not station_exists_cache[mat]:
@@ -805,7 +824,23 @@ func _find_best_candidate_item(group_names: Array, same_type: String = "") -> No
 		return null
 	return candidates[0]
 
+func _has_any_cargo() -> bool:
+	return not carried_items.is_empty() or not fragment_bag.is_empty()
+
+func _get_cargo_count() -> int:
+	if not fragment_bag.is_empty():
+		var total: int = 0
+		for mat in fragment_bag:
+			total += int(fragment_bag[mat])
+		return total
+	return carried_items.size()
+
 func _get_carried_resource_value() -> int:
+	if not fragment_bag.is_empty():
+		var total_frag: int = 0
+		for mat in fragment_bag:
+			total_frag += int(fragment_bag[mat])
+		return maxi(total_frag, 1)
 	if carried_items.is_empty():
 		return 1
 	if carried_material == "log":
@@ -956,8 +991,10 @@ func _process_moving_to_item(delta: float) -> void:
 				rb.linear_velocity = rb.linear_velocity.move_toward(Vector3.ZERO, delta * 4.0)
 				rb.angular_velocity = rb.angular_velocity.move_toward(Vector3.ZERO, delta * 5.0)
 
-	# Allow height differences: vertical tolerance of up to 1.85m to collect 1 block-step below/above
-	var in_pickup_range: bool = (horiz_dist <= ITEM_PICKUP_HORIZ_TOLERANCE) and (vert_dist <= ITEM_PICKUP_VERT_TOLERANCE + 0.35)
+	# Allow height differences: vertical tolerance of up to 2.2m below and 1.4m above
+	var y_diff_item: float = global_position.y - target_pos.y
+	var vert_ok: bool = (y_diff_item >= -1.4 and y_diff_item <= 2.2)
+	var in_pickup_range: bool = (horiz_dist <= 2.0) and vert_ok
 
 	# If within pickup range and physically reachable, pick up (allowing moving items to settle)!
 	if in_pickup_range:
@@ -983,7 +1020,7 @@ func _process_moving_to_item(delta: float) -> void:
 		if in_pickup_range and _is_item_physically_reachable(target_item):
 			_transition_to(State.PICKUP_ITEM)
 			return
-		elif horiz_dist <= ITEM_PICKUP_HORIZ_TOLERANCE + 0.8 and vert_dist <= ITEM_PICKUP_VERT_TOLERANCE + 0.5:
+		elif horiz_dist <= 2.6 and vert_ok:
 			# Close to item: try to replan a direct approach path before declaring stuck
 			if _recovery_attempts < MAX_RECOVERY_ATTEMPTS:
 				_trigger_stuck_recovery("Fine-tuning approach to item")
@@ -1055,15 +1092,19 @@ func _is_item_physically_reachable(item: Node3D) -> bool:
 			if space.intersect_ray(wall_ray).is_empty():
 				return true
 
-	# 4. Step-down reach check: If helper is on a ledge/step above the item (down to 1.8m below helper feet),
-	# cast from helper waist directly to item. If line is clear of vertical walls, allow reach.
-	if global_position.y >= item.global_position.y and (global_position.y - item.global_position.y) <= 1.85:
-		if h_dist <= ITEM_PICKUP_HORIZ_TOLERANCE + 0.2:
-			var waist_from := global_position + Vector3(0.0, 0.45, 0.0)
+	# 4. Step-down reach check: If helper is on a ledge/step above the item (down to 2.2m below helper feet),
+	# cast from helper waist shifted forward towards item to clear floor edges
+	var y_step: float = global_position.y - item.global_position.y
+	if y_step >= -0.2 and y_step <= 2.2:
+		if h_dist <= 2.2:
+			var fwd_dir := (item.global_position - global_position)
+			fwd_dir.y = 0.0
+			var fwd_offset := fwd_dir.normalized() * 0.35 if fwd_dir.length_squared() > 0.01 else Vector3.ZERO
+			var waist_from := global_position + Vector3(0.0, 0.45, 0.0) + fwd_offset
 			var step_ray := PhysicsRayQueryParameters3D.create(waist_from, to_center, 1)
 			step_ray.exclude = excludes
 			var step_hit := space.intersect_ray(step_ray)
-			if step_hit.is_empty() or step_hit.position.distance_squared_to(item.global_position) < 0.25:
+			if step_hit.is_empty() or step_hit.position.distance_squared_to(item.global_position) < 0.35:
 				return true
 
 	return false
@@ -1311,36 +1352,50 @@ func _process_pickup_item() -> void:
 		_go_to_station_or_idle(carried_material if not carried_material.is_empty() else item_mat)
 		return
 
-	# Disable physics and collision completely while carried to fix falling/jittering visuals
-	if target_item is RigidBody3D:
-		var rb := target_item as RigidBody3D
-		rb.freeze = true
-		rb.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
-		rb.sleeping = true
-		rb.collision_layer = 0
-		rb.collision_mask = 0
-		rb.linear_velocity = Vector3.ZERO
-		rb.angular_velocity = Vector3.ZERO
-		rb.set_physics_process(false)
-		rb.set_process(false)
-		for child in rb.get_children():
-			if child is CollisionShape3D:
-				(child as CollisionShape3D).disabled = true
+	var is_fragment: bool = (target_item.is_in_group("fragments") or (item_mat not in ["log", "plank"]))
+	if is_fragment:
+		var rv: int = _get_item_resource_value(target_item)
+		if target_item.has_meta("worker_reserved_by") and target_item.get_meta("worker_reserved_by") == self:
+			target_item.set_meta("worker_reserved_by", null)
+		target_item.set_meta("worker_assigned", false)
+		target_item.queue_free()
+		target_item = null
 
-	# Reparent to carrier marker and reset transform
-	var old_parent: Node = target_item.get_parent()
-	if old_parent != null:
-		old_parent.remove_child(target_item)
-	carrier_marker.add_child(target_item)
-	target_item.transform = Transform3D.IDENTITY
+		fragment_bag[item_mat] = int(fragment_bag.get(item_mat, 0)) + rv
+		carried_material = item_mat
+		_refresh_carrier_visuals()
+		_set_status("[COLLECTING] Picked up %s (%d/%d)" % [carried_material, _get_cargo_count(), MAX_FRAGMENTS], 0.6)
+	else:
+		# Disable physics and collision completely while carried to fix falling/jittering visuals
+		if target_item is RigidBody3D:
+			var rb := target_item as RigidBody3D
+			rb.freeze = true
+			rb.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+			rb.sleeping = true
+			rb.collision_layer = 0
+			rb.collision_mask = 0
+			rb.linear_velocity = Vector3.ZERO
+			rb.angular_velocity = Vector3.ZERO
+			rb.set_physics_process(false)
+			rb.set_process(false)
+			for child in rb.get_children():
+				if child is CollisionShape3D:
+					(child as CollisionShape3D).disabled = true
 
-	carried_items.append(target_item)
-	carried_material = item_mat
-	target_item = null
-	_refresh_carrier_visuals()
+		# Reparent to carrier marker and reset transform
+		var old_parent: Node = target_item.get_parent()
+		if old_parent != null:
+			old_parent.remove_child(target_item)
+		carrier_marker.add_child(target_item)
+		target_item.transform = Transform3D.IDENTITY
 
-	var max_cap := _get_max_capacity(carried_material)
-	_set_status("[COLLECTING] Picked up %s (%d/%d)" % [carried_material, carried_items.size(), max_cap], 0.6)
+		carried_items.append(target_item)
+		carried_material = item_mat
+		target_item = null
+		_refresh_carrier_visuals()
+
+		var max_cap := _get_max_capacity(carried_material)
+		_set_status("[COLLECTING] Picked up %s (%d/%d)" % [carried_material, carried_items.size(), max_cap], 0.6)
 
 	# Batch collection plan: if helper can carry more, collect from nearby cluster without global re-scan
 	if _can_carry_more(carried_material):
@@ -1401,6 +1456,8 @@ func _get_max_capacity(mat: String) -> int:
 func _can_carry_more(mat: String) -> bool:
 	if not carried_material.is_empty() and mat != carried_material:
 		return false
+	if mat not in ["log", "plank"]:
+		return _get_cargo_count() < MAX_FRAGMENTS
 	return carried_items.size() < _get_max_capacity(mat)
 
 func _refresh_carrier_visuals() -> void:
@@ -1415,15 +1472,7 @@ func _refresh_carrier_visuals() -> void:
 		elif carried_material == "plank":
 			item.position = Vector3(0.0, float(i) * 0.12, 0.0)
 		else:
-			# Neat 3x3 stacked layer heap for fragments on CarrierMarker3D
-			var layer: int = i / 9
-			var slot: int = i % 9
-			var gx: int = slot % 3
-			var gz: int = slot / 3
-			var px: float = (float(gx) - 1.0) * 0.14
-			var pz: float = (float(gz) - 1.0) * 0.14
-			var py: float = float(layer) * 0.12
-			item.position = Vector3(px, py, pz)
+			item.position = Vector3(0.0, 0.0, 0.0)
 
 func _material_to_group(mat: String) -> String:
 	match mat:
@@ -1512,7 +1561,7 @@ func _process_deposit_item() -> void:
 		_go_to_station_or_idle(carried_material)
 		return
 
-	_set_status("[DELIVERING] Depositing %d %s(s) at %s..." % [carried_items.size(), carried_material, target_station.name], 0.0)
+	_set_status("[DELIVERING] Depositing %d %s(s) at %s..." % [_get_cargo_count(), carried_material, target_station.name], 0.0)
 
 	if target_station is ChoppingBlock and carried_material == "log":
 		var cb := target_station as ChoppingBlock
@@ -1533,7 +1582,30 @@ func _process_deposit_item() -> void:
 
 	elif target_station is Pallet:
 		var pallet := target_station as Pallet
-		# Process items backwards so removing successful deposits is safe
+
+		# 1. Deposit from logical fragment_bag
+		if not fragment_bag.is_empty():
+			for mat in fragment_bag.keys():
+				var amt: int = int(fragment_bag[mat])
+				if amt <= 0:
+					fragment_bag.erase(mat)
+					continue
+				var rem_cap: int = pallet.get_remaining_capacity(mat, self) if pallet.has_method("get_remaining_capacity") else amt
+				var to_dep: int = mini(amt, rem_cap)
+				if to_dep > 0:
+					var ok: bool = false
+					if pallet.has_method("refund_material"):
+						ok = pallet.refund_material(mat, to_dep)
+					elif pallet.has_method("try_store"):
+						for _s in range(to_dep):
+							if pallet.try_store(mat):
+								ok = true
+					if ok:
+						fragment_bag[mat] = int(fragment_bag[mat]) - to_dep
+						if int(fragment_bag[mat]) <= 0:
+							fragment_bag.erase(mat)
+
+		# 2. Deposit from physical carried_items (planks / logs)
 		for i in range(carried_items.size() - 1, -1, -1):
 			var item: Node3D = carried_items[i]
 			if not is_instance_valid(item):
@@ -1573,7 +1645,7 @@ func _process_deposit_item() -> void:
 	# Release reservation on target station
 	_release_station_reservation(target_station)
 
-	if carried_items.is_empty():
+	if not _has_any_cargo():
 		# All cargo deposited successfully!
 		target_station = null
 		carried_material = ""
@@ -1657,7 +1729,57 @@ func _drop_all_carried() -> void:
 	for item in carried_items:
 		_drop_single_item(item)
 	carried_items.clear()
+
+	for mat in fragment_bag.keys():
+		var total_val: int = int(fragment_bag[mat])
+		var num_frags: int = mini(total_val, 8)
+		if num_frags <= 0:
+			continue
+		var base_val: int = total_val / num_frags
+		var rem: int = total_val % num_frags
+		for i in range(num_frags):
+			var v: int = base_val + (1 if i < rem else 0)
+			_spawn_dropped_fragment(mat, v)
+	fragment_bag.clear()
 	carried_material = ""
+
+func _spawn_dropped_fragment(mat: String, value: int) -> void:
+	if value <= 0:
+		return
+	var world_parent: Node = get_parent()
+	if world_parent == null and is_inside_tree():
+		world_parent = get_tree().current_scene
+	if world_parent == null:
+		return
+
+	var body := VoxelFragment.new()
+	body.add_to_group("fragments")
+	body.set_meta("mined_fragment", true)
+	body.set_meta("material", mat)
+	body.set_meta("fragment_type", mat)
+	body.resource_value = value
+	body.collision_layer = 4  # DEBRIS_LAYER
+	body.collision_mask = 1 | 4
+
+	var mesh_inst := MeshInstance3D.new()
+	var box_mesh := BoxMesh.new()
+	box_mesh.size = Vector3(0.2, 0.2, 0.2)
+	mesh_inst.mesh = box_mesh
+	mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+	var col := CollisionShape3D.new()
+	var box_shape := BoxShape3D.new()
+	box_shape.size = Vector3(0.2, 0.2, 0.2)
+	col.shape = box_shape
+
+	body.add_child(mesh_inst)
+	body.add_child(col)
+	world_parent.add_child(body)
+
+	body.global_position = global_position + Vector3(
+		randf_range(-0.35, 0.35), 0.45, randf_range(-0.35, 0.35)
+	)
+	body.linear_velocity = Vector3(randf_range(-1.0, 1.0), 1.2, randf_range(-1.0, 1.0))
 
 func _drop_single_item(item: Node3D) -> void:
 	if item == null or not is_instance_valid(item):

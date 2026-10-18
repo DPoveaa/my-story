@@ -204,9 +204,11 @@ func apply_mortar_brush(cell: Vector3i, face_dir: Vector3i) -> Dictionary:
 
 	for dir in orth_dirs:
 		var neighbor: Vector3i = cell + dir
-		if grid.has_block(neighbor):
-			var block_b: BlockData = grid.get_block(neighbor)
-			var mat_b: StringName = block_b.block_type if block_b != null else &"stone"
+		if grid.has_block(neighbor) or _is_solid_terrain(neighbor):
+			var mat_b: StringName = &"stone"
+			if grid.has_block(neighbor):
+				var block_b: BlockData = grid.get_block(neighbor)
+				mat_b = block_b.block_type if block_b != null else &"stone"
 			if are_materials_compatible(mat_a, mat_b):
 				var strength := calculate_base_strength(mat_a, mat_b)
 				var key := StructuralJointScript.make_key(cell, neighbor)
@@ -232,7 +234,7 @@ func apply_cement_to_face(cell: Vector3i, face_dir: Vector3i, custom_strength: f
 		return null
 
 	var adj_cell := cell + face_dir
-	if grid.has_block(adj_cell):
+	if grid.has_block(adj_cell) or _is_solid_terrain(adj_cell):
 		return bond_adjacent(cell, adj_cell, custom_strength)
 	else:
 		var res := apply_mortar_brush(cell, face_dir)
@@ -246,13 +248,17 @@ func bond_adjacent(cell_a: Vector3i, cell_b: Vector3i, custom_strength: float = 
 	var grid := _get_grid()
 	if grid == null:
 		return null
-	if not grid.has_block(cell_a) or not grid.has_block(cell_b):
+	if not grid.has_block(cell_a) and not grid.has_block(cell_b):
 		return null
 
-	var block_a: BlockData = grid.get_block(cell_a)
-	var block_b: BlockData = grid.get_block(cell_b)
-	var mat_a: StringName = block_a.block_type if block_a != null else &"stone"
-	var mat_b: StringName = block_b.block_type if block_b != null else &"stone"
+	var mat_a: StringName = &"stone"
+	var mat_b: StringName = &"stone"
+	if grid.has_block(cell_a):
+		var block_a: BlockData = grid.get_block(cell_a)
+		mat_a = block_a.block_type if block_a != null else &"stone"
+	if grid.has_block(cell_b):
+		var block_b: BlockData = grid.get_block(cell_b)
+		mat_b = block_b.block_type if block_b != null else &"stone"
 
 	if not are_materials_compatible(mat_a, mat_b):
 		return null
@@ -289,17 +295,21 @@ func bond_all_adjacent_neighbors(cell: Vector3i) -> Array:
 ## Creates a default (weak, unmortared) joint between two adjacent blocks.
 func _create_default_joint(cell_a: Vector3i, cell_b: Vector3i) -> RefCounted:
 	var grid := _get_grid()
-	if grid == null or not grid.has_block(cell_a) or not grid.has_block(cell_b):
+	if grid == null or (not grid.has_block(cell_a) and not grid.has_block(cell_b)):
 		return null
 
 	var key: String = StructuralJointScript.make_key(cell_a, cell_b)
 	if _joints.has(key):
 		return _joints[key]
 
-	var block_a: BlockData = grid.get_block(cell_a)
-	var block_b: BlockData = grid.get_block(cell_b)
-	var mat_a: StringName = block_a.block_type if block_a != null else &"stone"
-	var mat_b: StringName = block_b.block_type if block_b != null else &"stone"
+	var mat_a: StringName = &"stone"
+	var mat_b: StringName = &"stone"
+	if grid.has_block(cell_a):
+		var block_a: BlockData = grid.get_block(cell_a)
+		mat_a = block_a.block_type if block_a != null else &"stone"
+	if grid.has_block(cell_b):
+		var block_b: BlockData = grid.get_block(cell_b)
+		mat_b = block_b.block_type if block_b != null else &"stone"
 
 	var strength := calculate_default_strength(mat_a, mat_b)
 	var joint: RefCounted = StructuralJointScript.new(cell_a, cell_b, strength, mat_a, mat_b, false)
@@ -543,6 +553,17 @@ func clear_all_joints() -> void:
 	_coated_faces.clear()
 	joints_cleared.emit()
 
+func _is_solid_terrain(pos: Vector3i) -> bool:
+	var stab := _get_stability()
+	var tg: Node = null
+	if stab != null and "terrain_generator" in stab:
+		tg = stab.terrain_generator
+	if tg == null and is_inside_tree() and get_tree() != null and get_tree().root != null:
+		tg = get_tree().root.find_child("VoxelWorld", true, false)
+	if tg != null and tg.has_method("is_solid_block"):
+		return tg.is_solid_block(pos)
+	return false
+
 # ==============================================================================
 # GRID SYSTEM CALLBACKS
 # ==============================================================================
@@ -567,17 +588,19 @@ func _on_grid_block_placed(cell: Vector3i, _data: BlockData) -> void:
 					_coated_faces[fk] = true
 					face_coated.emit(cell, fdir)
 
-	# Automatically create default connections with adjacent existing blocks
+	# Automatically create default connections with adjacent existing blocks or solid natural terrain
 	for offset in NEIGHBORS_6:
 		var neighbor: Vector3i = cell + offset
-		if grid.has_block(neighbor):
+		if grid.has_block(neighbor) or _is_solid_terrain(neighbor):
 			var joint = _create_default_joint(cell, neighbor)
 			var opp_offset := -offset
 			# Check if neighbor had an exposed face pointing to this cell that was coated with mortar
 			if is_face_coated(neighbor, opp_offset):
 				var mat_a: StringName = _data.block_type if _data != null else &"stone"
-				var block_b: BlockData = grid.get_block(neighbor)
-				var mat_b: StringName = block_b.block_type if block_b != null else &"stone"
+				var mat_b: StringName = &"stone"
+				if grid.has_block(neighbor):
+					var block_b: BlockData = grid.get_block(neighbor)
+					mat_b = block_b.block_type if block_b != null else &"stone"
 				if joint != null and are_materials_compatible(mat_a, mat_b):
 					joint.reinforce_with_mortar(calculate_base_strength(mat_a, mat_b))
 			else:
@@ -586,8 +609,10 @@ func _on_grid_block_placed(cell: Vector3i, _data: BlockData) -> void:
 				for surf_norm in orth_dirs:
 					if is_face_coated(neighbor, surf_norm):
 						var mat_a: StringName = _data.block_type if _data != null else &"stone"
-						var block_b: BlockData = grid.get_block(neighbor)
-						var mat_b: StringName = block_b.block_type if block_b != null else &"stone"
+						var mat_b: StringName = &"stone"
+						if grid.has_block(neighbor):
+							var block_b: BlockData = grid.get_block(neighbor)
+							mat_b = block_b.block_type if block_b != null else &"stone"
 						if joint != null and are_materials_compatible(mat_a, mat_b):
 							joint.reinforce_with_mortar(calculate_base_strength(mat_a, mat_b))
 

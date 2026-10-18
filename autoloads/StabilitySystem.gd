@@ -35,6 +35,8 @@ var terrain_generator: Node = null
 @export var joint_system: Node
 ## Whether lateral / hanging support strictly requires cemented structural joints (M2.3)
 @export var require_joints_for_lateral_support: bool = false
+## Maximum blocks an unmortared cantilever/overhang can extend from anchor or mortared support
+@export var max_unmortared_cantilever: int = 2
 
 func _ready() -> void:
 	if grid_system == null and has_node("/root/GridSystem"):
@@ -118,12 +120,35 @@ func _on_grid_cleared() -> void:
 # ANCHOR MANAGEMENT
 # ==============================================================================
 
+func _get_terrain_generator() -> Node:
+	if terrain_generator != null and is_instance_valid(terrain_generator):
+		return terrain_generator
+	if is_inside_tree() and get_tree() != null and get_tree().root != null:
+		var vw := get_tree().root.find_child("VoxelWorld", true, false)
+		if vw != null:
+			terrain_generator = vw
+			return terrain_generator
+	return null
+
 ## Tests whether a cell is a valid ground/foundation anchor.
 func is_anchor_cell(cell: Vector3i) -> bool:
 	if cell.y <= ground_anchor_y or _custom_anchors.has(cell):
 		return true
-	if terrain_generator != null and terrain_generator.has_method("is_ground_cell"):
-		return terrain_generator.is_ground_cell(cell)
+	var tg := _get_terrain_generator()
+	if tg != null:
+		if tg.has_method("is_solid_block"):
+			if tg.is_solid_block(cell) or tg.is_solid_block(cell + Vector3i.DOWN):
+				return true
+			# Attached to adjacent solid natural terrain (e.g. side of islands for bridges)
+			for offset in NEIGHBORS_6:
+				if tg.is_solid_block(cell + offset):
+					return true
+		elif tg.has_method("is_ground_cell"):
+			if tg.is_ground_cell(cell):
+				return true
+			for offset in NEIGHBORS_6:
+				if tg.is_ground_cell(cell + offset):
+					return true
 	return false
 
 func register_custom_anchor(cell: Vector3i) -> void:
@@ -183,15 +208,17 @@ func evaluate_stability() -> Array[Vector3i]:
 		_supported_cells.clear()
 		return []
 
-	# BFS Queue and visited map
+	# BFS Queue, visited map, and unmortared cantilever distance tracker
 	var queue: Array[Vector3i] = []
 	var visited: Dictionary = {}
+	var unmortared_dist: Dictionary = {}
 
 	# 1. Seed BFS with all occupied cells that are valid anchors
 	for cell in all_cells:
 		if is_anchor_cell(cell):
 			visited[cell] = true
 			queue.append(cell)
+			unmortared_dist[cell] = 0
 
 	# 2. Propagate support via graph search
 	var head: int = 0
@@ -199,6 +226,7 @@ func evaluate_stability() -> Array[Vector3i]:
 	while head < queue.size():
 		var current: Vector3i = queue[head]
 		head += 1
+		var cur_unmortared: int = unmortared_dist.get(current, 0)
 
 		for offset in NEIGHBORS_6:
 			var neighbor: Vector3i = current + offset
@@ -211,9 +239,24 @@ func evaluate_stability() -> Array[Vector3i]:
 					if not has_joint and not joint_system.has_joint(current, neighbor):
 						joint_system._create_default_joint(current, neighbor)
 						has_joint = true
-					if is_resting_vertical or has_joint:
+
+					if is_resting_vertical:
 						visited[neighbor] = true
+						unmortared_dist[neighbor] = 0
 						queue.append(neighbor)
+					elif has_joint:
+						var is_mortared: bool = joint_system.is_joint_mortared(current, neighbor)
+						if is_mortared:
+							visited[neighbor] = true
+							unmortared_dist[neighbor] = 0
+							queue.append(neighbor)
+						else:
+							# Default weak connection: allow limited cantilever span without mortar
+							var next_dist: int = cur_unmortared + 1
+							if next_dist <= max_unmortared_cantilever:
+								visited[neighbor] = true
+								unmortared_dist[neighbor] = next_dist
+								queue.append(neighbor)
 				else:
 					visited[neighbor] = true
 					queue.append(neighbor)

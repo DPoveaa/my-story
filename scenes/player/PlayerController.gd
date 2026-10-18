@@ -173,6 +173,7 @@ var _craft_floor_valid: bool = false
 var is_placing_station: bool = false
 var station_to_place: String = ""
 var station_ghost_mesh: Node3D = null
+var _station_rotation_steps: int = 0
 ## Hold-G progress to dismantle stations (Chopping Block / Pallet) and Workers.
 var _station_dismantle_hold: float = 0.0
 const STATION_DISMANTLE_TIME: float = 1.0
@@ -738,16 +739,22 @@ func _unhandled_input(event: InputEvent) -> void:
 	if _gameplay_input_suspended or not _is_spawned:
 		return
 
-	# Station hologram: LMB confirm / RMB cancel (before normal look & build input).
-	if is_placing_station and event is InputEventMouseButton and event.pressed:
-		if event.button_index == MOUSE_BUTTON_LEFT or event.is_action_pressed(&"remove_block"):
-			_confirm_station_placement()
+	# Station hologram: LMB confirm / RMB cancel / R rotate (before normal look & build input).
+	if is_placing_station:
+		if event is InputEventKey and event.pressed and not event.echo and event.keycode == KEY_R:
+			_station_rotation_steps = (_station_rotation_steps + 1) % 4
+			_update_station_ghost()
 			get_viewport().set_input_as_handled()
 			return
-		if event.button_index == MOUSE_BUTTON_RIGHT:
-			_cancel_station_placement()
-			get_viewport().set_input_as_handled()
-			return
+		if event is InputEventMouseButton and event.pressed:
+			if event.button_index == MOUSE_BUTTON_LEFT or event.is_action_pressed(&"remove_block"):
+				_confirm_station_placement()
+				get_viewport().set_input_as_handled()
+				return
+			if event.button_index == MOUSE_BUTTON_RIGHT:
+				_cancel_station_placement()
+				get_viewport().set_input_as_handled()
+				return
 
 	# While radial is open, skip look — menu consumes relative motion as virtual cursor.
 	var radial_open: bool = _radial_menu != null and is_instance_valid(_radial_menu)
@@ -1595,7 +1602,10 @@ func _process_vacuum_bag(delta: float) -> void:
 
 	for i in range(_vacuum_pulled.size() - 1, -1, -1):
 		var prev: Node3D = _vacuum_pulled[i]
-		if not is_instance_valid(prev) or prev == target:
+		if not is_instance_valid(prev) or prev.is_queued_for_deletion():
+			_vacuum_pulled.remove_at(i)
+			continue
+		if prev == target:
 			continue
 		_restore_vacuum_fragment(prev)
 		_vacuum_pulled.remove_at(i)
@@ -1711,6 +1721,8 @@ func _process_bag_dump(delta: float) -> void:
 func _restore_vacuum_fragment(frag: Node3D) -> void:
 	if frag == null or not is_instance_valid(frag):
 		return
+	if frag.is_queued_for_deletion() or not frag.is_inside_tree():
+		return
 	_enable_fragment_collision(frag)
 	if frag is RigidBody3D:
 		var rb := frag as RigidBody3D
@@ -1723,28 +1735,32 @@ func _restore_vacuum_fragment(frag: Node3D) -> void:
 		# Downward velocity so gravity immediately takes over without mid-air freeze
 		rb.linear_velocity = Vector3(0.0, -0.2, 0.0)
 		rb.angular_velocity = Vector3.ZERO
-		PhysicsServer3D.body_set_state(
-			rb.get_rid(),
-			PhysicsServer3D.BODY_STATE_TRANSFORM,
-			rb.global_transform
-		)
-		PhysicsServer3D.body_set_state(
-			rb.get_rid(),
-			PhysicsServer3D.BODY_STATE_LINEAR_VELOCITY,
-			rb.linear_velocity
-		)
-		PhysicsServer3D.body_set_state(
-			rb.get_rid(),
-			PhysicsServer3D.BODY_STATE_SLEEPING,
-			false
-		)
-	frag.set_meta("vacuum_pull", false)
+		var body_rid := rb.get_rid()
+		if body_rid.is_valid():
+			PhysicsServer3D.body_set_state(
+				body_rid,
+				PhysicsServer3D.BODY_STATE_TRANSFORM,
+				rb.global_transform
+			)
+			PhysicsServer3D.body_set_state(
+				body_rid,
+				PhysicsServer3D.BODY_STATE_LINEAR_VELOCITY,
+				rb.linear_velocity
+			)
+			PhysicsServer3D.body_set_state(
+				body_rid,
+				PhysicsServer3D.BODY_STATE_SLEEPING,
+				false
+			)
+	if frag.has_meta("vacuum_pull"):
+		frag.set_meta("vacuum_pull", false)
 
 func _release_vacuum_fragments() -> void:
 	if _vacuum_pulled.is_empty():
 		return
 	for frag in _vacuum_pulled:
-		_restore_vacuum_fragment(frag)
+		if is_instance_valid(frag) and not frag.is_queued_for_deletion():
+			_restore_vacuum_fragment(frag)
 	_vacuum_pulled.clear()
 
 ## Applies a small SDF sphere boolean subtraction at `center_cell` using VoxelTool.
@@ -3631,7 +3647,7 @@ func _apply_placed_craft_block_hit(grid: Node, body: RigidBody3D, hit_pos: Vecto
 	_update_terrain_target_visuals(target_remove_cell, 0.0)
 	target_face_changed.emit(true, target_remove_cell, target_face_dir, target_face_status)
 	if preview_ghost != null and (debris_grabber == null or not debris_grabber.is_grabbing):
-		if can_place_target:
+		if can_place_target and _is_holding_building_block():
 			preview_ghost.update_preview(target_place_cell, true, grid.cell_size)
 		else:
 			preview_ghost.hide_preview()
@@ -4210,6 +4226,7 @@ func _begin_station_placement(station_name: String) -> void:
 		return
 	is_placing_station = true
 	station_to_place = station_name
+	_station_rotation_steps = 0
 	_clear_station_ghost()
 	if preview_ghost != null:
 		preview_ghost.hide_preview()
@@ -4281,18 +4298,32 @@ func _align_station_transform(hit_point: Vector3, hit_normal: Vector3) -> Transf
 	var n: Vector3 = hit_normal.normalized()
 	if n.length_squared() < 0.0001:
 		n = Vector3.UP
-	var fwd: Vector3 = -global_transform.basis.z
-	fwd.y = 0.0
-	if fwd.length_squared() < 0.0001:
-		fwd = Vector3.FORWARD
-	fwd = fwd.normalized()
-	var x_axis: Vector3 = fwd.cross(n).normalized()
-	if x_axis.length_squared() < 0.0001:
-		x_axis = Vector3.RIGHT
-	var z_axis: Vector3 = x_axis.cross(n).normalized()
-	# Real scenes have floor-aligned origins at y=0
+
+	var is_free_placement := Input.is_key_pressed(KEY_SHIFT)
 	var origin: Vector3 = hit_point
-	return Transform3D(Basis(x_axis, n, z_axis), origin)
+
+	if not is_free_placement:
+		# Grid-snapped placement aligned to 1.0 unit world grid
+		if station_to_place == "Pallet":
+			# Pallet has a 2x2 footprint, snap to integer coordinates to align with 1x1 grid blocks
+			origin.x = roundf(hit_point.x)
+			origin.z = roundf(hit_point.z)
+		else:
+			# Chopping block / 1x1 stations snap to cell centers
+			origin.x = floorf(hit_point.x) + 0.5
+			origin.z = floorf(hit_point.z) + 0.5
+
+	var rot_angle: float = float(_station_rotation_steps) * (PI * 0.5)
+	var yaw: float = rot_angle
+
+	if is_free_placement:
+		var fwd: Vector3 = -global_transform.basis.z
+		fwd.y = 0.0
+		if fwd.length_squared() > 0.0001:
+			yaw = atan2(-fwd.x, -fwd.z) + rot_angle
+
+	var rot_basis := Basis(Vector3.UP, yaw)
+	return Transform3D(rot_basis, origin)
 
 func _update_station_ghost() -> void:
 	if not is_placing_station or station_ghost_mesh == null or not is_instance_valid(station_ghost_mesh):
@@ -4300,17 +4331,6 @@ func _update_station_ghost() -> void:
 	if has_target and _craft_floor_valid:
 		station_ghost_mesh.visible = true
 		var xform: Transform3D = _align_station_transform(_target_hit_point, _target_hit_normal)
-		if station_to_place == "Spawn Worker":
-			var fwd: Vector3 = -xform.basis.z
-			fwd.y = 0.0
-			if fwd.length_squared() < 0.0001:
-				fwd = -global_transform.basis.z
-				fwd.y = 0.0
-			if fwd.length_squared() < 0.0001:
-				fwd = Vector3.FORWARD
-			fwd = fwd.normalized()
-			var yaw: float = atan2(-fwd.x, -fwd.z)
-			xform.basis = Basis(Vector3.UP, yaw)
 		station_ghost_mesh.global_transform = xform
 	else:
 		station_ghost_mesh.visible = false
@@ -4374,7 +4394,7 @@ func _confirm_station_placement() -> void:
 			var yaw: float = atan2(-fwd.x, -fwd.z)
 			var w_xform: Transform3D = Transform3D(Basis(Vector3.UP, yaw), place_xform.origin)
 			var nav_map: RID = get_world_3d().navigation_map if get_world_3d() != null else RID()
-			if nav_map.is_valid():
+			if nav_map.is_valid() and NavigationServer3D.map_get_iteration_id(nav_map) > 0:
 				var closest: Vector3 = NavigationServer3D.map_get_closest_point(nav_map, w_xform.origin)
 				if closest != Vector3.ZERO and closest.distance_squared_to(w_xform.origin) < 16.0:
 					w_xform.origin = closest + Vector3.UP * 0.05
@@ -4392,7 +4412,7 @@ func spawn_worker_at_cursor() -> Node3D:
 	if has_target and _target_hit_point != Vector3.ZERO:
 		spawn_pos = _target_hit_point + Vector3.UP * 0.1
 	var nav_map: RID = get_world_3d().navigation_map if get_world_3d() != null else RID()
-	if nav_map.is_valid():
+	if nav_map.is_valid() and NavigationServer3D.map_get_iteration_id(nav_map) > 0:
 		var closest: Vector3 = NavigationServer3D.map_get_closest_point(nav_map, spawn_pos)
 		if closest != Vector3.ZERO and closest.distance_squared_to(spawn_pos) < 16.0:
 			spawn_pos = closest + Vector3.UP * 0.05
@@ -4411,6 +4431,7 @@ func _cancel_station_placement() -> void:
 	_clear_station_ghost()
 	is_placing_station = false
 	station_to_place = ""
+	_station_rotation_steps = 0
 
 func _handle_interact_action() -> void:
 	if current_state != State.BODY_CONTROL:
@@ -4575,7 +4596,7 @@ func _is_block_covered_above(cell: Variant) -> bool:
 	var world_3d: World3D = get_world_3d()
 	if world_3d == null or not world_3d.space.is_valid():
 		return false
-	var direct_state: PhysicsDirectSpaceState3D = PhysicsServer3D.space_get_direct_state(world_3d.space)
+	var direct_state: PhysicsDirectSpaceState3D = world_3d.direct_space_state
 	if direct_state == null:
 		return false
 	var cell_center: Vector3 = Vector3(float(cell_v3i.x) + 0.5, float(cell_v3i.y) + 0.5, float(cell_v3i.z) + 0.5)

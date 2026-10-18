@@ -217,65 +217,79 @@ func _build_terrain() -> void:
 	if _voxel_tool != null:
 		_voxel_tool.channel = VoxelBuffer.CHANNEL_TYPE
 
-## Procedural pine trees on flat grass tops via VoxelInstancer + SceneItem.
-func _setup_pine_tree_instancer() -> void:
-	if _terrain == null:
-		return
-	if not ClassDB.class_exists("VoxelInstancer"):
-		push_warning("VoxelInstancer unavailable — pine trees will not spawn.")
-		return
-	if not ClassDB.class_exists("VoxelInstanceLibrarySceneItem"):
-		push_warning("VoxelInstanceLibrarySceneItem unavailable — pine trees will not spawn.")
-		return
+var _pine_scene: PackedScene = null
+var _tree_noise: FastNoiseLite = null
+var _tree_container: Node3D = null
+var _spawned_tree_blocks: Dictionary = {}
 
-	var pine_scene: PackedScene = load("res://scenes/world/PineTree.tscn") as PackedScene
-	if pine_scene == null:
+## Procedural pine trees on flat grass tops decoupled from VoxelTerrain's area edit
+## to avoid the engine's VoxelInstancer null multimesh removal warning during blocky mining.
+func _setup_pine_tree_instancer() -> void:
+	_pine_scene = load("res://scenes/world/PineTree.tscn") as PackedScene
+	if _pine_scene == null:
 		push_warning("PineTree.tscn missing — pine trees will not spawn.")
 		return
 
-	var instancer = ClassDB.instantiate("VoxelInstancer")
-	instancer.name = "VoxelInstancer"
+	_tree_noise = FastNoiseLite.new()
+	_tree_noise.seed = seed_value + 91
+	_tree_noise.frequency = 0.025
+	_tree_noise.fractal_octaves = 2
 
-	var library = ClassDB.instantiate("VoxelInstanceLibrary")
-	var item = ClassDB.instantiate("VoxelInstanceLibrarySceneItem")
-	if item == null or library == null or instancer == null:
-		push_warning("Failed to create VoxelInstancer library items.")
-		return
-	item.scene = pine_scene
-	item.name = "pine_tree"
-	item.lod_index = 0
-	item.persistent = false
+	_tree_container = Node3D.new()
+	_tree_container.name = "PineTrees"
+	add_child(_tree_container)
 
-	var gen = ClassDB.instantiate("VoxelInstanceGenerator")
-	# Sparse natural spacing on relatively flat surfaces (grass tops).
-	gen.density = 0.012
-	gen.min_scale = 0.85
-	gen.max_scale = 1.25
-	gen.min_slope_degrees = 0.0
-	gen.max_slope_degrees = 22.0
-	gen.min_height = ISLAND_Y_MIN
-	gen.max_height = ISLAND_Y_MAX + 8.0
-	gen.vertical_alignment = 1.0
-	gen.random_rotation = true
-	gen.offset_along_normal = 0.0
-	if "emit_mode" in gen:
-		gen.emit_mode = 2  # EMIT_FROM_FACES
-	var noise := FastNoiseLite.new()
-	noise.seed = seed_value + 91
-	noise.frequency = 0.025
-	noise.fractal_octaves = 2
-	gen.noise = noise
-	if "noise_dimension" in gen:
-		gen.noise_dimension = 0  # DIMENSION_2D
-	gen.noise_threshold = 0.2
-	item.generator = gen
+	# Keep VoxelInstancer node on VoxelWorld for compatibility if external queries look for it,
+	# but do not add it as a child of _terrain to prevent VoxelTerrain::post_edit_area from
+	# triggering the C++ VoxelInstancer::remove_floating_multimesh_instances null multimesh crash.
+	if ClassDB.class_exists("VoxelInstancer"):
+		var instancer = ClassDB.instantiate("VoxelInstancer")
+		if instancer != null:
+			instancer.name = "VoxelInstancer"
+			add_child(instancer)
 
-	library.add_item(0, item)
-	instancer.library = library
-	_terrain.add_child(instancer)
-
-func _on_mesh_block_entered(_block_pos: Vector3i) -> void:
+func _on_mesh_block_entered(block_pos: Vector3i) -> void:
 	_mesh_block_wake = true
+	_spawn_pine_trees_in_block(block_pos)
+
+func _spawn_pine_trees_in_block(block_pos: Vector3i) -> void:
+	if _pine_scene == null or _tree_noise == null or _tree_container == null:
+		return
+	var col_key := Vector2i(block_pos.x, block_pos.z)
+	if _spawned_tree_blocks.has(col_key):
+		return
+	_spawned_tree_blocks[col_key] = true
+
+	var start_x := block_pos.x * 16
+	var start_z := block_pos.z * 16
+	for lx in range(0, 16, 2):
+		for lz in range(0, 16, 2):
+			var gx := start_x + lx
+			var gz := start_z + lz
+			var n_val := _tree_noise.get_noise_2d(float(gx), float(gz))
+			if n_val < 0.18:
+				continue
+			var pseudo_rand: float = absf(fmod(sin(float(gx * 374761393 + gz * 668265263)) * 43758.5453, 1.0))
+			if pseudo_rand > 0.09:
+				continue
+			var sy := get_highest_solid_y(gx, gz)
+			if sy < int(ISLAND_Y_MIN) or sy > int(ISLAND_Y_MAX) + 8:
+				continue
+			if get_voxel_at(Vector3i(gx, sy, gz)) != &"grass":
+				continue
+			# Check slope: ensure neighbor heights are within 1 step (flat grass top)
+			var sy_px := get_highest_solid_y(gx + 1, gz)
+			var sy_pz := get_highest_solid_y(gx, gz + 1)
+			if absi(sy_px - sy) > 1 or absi(sy_pz - sy) > 1:
+				continue
+			var tree: Node3D = _pine_scene.instantiate() as Node3D
+			if tree == null:
+				continue
+			var s: float = lerpf(0.85, 1.25, pseudo_rand / 0.09)
+			tree.scale = Vector3(s, s, s)
+			var yaw: float = pseudo_rand * TAU
+			tree.transform = Transform3D(Basis(Vector3.UP, yaw), Vector3(float(gx) + 0.5, float(sy) + 1.0, float(gz) + 0.5))
+			_tree_container.add_child(tree)
 
 func _build_viewer() -> void:
 	_viewer = VoxelViewer.new()

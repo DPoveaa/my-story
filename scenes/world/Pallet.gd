@@ -646,8 +646,24 @@ func _build_log_stack(count: int) -> void:
 		)
 		_stack_root.add_child(mesh_inst)
 
+func _update_catch_zone_extents(stack_height: float) -> void:
+	if catch_zone == null:
+		return
+	var shape_node := catch_zone.get_node_or_null("CollisionShape3D") as CollisionShape3D
+	if shape_node == null:
+		return
+	if not (shape_node.shape is BoxShape3D):
+		return
+	if not shape_node.shape.resource_local_to_scene and shape_node.shape.get_reference_count() > 1:
+		shape_node.shape = shape_node.shape.duplicate()
+	var box := shape_node.shape as BoxShape3D
+	var total_h: float = maxf(1.6, stack_height + 1.2)
+	box.size = Vector3(2.4, total_h, 2.4)
+	catch_zone.position = Vector3(0.0, total_h * 0.5 + 0.1, 0.0)
+
 func _apply_fill_height(height: float, show_fill: bool) -> void:
 	_fill_visual_height = height
+	_update_catch_zone_extents(height if show_fill else 0.0)
 	if fill_volume == null:
 		return
 	fill_volume.visible = show_fill
@@ -703,21 +719,30 @@ func _update_fill_volume() -> void:
 func _try_auto_convert_full() -> void:
 	if _auto_converted:
 		return
-	if not _is_fragment_type(assigned_material):
+	if assigned_material.is_empty():
 		return
-	var capacity: int = FRAGMENTS_PER_BLOCK * CRAFT_BATCH_BLOCKS
+	var capacity: int = get_capacity(assigned_material)
 	if _get_assigned_count() < capacity:
 		return
+
 	var block_type: String = "dirt"
 	if assigned_material == "stone":
 		block_type = "stone"
 		stored_materials["stone"] = 0
-	else:
+	elif assigned_material == "dirt" or assigned_material == "grass":
 		var dirt_count: int = int(stored_materials.get("dirt", 0))
 		var grass_count: int = int(stored_materials.get("grass", 0))
 		block_type = "grass" if grass_count > dirt_count else "dirt"
 		stored_materials["dirt"] = 0
 		stored_materials["grass"] = 0
+	elif assigned_material == "plank" or assigned_material == "log":
+		block_type = "wood"
+		stored_materials["plank"] = 0
+		stored_materials["log"] = 0
+	else:
+		block_type = assigned_material
+		stored_materials[assigned_material] = 0
+
 	_auto_converted = true
 	assigned_material = block_type
 	# Hide crate frame + fill volume, spawn grabbable blocks on open flat pallet.
