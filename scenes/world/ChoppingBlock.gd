@@ -197,8 +197,8 @@ static func make_log_body(length: float = LOG_LENGTH) -> RigidBody3D:
 	log_body.collision_mask = RESOURCE_COLLISION_MASK
 	log_body.mass = 2.5
 	log_body.can_sleep = true
-	log_body.linear_damp = 0.5
-	log_body.angular_damp = 0.7
+	log_body.linear_damp = 1.0
+	log_body.angular_damp = 1.6
 	log_body.continuous_cd = true
 
 	# Wake stacked logs if this log is destroyed / despawned
@@ -244,8 +244,8 @@ static func make_plank_body() -> RigidBody3D:
 	body.collision_mask = RESOURCE_COLLISION_MASK
 	body.mass = 0.8
 	body.can_sleep = true
-	body.linear_damp = 0.4
-	body.angular_damp = 0.5
+	body.linear_damp = 1.0
+	body.angular_damp = 1.4
 	body.continuous_cd = true
 
 	# Wake stacked logs/planks if this plank is destroyed / despawned

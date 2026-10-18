@@ -63,11 +63,19 @@ func _get_clearance_query() -> PhysicsShapeQueryParameters3D:
 		_clearance_query.collision_mask = 1
 	return _clearance_query
 
+var _grid_system: Node = null
+
+func _get_grid_system() -> Node:
+	if _grid_system != null and is_instance_valid(_grid_system):
+		return _grid_system
+	_grid_system = get_node_or_null("/root/GridSystem")
+	return _grid_system
+
 func _is_cell_solid(cell: Vector3i) -> bool:
 	if _voxel_world != null and _voxel_world.has_method("is_solid_block"):
 		if _voxel_world.is_solid_block(cell):
 			return true
-	var gs := get_node_or_null("/root/GridSystem")
+	var gs := _get_grid_system()
 	if gs != null and gs.has_block(cell):
 		return true
 	return false
@@ -150,9 +158,8 @@ func initialize_once(spawn_pos: Vector3) -> void:
 	update_center(spawn_pos)
 	rebuild_graph()
 
-## Per-frame wall-clock budget in milliseconds. Processes chunk stages within
-## this window, then yields back to the engine to avoid frame spikes.
-const FRAME_BUDGET_MS: float = 2.0
+## Per-frame wall-clock budget in milliseconds for background baking during gameplay.
+const FRAME_BUDGET_MS: float = 1.0
 
 func _ready() -> void:
 	pass  ## No startup delay needed — physics queries are skipped during initial bake.
@@ -171,12 +178,22 @@ func _do_emit_graph_rebuilt() -> void:
 
 func ensure_nearby_graph_ready(spawn_pos: Vector3) -> void:
 	var center_cp := Vector2i(floori(spawn_pos.x / float(CHUNK_SIZE)), floori(spawn_pos.z / float(CHUNK_SIZE)))
-	# Incrementally bake chunks until the center spawn chunk is complete
-	var max_wait_frames: int = 120
+	# Gather immediate 3x3 chunks around spawn
+	var required_chunks: Array[Vector2i] = []
+	for dz in range(-1, 2):
+		for dx in range(-1, 2):
+			required_chunks.append(Vector2i(center_cp.x + dx, center_cp.y + dz))
+
+	var max_wait_frames: int = 180
 	while max_wait_frames > 0:
-		if _baked_chunks.has(center_cp) and not (_is_chunk_active and _active_chunk == center_cp):
+		var all_done: bool = true
+		for cp in required_chunks:
+			if not (_baked_chunks.has(cp) and not (_is_chunk_active and _active_chunk == cp)):
+				all_done = false
+				break
+		if all_done:
 			break
-		_step_bake_slice(6.0)
+		_step_bake_slice(8.0)
 		if is_inside_tree():
 			await get_tree().process_frame
 		max_wait_frames -= 1
@@ -198,7 +215,8 @@ func _physics_process(_delta: float) -> void:
 	_step_bake_slice(FRAME_BUDGET_MS)
 
 func _step_bake_slice(budget_ms: float) -> bool:
-	var frame_start_ms: int = Time.get_ticks_msec()
+	var start_us: int = Time.get_ticks_usec()
+	var budget_us: int = int(budget_ms * 1000.0)
 	while true:
 		if not _is_chunk_active:
 			if _pending_chunks.is_empty():
@@ -247,8 +265,8 @@ func _step_bake_slice(budget_ms: float) -> bool:
 						else:
 							y += 1
 
-				if _active_col_idx % 2 == 0:
-					if float(Time.get_ticks_msec() - frame_start_ms) >= budget_ms:
+				if _active_col_idx % 4 == 0:
+					if (Time.get_ticks_usec() - start_us) >= budget_us:
 						return true
 
 			_bake_stage = BakeStage.REGISTERING_POINTS
@@ -272,8 +290,8 @@ func _step_bake_slice(budget_ms: float) -> bool:
 					_column_to_cells[col] = []
 				_column_to_cells[col].append(cell)
 
-				if _active_node_idx % 4 == 0:
-					if float(Time.get_ticks_msec() - frame_start_ms) >= budget_ms:
+				if _active_node_idx % 8 == 0:
+					if (Time.get_ticks_usec() - start_us) >= budget_us:
 						return true
 
 			var cp: Vector2i = _active_chunk
@@ -292,8 +310,8 @@ func _step_bake_slice(budget_ms: float) -> bool:
 				_active_node_idx += 1
 				_connect_point_neighbors(cell)
 
-				if _active_node_idx % 2 == 0:
-					if float(Time.get_ticks_msec() - frame_start_ms) >= budget_ms:
+				if _active_node_idx % 4 == 0:
+					if (Time.get_ticks_usec() - start_us) >= budget_us:
 						return true
 
 			# Chunk bake completely finished!
@@ -302,7 +320,7 @@ func _step_bake_slice(budget_ms: float) -> bool:
 			_physics_blocked_cache.clear()
 			_graph_rebuilt_pending = true
 
-		if float(Time.get_ticks_msec() - frame_start_ms) >= budget_ms:
+		if (Time.get_ticks_usec() - start_us) >= budget_us:
 			return true
 
 	return false
@@ -401,20 +419,16 @@ func rebuild_graph() -> void:
 
 	var cx: int = roundi(_center.x)
 	var cz: int = roundi(_center.z)
-	var half_xz: int = BOUNDS_XZ / 2
-
-	var min_cx: int = floori(float(cx - half_xz) / float(CHUNK_SIZE))
-	var max_cx: int = floori(float(cx + half_xz) / float(CHUNK_SIZE))
-	var min_cz: int = floori(float(cz - half_xz) / float(CHUNK_SIZE))
-	var max_cz: int = floori(float(cz + half_xz) / float(CHUNK_SIZE))
-
 	var center_cp := Vector2i(floori(float(cx) / float(CHUNK_SIZE)), floori(float(cz) / float(CHUNK_SIZE)))
-	var chunk_list: Array[Vector2i] = []
-	for cz_idx in range(min_cz, max_cz + 1):
-		for cx_idx in range(min_cx, max_cx + 1):
-			chunk_list.append(Vector2i(cx_idx, cz_idx))
 
-	# Radial sort: nearest chunks to player spawn are baked first!
+	# Keep only the spawn area and immediately useful neighboring chunks (3x3 chunks)
+	# in the initial workload so background baking does not compete with gameplay.
+	var chunk_list: Array[Vector2i] = []
+	for dz in range(-1, 2):
+		for dx in range(-1, 2):
+			chunk_list.append(Vector2i(center_cp.x + dx, center_cp.y + dz))
+
+	# Radial sort: nearest chunk to player spawn is baked first!
 	chunk_list.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
 		var da: int = (a.x - center_cp.x) * (a.x - center_cp.x) + (a.y - center_cp.y) * (a.y - center_cp.y)
 		var db: int = (b.x - center_cp.x) * (b.x - center_cp.x) + (b.y - center_cp.y) * (b.y - center_cp.y)
@@ -423,6 +437,39 @@ func rebuild_graph() -> void:
 
 	for cp in chunk_list:
 		queue_chunk(cp)
+
+func is_chunk_baked(cp: Vector2i) -> bool:
+	return _baked_chunks.has(cp) and not (_is_chunk_active and _active_chunk == cp)
+
+func is_position_in_baked_graph(pos: Vector3) -> bool:
+	var cp := Vector2i(floori(pos.x / float(CHUNK_SIZE)), floori(pos.z / float(CHUNK_SIZE)))
+	return is_chunk_baked(cp)
+
+func request_chunk_for_position(pos: Vector3) -> void:
+	var cp := Vector2i(floori(pos.x / float(CHUNK_SIZE)), floori(pos.z / float(CHUNK_SIZE)))
+	if not _baked_chunks.has(cp) and not _pending_chunks.has(cp):
+		queue_chunk(cp)
+
+func get_nearby_walkable_points(center_world: Vector3, min_radius: float = 1.0, max_radius: float = 2.0, max_y_diff: float = 0.5) -> Array[Vector3]:
+	var result: Array[Vector3] = []
+	var target_col := Vector2i(floori(center_world.x), floori(center_world.z))
+	var col_radius: int = maxi(1, int(ceil(max_radius)))
+
+	for dx in range(-col_radius, col_radius + 1):
+		for dz in range(-col_radius, col_radius + 1):
+			var col := Vector2i(target_col.x + dx, target_col.y + dz)
+			if not _column_to_cells.has(col):
+				continue
+			for cell in _column_to_cells[col]:
+				if not _point_ids.has(cell):
+					continue
+				var id: int = _point_ids[cell]
+				var pt: Vector3 = _astar.get_point_position(id)
+				var h_dist: float = Vector2(pt.x - center_world.x, pt.z - center_world.z).length()
+				var y_diff: float = absf(pt.y - center_world.y)
+				if h_dist >= min_radius and h_dist <= max_radius and y_diff <= max_y_diff:
+					result.append(pt)
+	return result
 
 ## Begin an incremental chunk bake (used by _physics_process for the 2ms budget loop).
 func _begin_chunk_bake(current_chunk: Variant) -> void:
@@ -767,7 +814,7 @@ func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: fl
 					end_horiz = Vector2(end_pt.x - target_world.x, end_pt.z - target_world.z).length()
 
 				var end_vert: float = absf(end_pt.y - target_world.y)
-				if end_horiz <= max_dist + 0.2 and end_vert <= max_vert:
+				if end_horiz <= max_dist + 0.35 and end_vert <= max_vert + 0.25:
 					return opt
 
 	return PackedVector3Array()
