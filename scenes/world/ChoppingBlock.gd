@@ -30,9 +30,11 @@ func _ready() -> void:
 
 func _exit_tree() -> void:
 	release_reservation()
+	Worker.invalidate_station_cache()
 	call_deferred("_notify_astar")
 
 func _notify_astar() -> void:
+	Worker.invalidate_station_cache()
 	if not is_inside_tree():
 		return
 	var root := get_tree().root
@@ -95,6 +97,7 @@ func try_place_log() -> bool:
 	reserved_worker = null
 	set_meta("worker_reserved_by", null)
 	set_meta("worker_assigned", false)
+	Worker.invalidate_station_cache()
 	return true
 
 func try_chop() -> bool:
@@ -105,9 +108,11 @@ func try_chop() -> bool:
 		visual_log.visible = false
 	wake_nearby_bodies(get_tree(), global_position, 2.5)
 	_spawn_planks_neat(2)
+	Worker.invalidate_station_cache()
 	return true
 
 func dismantle() -> void:
+	Worker.invalidate_station_cache()
 	var parent: Node = get_parent()
 	if parent == null and is_inside_tree():
 		parent = get_tree().current_scene

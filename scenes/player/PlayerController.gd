@@ -259,6 +259,7 @@ var bag: Dictionary:
 var current_volume: int = 0
 var max_volume: int = 30
 var _pending_drop_count: int = 0
+var _pending_throw_count: int = 0
 
 ## Removes `amount` of resource `type` from the bag to be used later in the Pallet radial menu.
 func dump_resource(type: String, amount: int) -> int:
@@ -1248,6 +1249,12 @@ func _physics_process(delta: float) -> void:
 			_pending_drop_count -= 1
 			_drop_one_held_item()
 		_pending_drop_count = 0
+
+	if _pending_throw_count > 0:
+		while _pending_throw_count > 0 and not _held_logs.is_empty():
+			_pending_throw_count -= 1
+			_throw_one_held_item()
+		_pending_throw_count = 0
 
 	if not _held_logs.is_empty() and current_state == State.BODY_CONTROL:
 		_process_held_item_snagging(delta)
@@ -3948,7 +3955,9 @@ func _drop_one_held_item_instance(item: RigidBody3D) -> void:
 	var drop_pos: Vector3 = cam_pos + aim_dir * 1.5
 
 	# Query space state BEFORE tree reparenting while space is clean and accessible
-	if is_inside_tree() and get_world_3d() != null and get_world_3d().space.is_valid():
+	# In Jolt physics, querying direct_space_state is only safe during the physics step (when Engine.is_in_physics_frame() is true).
+	# Outside the physics frame, fallback directly to the cached aiming ray target to avoid Jolt space state errors.
+	if Engine.is_in_physics_frame() and is_inside_tree() and get_world_3d() != null and get_world_3d().space.is_valid():
 		var space_state := get_world_3d().direct_space_state
 		if space_state != null:
 			var ray_query := PhysicsRayQueryParameters3D.create(cam_pos, cam_pos + aim_dir * 1.5, 1)
@@ -4077,6 +4086,9 @@ func _consume_one_held_item() -> RigidBody3D:
 	return item
 
 func _drop_all_held_logs() -> void:
+	if not Engine.is_in_physics_frame():
+		_pending_drop_count += _held_logs.size()
+		return
 	while not _held_logs.is_empty():
 		_drop_one_held_item()
 
@@ -4608,22 +4620,28 @@ func _is_block_covered_above(cell: Variant) -> bool:
 		if bool(grid.has_block(above_cell)):
 			return true
 
-	# Third: physics ray from cell center upward by 1.02 units (catches debris islands & statics).
-	var world_3d: World3D = get_world_3d()
-	if world_3d == null or not world_3d.space.is_valid():
-		return false
-	var direct_state: PhysicsDirectSpaceState3D = world_3d.direct_space_state
-	if direct_state == null:
-		return false
-	var cell_center: Vector3 = Vector3(float(cell_v3i.x) + 0.5, float(cell_v3i.y) + 0.5, float(cell_v3i.z) + 0.5)
-	var ray_from: Vector3 = cell_center + Vector3(0.0, 0.51, 0.0)
-	var ray_to: Vector3 = cell_center + Vector3(0.0, 1.52, 0.0)
-	var params := PhysicsRayQueryParameters3D.create(ray_from, ray_to)
-	params.exclude = [get_rid()]
-	# Check world (layer 1), resources (layer 3), and debris (layer 4).
-	params.collision_mask = 1 | RESOURCE_LAYER | DEBRIS_LAYER
-	var hit := direct_state.intersect_ray(params)
-	return not hit.is_empty()
+	# Third: fast check against debris island constituent blocks if applicable
+	if target_is_debris and is_instance_valid(target_debris_island):
+		var above_cell: Vector3i = cell_v3i + Vector3i(0, 1, 0)
+		if target_debris_island.constituent_blocks.has(above_cell):
+			return true
+
+	# Fourth: physics ray from cell center upward only when safe within physics frame
+	if Engine.is_in_physics_frame():
+		var world_3d: World3D = get_world_3d()
+		if world_3d != null and world_3d.space.is_valid():
+			var direct_state: PhysicsDirectSpaceState3D = world_3d.direct_space_state
+			if direct_state != null:
+				var cell_center: Vector3 = Vector3(float(cell_v3i.x) + 0.5, float(cell_v3i.y) + 0.5, float(cell_v3i.z) + 0.5)
+				var ray_from: Vector3 = cell_center + Vector3(0.0, 0.51, 0.0)
+				var ray_to: Vector3 = cell_center + Vector3(0.0, 1.52, 0.0)
+				var params := PhysicsRayQueryParameters3D.create(ray_from, ray_to)
+				params.exclude = [get_rid()]
+				# Check world (layer 1), resources (layer 3), and debris (layer 4).
+				params.collision_mask = 1 | RESOURCE_LAYER | DEBRIS_LAYER
+				var hit := direct_state.intersect_ray(params)
+				return not hit.is_empty()
+	return false
 
 func _handle_recover_action() -> void:
 	# Legacy 'R' stash mechanic removed — pressing R while holding a block does nothing.
@@ -4748,7 +4766,7 @@ func _handle_throw_action() -> void:
 
 	# Prefer throwing carried logs/planks/blocks.
 	if not _held_logs.is_empty():
-		_throw_one_held_item()
+		_pending_throw_count += 1
 		return
 	if debris_grabber != null and debris_grabber.is_grabbing:
 		debris_grabber.try_throw()

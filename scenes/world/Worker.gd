@@ -122,8 +122,56 @@ var _replan_delay: float = 0.0
 ## Target blacklist: instance_id -> expiry_ticks_msec
 var _blacklisted_targets: Dictionary = {}
 
-## Lightweight collection cluster for batch resource gathering
-var _collection_cluster: Array[Node3D] = []
+## Lightweight collection cluster for batch resource gathering (stores instance IDs as int)
+var _collection_cluster: Array = []
+
+## Shared station and candidate caches across all workers
+static var _shared_stations_cache: Array[Node3D] = []
+static var _shared_stations_frame: int = -1
+static var _shared_station_exists: Dictionary = {}
+static var _shared_station_exists_time: int = 0
+static var _shared_nodes_in_group_cache: Dictionary = {}
+static var _shared_nodes_in_group_frame: int = -1
+
+## Global search concurrency throttling across workers
+static var _active_searches_in_frame: int = 0
+static var _last_search_frame: int = -1
+const MAX_SEARCHES_PER_FRAME: int = 1
+
+static func invalidate_station_cache() -> void:
+	_shared_stations_frame = -1
+	_shared_station_exists.clear()
+	_shared_stations_cache.clear()
+
+static func _get_cached_nodes_in_group(tree: SceneTree, grp: StringName) -> Array:
+	if tree == null:
+		return []
+	var f := Engine.get_physics_frames()
+	if _shared_nodes_in_group_frame != f:
+		_shared_nodes_in_group_frame = f
+		_shared_nodes_in_group_cache.clear()
+	if _shared_nodes_in_group_cache.has(grp):
+		return _shared_nodes_in_group_cache[grp]
+	var nodes := tree.get_nodes_in_group(grp)
+	_shared_nodes_in_group_cache[grp] = nodes
+	return nodes
+
+static func _get_all_stations(tree: SceneTree) -> Array[Node3D]:
+	if tree == null:
+		return []
+	var f := Engine.get_physics_frames()
+	if _shared_stations_frame == f and not _shared_stations_cache.is_empty():
+		return _shared_stations_cache
+	_shared_stations_frame = f
+	var result: Array[Node3D] = []
+	for node in _get_cached_nodes_in_group(tree, &"chopping_blocks"):
+		if node is Node3D and is_instance_valid(node) and not node.is_queued_for_deletion():
+			result.append(node)
+	for node in _get_cached_nodes_in_group(tree, &"pallets"):
+		if node is Node3D and is_instance_valid(node) and not node.is_queued_for_deletion():
+			result.append(node)
+	_shared_stations_cache = result
+	return result
 
 ## Cached reference to AStarGridManager
 var _astar_mgr: Node = null
@@ -695,6 +743,19 @@ func _process_search_job() -> void:
 		_transition_to(State.IDLE)
 		return
 
+	# Global search concurrency throttle: stagger full candidate evaluations across workers
+	var cur_f := Engine.get_physics_frames()
+	if _last_search_frame != cur_f:
+		_last_search_frame = cur_f
+		_active_searches_in_frame = 0
+
+	if _active_searches_in_frame >= MAX_SEARCHES_PER_FRAME:
+		_idle_timer = 0.05 + (float(helper_id % 3) * 0.03)
+		_transition_to(State.IDLE)
+		return
+
+	_active_searches_in_frame += 1
+
 	# Priority 1: If carrying cargo, always find a destination station first
 	if _has_any_cargo():
 		_go_to_station_or_idle(carried_material)
@@ -773,25 +834,19 @@ func _process_search_job() -> void:
 
 func _has_any_compatible_station_for(mat: String) -> bool:
 	var now: int = Time.get_ticks_msec()
-	if now - _station_cache_timestamp < 1000 and _station_exists_cache.has(mat):
-		return bool(_station_exists_cache[mat])
+	if now - _shared_station_exists_time < 400 and _shared_station_exists.has(mat):
+		return bool(_shared_station_exists[mat])
 
 	var exists: bool = false
-	if mat == "log":
-		for block in get_tree().get_nodes_in_group("chopping_blocks"):
-			if is_instance_valid(block) and not _is_target_blacklisted(block):
-				if _can_station_accept_material(block, "log", 1):
-					exists = true
-					break
-	if not exists:
-		for pallet in get_tree().get_nodes_in_group("pallets"):
-			if is_instance_valid(pallet) and not _is_target_blacklisted(pallet):
-				if _can_station_accept_material(pallet, mat, 1):
-					exists = true
-					break
+	var stations := _get_all_stations(get_tree())
+	for st in stations:
+		if is_instance_valid(st) and not _is_target_blacklisted(st):
+			if _can_station_accept_material(st, mat, 1):
+				exists = true
+				break
 
-	_station_cache_timestamp = now
-	_station_exists_cache[mat] = exists
+	_shared_station_exists_time = now
+	_shared_station_exists[mat] = exists
 	return exists
 
 func _get_filtered_candidates(group_names: Array, same_type: String = "") -> Array[Node3D]:
@@ -800,13 +855,18 @@ func _get_filtered_candidates(group_names: Array, same_type: String = "") -> Arr
 	var station_exists_cache: Dictionary = {}
 
 	for grp in group_names:
-		var nodes: Array = get_tree().get_nodes_in_group(grp)
+		var nodes: Array = _get_cached_nodes_in_group(get_tree(), grp)
 		for node in nodes:
 			if not (node is Node3D) or not is_instance_valid(node):
 				continue
 			if node.is_queued_for_deletion():
 				continue
 			if node.get_parent() is Marker3D:
+				continue
+
+			# Fast early distance rejection before metadata and material lookups
+			var dist_sq: float = global_position.distance_squared_to(node.global_position)
+			if dist_sq >= best_dist_sq:
 				continue
 
 			# Respect per-worker reservations & clear stale ghost assignments
@@ -852,9 +912,7 @@ func _get_filtered_candidates(group_names: Array, same_type: String = "") -> Arr
 				if not station_exists_cache[mat]:
 					continue
 
-			var dist_sq: float = global_position.distance_squared_to(node.global_position)
-			if dist_sq < best_dist_sq:
-				candidate_list.append({"node": node, "dist_sq": dist_sq})
+			candidate_list.append({"node": node, "dist_sq": dist_sq})
 
 	if candidate_list.is_empty():
 		return []
@@ -870,27 +928,27 @@ func _get_filtered_candidates(group_names: Array, same_type: String = "") -> Arr
 
 func _build_collection_cluster(candidates: Array[Node3D], mat: String) -> void:
 	_collection_cluster.clear()
-	if target_item == null or not is_instance_valid(target_item):
+	if target_item == null or not is_instance_valid(target_item) or target_item.is_queued_for_deletion():
 		return
 	var origin: Vector3 = target_item.global_position
 	var cluster_candidates: Array[Dictionary] = []
 	var max_to_add: int = _get_max_capacity(mat) - 1
 
 	for node in candidates:
-		if node == target_item or not is_instance_valid(node):
+		if node == target_item or not is_instance_valid(node) or node.is_queued_for_deletion():
 			continue
 		if _resolve_item_material(node) != mat:
 			continue
 		var d_sq := origin.distance_squared_to(node.global_position)
 		if d_sq <= 256.0:  # Within 16m cluster
-			cluster_candidates.append({"node": node, "dist_sq": d_sq})
+			cluster_candidates.append({"id": node.get_instance_id(), "dist_sq": d_sq})
 
 	cluster_candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 		return a["dist_sq"] < b["dist_sq"]
 	)
 
 	for i in range(mini(max_to_add, cluster_candidates.size())):
-		_collection_cluster.append(cluster_candidates[i]["node"])
+		_collection_cluster.append(cluster_candidates[i]["id"])
 
 func _find_best_candidate_item(group_names: Array, same_type: String = "") -> Node3D:
 	var candidates: Array[Node3D] = _get_filtered_candidates(group_names, same_type)
@@ -962,43 +1020,36 @@ func _get_candidate_stations_for_material(mat: String, amount: int = -1) -> Arra
 		amount = _get_carried_resource_value()
 
 	var result: Array[Node3D] = []
+	var stations := _get_all_stations(get_tree())
+	var cb_candidates: Array[Dictionary] = []
+	var pallet_candidates: Array[Dictionary] = []
 
-	# Priority 1 for logs: Chopping blocks as crafting task
-	if mat == "log":
-		var cb_candidates: Array[Dictionary] = []
-		for block in get_tree().get_nodes_in_group("chopping_blocks"):
-			if not (block is Node3D) or not is_instance_valid(block) or block.is_queued_for_deletion():
-				continue
-			if _is_target_blacklisted(block):
-				continue
-			if not _can_station_accept_material(block, "log", amount):
-				continue
-			var d_sq: float = global_position.distance_squared_to(block.global_position)
-			cb_candidates.append({"station": block, "dist_sq": d_sq})
+	for station in stations:
+		if not is_instance_valid(station) or station.is_queued_for_deletion():
+			continue
+		if _is_target_blacklisted(station):
+			continue
+		if not _can_station_accept_material(station, mat, amount):
+			continue
+		var d_sq: float = global_position.distance_squared_to(station.global_position)
+		if station is ChoppingBlock and mat == "log":
+			cb_candidates.append({"station": station, "dist_sq": d_sq})
+		elif station is Pallet:
+			pallet_candidates.append({"station": station, "dist_sq": d_sq})
 
+	if not cb_candidates.is_empty():
 		cb_candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
 			return a["dist_sq"] < b["dist_sq"]
 		)
 		for cand in cb_candidates:
 			result.append(cand["station"])
 
-	# Pallets (fallback for logs, primary for other resources)
-	var pallet_candidates: Array[Dictionary] = []
-	for pallet in get_tree().get_nodes_in_group("pallets"):
-		if not (pallet is Node3D) or not is_instance_valid(pallet) or pallet.is_queued_for_deletion():
-			continue
-		if _is_target_blacklisted(pallet):
-			continue
-		if not _can_station_accept_material(pallet, mat, amount):
-			continue
-		var d_sq: float = global_position.distance_squared_to(pallet.global_position)
-		pallet_candidates.append({"station": pallet, "dist_sq": d_sq})
-
-	pallet_candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-		return a["dist_sq"] < b["dist_sq"]
-	)
-	for cand in pallet_candidates:
-		result.append(cand["station"])
+	if not pallet_candidates.is_empty():
+		pallet_candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+			return a["dist_sq"] < b["dist_sq"]
+		)
+		for cand in pallet_candidates:
+			result.append(cand["station"])
 
 	return result
 
@@ -1538,7 +1589,12 @@ func _process_pickup_item() -> void:
 		if st != null:
 			# Try candidates from cluster first
 			while not _collection_cluster.is_empty():
-				var cand: Node3D = _collection_cluster.pop_front()
+				var cand_id_val = _collection_cluster.pop_front()
+				var cand: Node3D = null
+				if cand_id_val is int:
+					cand = instance_from_id(cand_id_val) as Node3D
+				elif cand_id_val is Node3D and is_instance_valid(cand_id_val):
+					cand = cand_id_val
 				if cand == null or not is_instance_valid(cand) or cand.is_queued_for_deletion():
 					continue
 				if cand.get_parent() is Marker3D:
@@ -1570,11 +1626,18 @@ func _process_pickup_item() -> void:
 
 			# If cluster didn't yield a reachable item, check local candidates within 12m
 			var local_cands := _get_filtered_candidates([_material_to_group(carried_material)], carried_material)
+			var attempts_budget: int = 3
 			for cand in local_cands:
-				if not is_instance_valid(cand) or cand.is_queued_for_deletion():
+				if cand == null or not is_instance_valid(cand) or cand.is_queued_for_deletion():
 					continue
 				if cand.global_position.distance_squared_to(global_position) > 144.0:
 					continue
+				var res_worker = cand.get_meta("worker_reserved_by") if cand.has_meta("worker_reserved_by") else null
+				if res_worker != null and is_instance_valid(res_worker) and res_worker != self:
+					continue
+				if _is_target_blacklisted(cand):
+					continue
+
 				_failed_approach_points.clear()
 				var path_ok := _request_path(cand.global_position, cand)
 				if path_ok:
@@ -1591,6 +1654,9 @@ func _process_pickup_item() -> void:
 					return
 				else:
 					_blacklist_target(cand, TARGET_BLACKLIST_COOLDOWN)
+					attempts_budget -= 1
+					if attempts_budget <= 0:
+						break
 
 	_go_to_station_or_idle(carried_material)
 
@@ -1716,8 +1782,8 @@ func _process_deposit_item() -> void:
 		var placed: bool = cb.try_place_log()
 		if placed:
 			if not carried_items.is_empty():
-				var item: Node3D = carried_items.pop_back()
-				if is_instance_valid(item):
+				var item = carried_items.pop_back()
+				if item != null and is_instance_valid(item):
 					item.queue_free()
 		else:
 			# try_place_log() failed! Retain the log and replan!
@@ -1816,6 +1882,7 @@ func _cancel_job(reason: String) -> void:
 		debug_label.text = "[%s] %s" % [helper_name, _status_text]
 
 	_release_target_assignments()
+	_collection_cluster.clear()
 
 	_recovery_attempts = 0
 	_stuck_timer = 0.0
@@ -1832,6 +1899,7 @@ func _cancel_job(reason: String) -> void:
 	_transition_to(State.IDLE)
 
 func _release_target_assignments() -> void:
+	_collection_cluster.clear()
 	_release_item_reservation()
 	_release_station_reservation()
 

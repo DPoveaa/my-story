@@ -67,15 +67,17 @@ var active_reservations: Dictionary = {}
 func _exit_tree() -> void:
 	active_reservations.clear()
 	set_meta("worker_assigned", false)
+	Worker.invalidate_station_cache()
 	call_deferred("_notify_astar")
 
 func _notify_astar() -> void:
+	Worker.invalidate_station_cache()
 	if not is_inside_tree():
 		return
 	var root := get_tree().root
 	var astar_mgr: Node = root.find_child("AStarGridManager", true, false)
 	if astar_mgr != null and astar_mgr.has_method("notify_bounds_changed"):
-		var aabb := AABB(global_position - Vector3(1.5, 0.2, 1.5), Vector3(3.0, 2.5, 3.0))
+		var aabb := AABB(global_position - Vector3(1.1, 0.0, 1.1), Vector3(2.2, 2.0, 2.2))
 		astar_mgr.notify_bounds_changed(aabb)
 
 func _process(_delta: float) -> void:

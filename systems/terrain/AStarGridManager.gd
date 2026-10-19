@@ -238,9 +238,13 @@ func _flush_pending_dirty_cols() -> void:
 	if _pending_dirty_cols.is_empty():
 		return
 	var cols: Array[Vector2i] = []
+	var max_cols_per_frame: int = 16
 	for col in _pending_dirty_cols.keys():
 		cols.append(col)
-	_pending_dirty_cols.clear()
+		if cols.size() >= max_cols_per_frame:
+			break
+	for col in cols:
+		_pending_dirty_cols.erase(col)
 	_update_columns_batch(cols)
 
 func _process_async_routes() -> void:
@@ -571,13 +575,11 @@ func bake_chunk_if_needed(cp: Vector2i) -> void:
 	queue_chunk(cp)
 
 func notify_block_changed(world_cell: Vector3i) -> void:
-	clear_path_cache()
 	notify_blocks_changed([world_cell])
 
 func notify_blocks_changed(cells: Array) -> void:
 	if cells.is_empty():
 		return
-	clear_path_cache()
 	for c in cells:
 		var cell: Vector3i
 		if c is Vector3i:
@@ -589,23 +591,52 @@ func notify_blocks_changed(cells: Array) -> void:
 		_pending_dirty_cols[Vector2i(cell.x, cell.z)] = true
 
 func notify_bounds_changed(aabb: AABB) -> void:
-	clear_path_cache()
 	var min_cell := Vector3i(floori(aabb.position.x), floori(aabb.position.y), floori(aabb.position.z))
 	var max_cell := Vector3i(ceili(aabb.end.x), ceili(aabb.end.y), ceili(aabb.end.z))
 	for x in range(min_cell.x, max_cell.x + 1):
 		for z in range(min_cell.z, max_cell.z + 1):
 			_pending_dirty_cols[Vector2i(x, z)] = true
 
+func _invalidate_cache_for_columns(cols: Array[Vector2i]) -> void:
+	for col in cols:
+		if _column_to_cells.has(col):
+			for cell in _column_to_cells[col]:
+				_physics_blocked_cache.erase(cell)
+	if _path_cache.is_empty():
+		return
+	var to_erase: Array[String] = []
+	for key in _path_cache.keys():
+		var path: PackedVector3Array = _path_cache[key]
+		var overlaps: bool = false
+		for pt in path:
+			var pt_col := Vector2i(floori(pt.x), floori(pt.z))
+			for c in cols:
+				if absi(pt_col.x - c.x) <= 1 and absi(pt_col.y - c.y) <= 1:
+					overlaps = true
+					break
+			if overlaps:
+				break
+		if overlaps:
+			to_erase.append(key)
+	for key in to_erase:
+		_path_cache.erase(key)
+
 func _update_columns_batch(cols: Array[Vector2i]) -> void:
 	if cols.is_empty():
 		return
-	clear_path_cache()
 
+	var changed_cols: Array[Vector2i] = []
 	for col in cols:
-		_update_local_column(col.x, col.y)
+		if _update_local_column(col.x, col.y):
+			changed_cols.append(col)
+
+	if changed_cols.is_empty():
+		return
+
+	_invalidate_cache_for_columns(changed_cols)
 
 	var neighbor_cols: Dictionary = {}
-	for col in cols:
+	for col in changed_cols:
 		for off in ADJACENT_OFFSETS:
 			neighbor_cols[col + off] = true
 
@@ -614,14 +645,13 @@ func _update_columns_batch(cols: Array[Vector2i]) -> void:
 
 	_notify_graph_changed()
 
-func _update_local_column(x: int, z: int) -> void:
+func _update_local_column(x: int, z: int) -> bool:
 	if _voxel_world == null:
-		return
+		return false
 	var col := Vector2i(x, z)
+	var old_cells: Array = []
 	if _column_to_cells.has(col):
-		var old_cells: Array = _column_to_cells[col].duplicate()
-		for old_cell in old_cells:
-			_remove_point_at(old_cell)
+		old_cells = _column_to_cells[col].duplicate()
 
 	var surf_y: int = -1
 	if _voxel_world.has_method("get_highest_solid_y"):
@@ -641,26 +671,46 @@ func _update_local_column(x: int, z: int) -> void:
 	var min_y: int = roundi(_center.y) - half_y if _center != Vector3.ZERO else 0
 	var max_y: int = roundi(_center.y) + half_y if _center != Vector3.ZERO else 128
 
-	if effective_top < min_y:
-		return
-
-	var scan_top: int = mini(max_y, effective_top)
-	var y: int = min_y - 1
-	while y <= scan_top:
-		if _is_cell_solid(Vector3i(x, y, z)):
-			var walk_cell := Vector3i(x, y + 1, z)
-			var head_cell := Vector3i(x, y + 2, z)
-			if not _is_cell_solid(walk_cell) and not _is_cell_solid(head_cell):
-				var valid := true
-				if _is_position_blocked_by_physics(walk_cell):
-					valid = false
-				if valid:
-					_add_and_connect_point(walk_cell)
-				y += 2
+	var new_walk_cells: Array[Vector3i] = []
+	if effective_top >= min_y:
+		var scan_top: int = mini(max_y, effective_top)
+		var y: int = min_y - 1
+		while y <= scan_top:
+			if _is_cell_solid(Vector3i(x, y, z)):
+				var walk_cell := Vector3i(x, y + 1, z)
+				var head_cell := Vector3i(x, y + 2, z)
+				if not _is_cell_solid(walk_cell) and not _is_cell_solid(head_cell):
+					var valid := true
+					if _is_position_blocked_by_physics(walk_cell):
+						valid = false
+					if valid:
+						new_walk_cells.append(walk_cell)
+					y += 2
+				else:
+					y += 1
 			else:
 				y += 1
-		else:
-			y += 1
+
+	# Check if old_cells matches new_walk_cells
+	var identical: bool = (old_cells.size() == new_walk_cells.size())
+	if identical:
+		for cell in new_walk_cells:
+			if not old_cells.has(cell):
+				identical = false
+				break
+
+	if identical:
+		return false
+
+	for old_cell in old_cells:
+		if not new_walk_cells.has(old_cell):
+			_remove_point_at(old_cell)
+
+	for walk_cell in new_walk_cells:
+		if not old_cells.has(walk_cell):
+			_add_and_connect_point(walk_cell)
+
+	return true
 
 func _reconnect_column(x: int, z: int) -> void:
 	var col := Vector2i(x, z)
@@ -905,14 +955,10 @@ func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: fl
 					horiz_d = Vector2(cand_pos.x - target_world.x, cand_pos.z - target_world.z).length()
 
 				var y_diff: float = absf(cand_pos.y - target_world.y)
-				# Ensure candidate is outside the obstacle boundary, within reachable limits, and has unobstructed access
+				# Ensure candidate is outside the obstacle boundary and within reachable limits
 				if horiz_d >= min_dist and horiz_d <= max_dist and y_diff <= max_vert:
-					if not _has_unobstructed_access(cand_pos, target_world):
-						continue
-					if _is_position_blocked_by_physics(cell):
-						continue
 					var d_from: float = cand_pos.distance_squared_to(from_world)
-					candidates.append({"id": cand_id, "dist_from": d_from, "horiz_d": horiz_d})
+					candidates.append({"id": cand_id, "pos": cand_pos, "cell": cell, "dist_from": d_from, "horiz_d": horiz_d})
 
 	if candidates.is_empty():
 		return PackedVector3Array()
@@ -921,13 +967,17 @@ func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: fl
 		return a["dist_from"] < b["dist_from"]
 	)
 
-	# Evaluate reachable candidate nodes across alternative sides
+	# Evaluate reachable candidate nodes across alternative sides (top 8 closest)
 	var best_raw: PackedVector3Array = PackedVector3Array()
 	var max_to_eval: int = mini(8, candidates.size())
 
 	for i in range(max_to_eval):
-		var cand_id: int = candidates[i]["id"]
-		var raw: PackedVector3Array = _astar.get_point_path(from_id, cand_id)
+		var cand: Dictionary = candidates[i]
+		if not _has_unobstructed_access(cand["pos"], target_world):
+			continue
+		if _is_position_blocked_by_physics(cand["cell"]):
+			continue
+		var raw: PackedVector3Array = _astar.get_point_path(from_id, cand["id"])
 		if not raw.is_empty():
 			best_raw = raw
 			break
@@ -979,16 +1029,27 @@ func optimize_path(raw_path: PackedVector3Array) -> PackedVector3Array:
 		var max_lookahead_idx: int = mini(n - 1, current_idx + MAX_SHORTCUT_LOOKAHEAD)
 		# Search forward: if a short shortcut is blocked, longer shortcuts in the same direction will also be blocked
 		for test_idx in range(current_idx + 2, max_lookahead_idx + 1):
-			if _is_shortcut_safe(direct_state, raw_path, current_idx, test_idx):
+			if _is_shortcut_voxel_safe(raw_path, current_idx, test_idx):
 				best_idx = test_idx
 			else:
 				break
+		# If a multi-step shortcut was found, verify dynamic physics clearance once
+		if best_idx > current_idx + 1 and direct_state != null and _initial_bake_done:
+			if not _is_sweep_clear(direct_state, raw_path[current_idx], raw_path[best_idx]):
+				best_idx = current_idx + 1
 		optimized.append(raw_path[best_idx])
 		current_idx = best_idx
 
 	return optimized
 
-func _is_shortcut_safe(space: PhysicsDirectSpaceState3D, path: PackedVector3Array, from_idx: int, to_idx: int) -> bool:
+func _is_sweep_clear(space: PhysicsDirectSpaceState3D, start: Vector3, end: Vector3) -> bool:
+	var sweep_query := _get_sweep_query()
+	sweep_query.transform = Transform3D(Basis.IDENTITY, start + Vector3(0.0, 0.75, 0.0))
+	sweep_query.motion = end - start
+	var cast_res := space.cast_motion(sweep_query)
+	return not cast_res.is_empty() and cast_res[0] >= 0.99
+
+func _is_shortcut_voxel_safe(path: PackedVector3Array, from_idx: int, to_idx: int) -> bool:
 	if to_idx == from_idx + 1:
 		return true
 
@@ -1041,15 +1102,13 @@ func _is_shortcut_safe(space: PhysicsDirectSpaceState3D, path: PackedVector3Arra
 		if fz > 0.68 and _is_cell_solid(Vector3i(col_x, walk_y_int, col_z + 1)):
 			return false
 
-	# 3. Dynamic physics clearance check (only runs if voxel clearance already passed)
-	if space != null and _initial_bake_done:
-		var sweep_query := _get_sweep_query()
-		sweep_query.transform = Transform3D(Basis.IDENTITY, start + Vector3(0.0, 0.75, 0.0))
-		sweep_query.motion = delta
-		var cast_res := space.cast_motion(sweep_query)
-		if cast_res.is_empty() or cast_res[0] < 0.99:
-			return false
+	return true
 
+func _is_shortcut_safe(space: PhysicsDirectSpaceState3D, path: PackedVector3Array, from_idx: int, to_idx: int) -> bool:
+	if not _is_shortcut_voxel_safe(path, from_idx, to_idx):
+		return false
+	if space != null and _initial_bake_done and to_idx > from_idx + 1:
+		return _is_sweep_clear(space, path[from_idx], path[to_idx])
 	return true
 
 func get_closest_walkable_pos(world_pos: Vector3) -> Vector3:
