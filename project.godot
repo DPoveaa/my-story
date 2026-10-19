@@ -12,7 +12,7 @@ config_version=5
 
 config/name="MyStory"
 run/main_scene="res://scenes/world/GameWorld.tscn"
-config/features=PackedStringArray("4.7", "Forward Plus")
+config/features=PackedStringArray("4.7", "Double Precision", "Forward Plus")
 config/icon="res://icon.svg"
 
 [autoload]
@@ -22,17 +22,23 @@ JointSystem="*res://autoloads/JointSystem.gd"
 StabilitySystem="*res://autoloads/StabilitySystem.gd"
 InputManager="*res://autoloads/InputManager.gd"
 BlueprintManager="*res://autoloads/BlueprintManager.gd"
+InventoryManager="*res://autoloads/InventoryManager.gd"
+SurvivalObjectiveManager="*res://autoloads/SurvivalObjectiveManager.gd"
 
 [display]
 
 window/size/viewport_width=1920
 window/size/viewport_height=1080
-window/size/resizable=true
 window/stretch/mode="canvas_items"
 window/stretch/aspect="expand"
 
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/voronoishatter/plugin.cfg")
+
 [physics]
 
+3d/run_on_separate_thread=true
 3d/physics_engine="Jolt Physics"
 
 [rendering]

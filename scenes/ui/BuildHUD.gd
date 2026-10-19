@@ -14,13 +14,51 @@ extends CanvasLayer
 @onready var cement_label: Label = get_node_or_null("PanelTop/HBox/CementLabel")
 @onready var target_info_label: Label = get_node_or_null("PanelTop/HBox/TargetInfoLabel")
 
+const BlueprintVisualizerScript = preload("res://systems/rendering/BlueprintVisualizer.gd")
+
+var _visualizer: Node = null
+
 var grid_system: Node
 var orchestrator: CollapseOrchestrator
 var player: CharacterBody3D = null
+var voxel_world: Node = null
 @export var blueprint_manager: Node = null
 
 ## Dynamically created label for raw material counts (no .tscn edit required).
 var _raw_mats_label: Label = null
+
+## View-distance controls (− / label / +).
+var _view_panel: PanelContainer = null
+var _view_label: Label = null
+var _view_minus_btn: Button = null
+var _view_plus_btn: Button = null
+
+## Mining feedback + progress.
+var _mine_panel: PanelContainer = null
+var _mine_feedback_label: Label = null
+var _mine_feedback_timer: float = 0.0
+
+## Collapsible controls reference panel.
+var _controls_panel: PanelContainer = null
+var _controls_body: VBoxContainer = null
+var _controls_toggle: Button = null
+var _controls_expanded: bool = true
+
+## Loading overlay (spawn wait).
+var _loading_overlay: ColorRect = null
+var _loading_label: Label = null
+var _loading_btn_container: HBoxContainer = null
+var _loading_retry_btn: Button = null
+var _loading_quit_btn: Button = null
+
+## F3 debug target overlay.
+var _debug_overlay: CanvasLayer = null
+var _debug_panel: PanelContainer = null
+var _debug_label: Label = null
+var _debug_visible: bool = false
+
+## Respawn / Home button.
+var _respawn_btn: Button = null
 
 ## Blueprint Save Modal Nodes
 var _save_modal: PanelContainer = null
@@ -28,6 +66,10 @@ var _save_name_input: LineEdit = null
 var _save_info_label: Label = null
 var _save_feedback_label: Label = null
 var _save_btn: Button = null
+var _save_confirm_overwrite: bool = false
+var _save_min_cell: Vector3i = Vector3i.ZERO
+var _save_max_cell: Vector3i = Vector3i.ZERO
+var _has_area_selected: bool = false
 
 ## Blueprint Load Modal Nodes
 var _load_modal: PanelContainer = null
@@ -39,28 +81,154 @@ var _anchor_y: SpinBox = null
 var _anchor_z: SpinBox = null
 var _replace_checkbox: CheckBox = null
 var _load_place_btn: Button = null
+var _load_inspect_btn: Button = null
+var _load_reconstruct_btn: Button = null
 var _load_delete_btn: Button = null
 
 func _init() -> void:
-	_create_blueprint_dialogs()
-
-func _ready() -> void:
 	if _save_modal == null:
 		_create_blueprint_dialogs()
+
+func _ready() -> void:
 	if grid_system == null and has_node("/root/GridSystem"):
 		grid_system = get_node("/root/GridSystem")
-	# Create raw materials label dynamically so no .tscn modification is needed.
+	if mode_label != null:
+		mode_label.visible = false
+	if color_rect_badge != null:
+		color_rect_badge.visible = false
+	if selected_type_label != null:
+		selected_type_label.visible = false
+	if cement_label != null:
+		cement_label.visible = false
+	if block_count_label != null:
+		block_count_label.visible = false
+	if debris_count_label != null:
+		debris_count_label.visible = false
+	var top_panel := get_node_or_null("PanelTop") as PanelContainer
+	if top_panel != null:
+		top_panel.visible = false
+
+	# Create raw materials label dynamically so no .tscn edit required.
 	_raw_mats_label = Label.new()
 	_raw_mats_label.name = "RawMatsLabel"
 	_raw_mats_label.text = ""
 	_raw_mats_label.visible = false
 	_raw_mats_label.add_theme_font_size_override("font_size", 14)
 	_raw_mats_label.add_theme_color_override("font_color", Color(0.95, 0.80, 0.40))
+
 	var hbox := get_node_or_null("PanelTop/HBox")
 	if hbox != null:
 		hbox.add_child(_raw_mats_label)
 
-	_create_blueprint_dialogs()
+	_visualizer = BlueprintVisualizerScript.new()
+	_visualizer.name = "BlueprintVisualizer"
+	add_child(_visualizer)
+
+	if _save_modal == null:
+		_create_blueprint_dialogs()
+
+	_create_view_distance_controls()
+	_create_mining_hud()
+	_create_controls_panel()
+	_create_loading_overlay()
+	_create_debug_overlay()
+	_create_respawn_button()
+	if "debug_navigation_hint" in get_tree():
+		get_tree().debug_navigation_hint = false
+	if NavigationServer3D.has_method("set_debug_enabled"):
+		NavigationServer3D.set_debug_enabled(false)
+	if voxel_world != null:
+		bind_voxel_world(voxel_world)
+
+func bind_voxel_world(world: Node) -> void:
+	voxel_world = world
+	if voxel_world == null:
+		return
+	if voxel_world.has_signal("view_distance_changed"):
+		if not voxel_world.view_distance_changed.is_connected(_on_view_distance_changed):
+			voxel_world.view_distance_changed.connect(_on_view_distance_changed)
+	_refresh_view_distance_label()
+
+func _create_view_distance_controls() -> void:
+	if _view_panel != null:
+		return
+	_view_panel = PanelContainer.new()
+	_view_panel.name = "ViewDistancePanel"
+	_view_panel.anchor_left = 1.0
+	_view_panel.anchor_right = 1.0
+	_view_panel.anchor_top = 0.0
+	_view_panel.anchor_bottom = 0.0
+	_view_panel.offset_left = -280.0
+	_view_panel.offset_top = 52.0
+	_view_panel.offset_right = -12.0
+	_view_panel.offset_bottom = 96.0
+	_view_panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(_view_panel)
+
+	var row := HBoxContainer.new()
+	row.alignment = BoxContainer.ALIGNMENT_CENTER
+	row.add_theme_constant_override("separation", 8)
+	_view_panel.add_child(row)
+
+	_view_minus_btn = Button.new()
+	_view_minus_btn.text = "−"
+	_view_minus_btn.custom_minimum_size = Vector2(36, 28)
+	_view_minus_btn.tooltip_text = "Decrease view distance (− / [)"
+	_view_minus_btn.pressed.connect(_on_view_minus_pressed)
+	row.add_child(_view_minus_btn)
+
+	_view_label = Label.new()
+	_view_label.text = "View: --"
+	_view_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_view_label.custom_minimum_size = Vector2(170, 0)
+	_view_label.add_theme_font_size_override("font_size", 14)
+	row.add_child(_view_label)
+
+	_view_plus_btn = Button.new()
+	_view_plus_btn.text = "+"
+	_view_plus_btn.custom_minimum_size = Vector2(36, 28)
+	_view_plus_btn.tooltip_text = "Increase view distance (+ / ])"
+	_view_plus_btn.pressed.connect(_on_view_plus_pressed)
+	row.add_child(_view_plus_btn)
+
+func _on_view_minus_pressed() -> void:
+	if voxel_world != null and voxel_world.has_method("adjust_view_distance_chunks"):
+		voxel_world.adjust_view_distance_chunks(-1)
+
+func _on_view_plus_pressed() -> void:
+	if voxel_world != null and voxel_world.has_method("adjust_view_distance_chunks"):
+		voxel_world.adjust_view_distance_chunks(1)
+
+func _on_view_distance_changed(voxels: int, chunks: int) -> void:
+	if _view_label == null:
+		return
+	_view_label.text = _format_view_distance_label(voxels, chunks)
+
+func _refresh_view_distance_label() -> void:
+	if _view_label == null or voxel_world == null:
+		return
+	var voxels := 0
+	var chunks := 0
+	if voxel_world.has_method("get_view_distance_voxels"):
+		voxels = int(voxel_world.get_view_distance_voxels())
+	if voxel_world.has_method("get_view_distance_chunks"):
+		chunks = int(voxel_world.get_view_distance_chunks())
+	_view_label.text = _format_view_distance_label(voxels, chunks)
+
+func _format_view_distance_label(voxels: int, chunks: int) -> String:
+	var limit_voxels := 0
+	var lod := false
+	if voxel_world != null:
+		if voxel_world.has_method("get_view_distance_backend_limit_voxels"):
+			limit_voxels = int(voxel_world.get_view_distance_backend_limit_voxels())
+		if voxel_world.has_method("uses_lod_terrain"):
+			lod = bool(voxel_world.uses_lod_terrain())
+	if limit_voxels > 0 and voxels >= limit_voxels:
+		var tag := "LOD" if lod else "max"
+		return "View: %d (%dc) [%s]" % [voxels, chunks, tag]
+	if lod:
+		return "View: %d (%dc) LOD" % [voxels, chunks]
+	return "View: %d (%dc)" % [voxels, chunks]
 
 func set_cement(current: int, max_val: int) -> void:
 	if cement_label == null:
@@ -108,20 +276,422 @@ func set_selected_block_type(type_id: StringName) -> void:
 func set_carried_block(is_carrying: bool, block_type: StringName) -> void:
 	if prompt_label == null:
 		prompt_label = get_node_or_null("PanelTop/HBox/PromptLabel")
+	var top_panel := get_node_or_null("PanelTop") as PanelContainer
 	if prompt_label != null:
 		if is_carrying:
 			var mat_name := BlockTypeCatalog.get_display_name(block_type)
-			prompt_label.text = "[HOLDING %s] E: Drop  |  F: Throw  |  LMB: Place  |  R: Recover" % mat_name.to_upper()
+			prompt_label.text = "[HOLDING %s] [E] Place on Station | [G] Drop on Floor | F: Throw | R: Recover" % mat_name.to_upper()
 			prompt_label.visible = true
+			if top_panel != null:
+				top_panel.visible = true
 		else:
 			prompt_label.visible = false
+			if top_panel != null and not _debug_visible:
+				top_panel.visible = false
 
-func _process(_delta: float) -> void:
+func _process(delta: float) -> void:
 	if grid_system != null and block_count_label != null:
 		block_count_label.text = "Grid Blocks: %d" % grid_system.get_block_count()
 
 	if orchestrator != null and debris_count_label != null:
 		debris_count_label.text = "Active Debris: %d" % orchestrator.get_active_debris_count()
+
+	if _mine_feedback_timer > 0.0:
+		_mine_feedback_timer -= delta
+		if _mine_feedback_timer <= 0.0 and _mine_feedback_label != null:
+			_mine_feedback_label.visible = false
+
+	if _debug_visible:
+		_refresh_debug_overlay()
+
+func _create_mining_hud() -> void:
+	if _mine_panel != null:
+		return
+	_mine_panel = PanelContainer.new()
+	_mine_panel.name = "MiningHudPanel"
+	_mine_panel.anchor_left = 0.5
+	_mine_panel.anchor_right = 0.5
+	_mine_panel.anchor_top = 1.0
+	_mine_panel.anchor_bottom = 1.0
+	_mine_panel.offset_left = -160.0
+	_mine_panel.offset_right = 160.0
+	_mine_panel.offset_top = -110.0
+	_mine_panel.offset_bottom = -52.0
+	_mine_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_mine_panel.visible = false
+	add_child(_mine_panel)
+
+	var vbox := VBoxContainer.new()
+	vbox.add_theme_constant_override("separation", 4)
+	_mine_panel.add_child(vbox)
+
+	_mine_feedback_label = Label.new()
+	_mine_feedback_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_mine_feedback_label.add_theme_font_size_override("font_size", 14)
+	_mine_feedback_label.add_theme_color_override("font_color", Color(0.45, 1.0, 0.55))
+	_mine_feedback_label.visible = false
+	_mine_feedback_label.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_mine_feedback_label.anchor_left = 0.5
+	_mine_feedback_label.anchor_right = 0.5
+	_mine_feedback_label.anchor_top = 1.0
+	_mine_feedback_label.anchor_bottom = 1.0
+	_mine_feedback_label.offset_left = -180.0
+	_mine_feedback_label.offset_right = 180.0
+	_mine_feedback_label.offset_top = -140.0
+	_mine_feedback_label.offset_bottom = -118.0
+	add_child(_mine_feedback_label)
+
+func set_mining_progress(active: bool, block_name: String, percent: int) -> void:
+	if _mine_feedback_label == null:
+		return
+	if not active:
+		_mine_feedback_label.visible = false
+		_mine_feedback_timer = 0.0
+		return
+	var bar := ""
+	var filled := clampi(percent / 10, 0, 10)
+	for i in range(10):
+		bar += "█" if i < filled else "░"
+	_mine_feedback_label.text = "%s [%s] %d%%" % [block_name, bar, percent]
+	_mine_feedback_label.visible = true
+	_mine_feedback_timer = 0.2  # Keep alive while progress is actively being pushed
+
+func show_mine_feedback(block_type: StringName, amount: int = 1) -> void:
+	if _mine_feedback_label == null:
+		return
+	var disp := BlockTypeCatalog.get_display_name(block_type)
+	_mine_feedback_label.text = "+%d %s" % [amount, disp]
+	_mine_feedback_label.visible = true
+	_mine_feedback_timer = 1.6
+
+func _create_controls_panel() -> void:
+	if _controls_panel != null:
+		return
+	_controls_panel = PanelContainer.new()
+	_controls_panel.name = "ControlsPanel"
+	_controls_panel.anchor_left = 0.0
+	_controls_panel.anchor_right = 0.0
+	_controls_panel.anchor_top = 0.0
+	_controls_panel.anchor_bottom = 0.0
+	_controls_panel.offset_left = 12.0
+	_controls_panel.offset_top = 52.0
+	_controls_panel.offset_right = 292.0
+	_controls_panel.offset_bottom = 420.0
+	_controls_panel.mouse_filter = Control.MOUSE_FILTER_STOP
+	add_child(_controls_panel)
+
+	var root := VBoxContainer.new()
+	root.add_theme_constant_override("separation", 4)
+	_controls_panel.add_child(root)
+
+	_controls_toggle = Button.new()
+	_controls_toggle.text = "Controls ▾"
+	_controls_toggle.alignment = HORIZONTAL_ALIGNMENT_LEFT
+	_controls_toggle.pressed.connect(_toggle_controls_panel)
+	root.add_child(_controls_toggle)
+
+	_controls_body = VBoxContainer.new()
+	_controls_body.add_theme_constant_override("separation", 2)
+	root.add_child(_controls_body)
+
+	for line in _build_controls_lines():
+		var lbl := Label.new()
+		lbl.text = line
+		lbl.add_theme_font_size_override("font_size", 12)
+		lbl.add_theme_color_override("font_color", Color(0.88, 0.9, 0.92))
+		_controls_body.add_child(lbl)
+
+func _toggle_controls_panel() -> void:
+	_controls_expanded = not _controls_expanded
+	if _controls_body != null:
+		_controls_body.visible = _controls_expanded
+	if _controls_toggle != null:
+		_controls_toggle.text = "Controls ▾" if _controls_expanded else "Controls ▸"
+	if _controls_panel != null:
+		_controls_panel.offset_bottom = 420.0 if _controls_expanded else 88.0
+
+func _build_controls_lines() -> PackedStringArray:
+	var lines: PackedStringArray = PackedStringArray()
+	lines.append("Move: %s" % _action_keys("move_forward", "move_left", "move_backward", "move_right"))
+	lines.append("Jump / Sprint: %s / %s" % [_action_keys("jump"), _action_keys("sprint")])
+	lines.append("Toggle fly: F / double-Space")
+	lines.append("Fly up/down: %s / %s" % [_action_keys("fly_up"), _action_keys("fly_down")])
+	lines.append("Soul Projection: %s" % _action_keys("soul_projection"))
+	lines.append("Mouse capture: %s" % _action_keys("toggle_mouse_capture"))
+	lines.append("Mine (hold): %s" % _action_keys("remove_block"))
+	lines.append("Place / Remove block: %s / %s" % [_action_keys("place_block"), _action_keys("remove_block")])
+	lines.append("Materials: %s" % _action_keys("select_slot_1", "select_slot_2", "select_slot_3", "select_slot_4"))
+	lines.append("Mortar brush: %s" % _action_keys("apply_cement"))
+	lines.append("Debris grab/drop: %s" % _action_keys("interact"))
+	lines.append("Throw / Recover: %s / %s" % [_action_keys("throw_debris"), _action_keys("recover_block")])
+	lines.append("Blueprints: %s / %s" % [_action_keys("save_blueprint"), _action_keys("load_blueprint")])
+	lines.append("Debug camera: %s" % _action_keys("debug_camera"))
+	lines.append("View distance: + / −  (or [ / ])")
+	lines.append("Respawn / Home: button or Home key")
+	lines.append("Target debug: F3")
+	return lines
+
+func _create_loading_overlay() -> void:
+	if _loading_overlay != null:
+		return
+	_loading_overlay = ColorRect.new()
+	_loading_overlay.name = "LoadingOverlay"
+	_loading_overlay.color = Color(0.02, 0.03, 0.05, 0.72)
+	_loading_overlay.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_loading_overlay.mouse_filter = Control.MOUSE_FILTER_STOP
+	_loading_overlay.visible = false
+	_loading_overlay.z_index = 20
+	add_child(_loading_overlay)
+
+	_loading_label = Label.new()
+	_loading_label.text = "Loading terrain…"
+	_loading_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_loading_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_loading_label.set_anchors_preset(Control.PRESET_FULL_RECT)
+	_loading_label.add_theme_font_size_override("font_size", 28)
+	_loading_label.add_theme_color_override("font_color", Color(0.92, 0.95, 1.0))
+	_loading_overlay.add_child(_loading_label)
+
+	_loading_btn_container = HBoxContainer.new()
+	_loading_btn_container.name = "LoadingButtons"
+	_loading_btn_container.alignment = BoxContainer.ALIGNMENT_CENTER
+	_loading_btn_container.add_theme_constant_override("separation", 16)
+	_loading_btn_container.anchor_left = 0.5
+	_loading_btn_container.anchor_right = 0.5
+	_loading_btn_container.anchor_top = 0.5
+	_loading_btn_container.anchor_bottom = 0.5
+	_loading_btn_container.offset_left = -160.0
+	_loading_btn_container.offset_right = 160.0
+	_loading_btn_container.offset_top = 60.0
+	_loading_btn_container.offset_bottom = 100.0
+	_loading_btn_container.visible = false
+	_loading_overlay.add_child(_loading_btn_container)
+
+	_loading_retry_btn = Button.new()
+	_loading_retry_btn.text = "Retry (Home)"
+	_loading_retry_btn.custom_minimum_size = Vector2(140, 36)
+	_loading_retry_btn.pressed.connect(_on_loading_retry_pressed)
+	_loading_btn_container.add_child(_loading_retry_btn)
+
+	_loading_quit_btn = Button.new()
+	_loading_quit_btn.text = "Quit (Esc)"
+	_loading_quit_btn.custom_minimum_size = Vector2(140, 36)
+	_loading_quit_btn.pressed.connect(_on_loading_quit_pressed)
+	_loading_btn_container.add_child(_loading_quit_btn)
+
+func set_loading_overlay(active: bool, message: String = "Loading terrain…") -> void:
+	if _loading_overlay == null:
+		_create_loading_overlay()
+	_loading_overlay.visible = active
+	if _loading_label != null and not message.is_empty():
+		_loading_label.text = message
+	var is_failure: bool = active and ("failed" in message.to_lower() or "slow" in message.to_lower())
+	if _loading_btn_container != null:
+		_loading_btn_container.visible = is_failure
+	if is_failure:
+		Input.set_mouse_mode(Input.MOUSE_MODE_VISIBLE)
+
+func _on_loading_retry_pressed() -> void:
+	if player != null and player.has_method("respawn_home"):
+		player.respawn_home()
+
+func _on_loading_quit_pressed() -> void:
+	if is_inside_tree() and get_tree() != null:
+		get_tree().quit()
+
+func _create_debug_overlay() -> void:
+	if _debug_overlay != null:
+		return
+	_debug_overlay = CanvasLayer.new()
+	_debug_overlay.name = "DebugOverlay"
+	_debug_overlay.layer = 100
+	_debug_overlay.visible = false
+	add_child(_debug_overlay)
+
+	_debug_panel = PanelContainer.new()
+	_debug_panel.name = "DebugTargetPanel"
+	_debug_panel.anchor_left = 0.5
+	_debug_panel.anchor_right = 0.5
+	_debug_panel.anchor_top = 0.0
+	_debug_panel.anchor_bottom = 0.0
+	_debug_panel.offset_left = -220.0
+	_debug_panel.offset_right = 220.0
+	_debug_panel.offset_top = 52.0
+	_debug_panel.offset_bottom = 190.0
+	_debug_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_debug_panel.visible = false
+	_debug_overlay.add_child(_debug_panel)
+
+	_debug_label = Label.new()
+	_debug_label.add_theme_font_size_override("font_size", 13)
+	_debug_label.add_theme_color_override("font_color", Color(0.85, 0.95, 0.75))
+	_debug_label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	_debug_panel.add_child(_debug_label)
+
+func _unhandled_input(event: InputEvent) -> void:
+	if event is InputEventKey and event.pressed and not event.echo:
+		if event.keycode == KEY_F3:
+			set_debug_overlay_visible(not _debug_visible)
+			get_viewport().set_input_as_handled()
+		elif event.keycode == KEY_F4 and _debug_visible:
+			if player != null and player.has_method("spawn_worker_at_cursor"):
+				player.spawn_worker_at_cursor()
+			get_viewport().set_input_as_handled()
+
+func set_debug_overlay_visible(visible_flag: bool) -> void:
+	_debug_visible = visible_flag
+	if "debug_navigation_hint" in get_tree():
+		get_tree().debug_navigation_hint = visible_flag
+	if NavigationServer3D.has_method("set_debug_enabled"):
+		NavigationServer3D.set_debug_enabled(visible_flag)
+	if _debug_overlay == null:
+		_create_debug_overlay()
+	if _debug_overlay != null:
+		_debug_overlay.visible = visible_flag
+	if _debug_panel != null:
+		_debug_panel.visible = visible_flag
+	var top_panel := get_node_or_null("PanelTop") as PanelContainer
+	if top_panel != null:
+		top_panel.visible = visible_flag or (prompt_label != null and prompt_label.visible)
+	if mode_label != null:
+		mode_label.visible = visible_flag
+	if color_rect_badge != null:
+		color_rect_badge.visible = visible_flag
+	if selected_type_label != null:
+		selected_type_label.visible = visible_flag
+	if cement_label != null:
+		cement_label.visible = visible_flag
+	if block_count_label != null:
+		block_count_label.visible = visible_flag
+	if debris_count_label != null:
+		debris_count_label.visible = visible_flag
+	if _raw_mats_label != null:
+		_raw_mats_label.visible = visible_flag and not _raw_mats_label.text.is_empty()
+	if visible_flag:
+		_refresh_debug_overlay()
+
+func _refresh_debug_overlay() -> void:
+	if _debug_label == null:
+		return
+	var info := {
+		"category": "none",
+		"material": "N/A",
+		"cell": Vector3i.ZERO,
+		"durability": "N/A",
+		"mining": "N/A",
+	}
+	if player != null and player.has_method("get_debug_target_info"):
+		info = player.get_debug_target_info()
+	var cell: Vector3i = info.get("cell", Vector3i.ZERO)
+	var stream_line := ""
+	if voxel_world != null and voxel_world.has_method("get_stream_diagnostics"):
+		var sd: Dictionary = voxel_world.get_stream_diagnostics()
+		if not sd.is_empty():
+			stream_line = "\nStream: rem=%s upd=%s col=%sc" % [
+				str(sd.get("remaining_main_thread_blocks", "—")),
+				str(sd.get("updated_blocks", "—")),
+				str(sd.get("collision_chunks", "—")),
+			]
+	var block_stat := ""
+	if grid_system != null and grid_system.has_method("get_block_count"):
+		block_stat = "\nGrid Blocks: %d" % grid_system.get_block_count()
+	var debris_stat := ""
+	if orchestrator != null and orchestrator.has_method("get_active_debris_count"):
+		debris_stat = "\nActive Debris: %d" % orchestrator.get_active_debris_count()
+	var workers: Array = get_tree().get_nodes_in_group("workers")
+	var worker_stat := "\nWorkers (Hauler Bots): %d [F4 to Spawn]" % workers.size()
+
+	var mode_name := "Body (1st Person)"
+	if player != null and "current_state" in player:
+		match player.current_state:
+			1: mode_name = "Soul Projection"
+			2: mode_name = "Debug Free Camera"
+	var mode_line := "\nPlayer Mode: %s" % mode_name
+	var mortar_line := ""
+	if player != null and player.has_method("get_cement_count"):
+		mortar_line = "\nMortar: %d/%d" % [player.get_cement_count(), player.max_cement]
+	var bag_line := ""
+	if player != null and "current_slot" in player:
+		var s_name: String = player._slot_display_name() if player.has_method("_slot_display_name") else str(player.current_slot)
+		var b_cnt: int = player.bag_count if "bag_count" in player else 0
+		var b_max: int = player.bag_max_capacity if "bag_max_capacity" in player else 0
+		bag_line = "\nActive Slot: %s | Bag: %d/%d" % [s_name, b_cnt, b_max]
+
+	_debug_label.text = "F3 Target Debug\nType/Material: %s\nVoxel: (%d, %d, %d)\nCategory: %s\nMining: %s\nDurability: %s%s%s%s%s%s%s%s" % [
+		str(info.get("material", "N/A")),
+		cell.x, cell.y, cell.z,
+		str(info.get("category", "none")),
+		str(info.get("mining", "N/A")),
+		str(info.get("durability", "N/A")),
+		mode_line,
+		mortar_line,
+		bag_line,
+		block_stat,
+		debris_stat,
+		stream_line,
+		worker_stat,
+	]
+
+func _create_respawn_button() -> void:
+	if _respawn_btn != null:
+		return
+	_respawn_btn = Button.new()
+	_respawn_btn.name = "RespawnButton"
+	_respawn_btn.text = "Respawn"
+	_respawn_btn.tooltip_text = "Return to spawn (Home)"
+	_respawn_btn.anchor_left = 1.0
+	_respawn_btn.anchor_right = 1.0
+	_respawn_btn.anchor_top = 0.0
+	_respawn_btn.anchor_bottom = 0.0
+	_respawn_btn.offset_left = -120.0
+	_respawn_btn.offset_top = 104.0
+	_respawn_btn.offset_right = -12.0
+	_respawn_btn.offset_bottom = 136.0
+	_respawn_btn.pressed.connect(_on_respawn_pressed)
+	add_child(_respawn_btn)
+
+func _on_respawn_pressed() -> void:
+	if player != null and player.has_method("respawn_home"):
+		player.respawn_home()
+	elif player != null and player.has_method("set_mouse_capture"):
+		player.set_mouse_capture(true)
+
+func _action_keys(action1: StringName, action2: StringName = &"", action3: StringName = &"", action4: StringName = &"") -> String:
+	var parts: PackedStringArray = PackedStringArray()
+	for action in [action1, action2, action3, action4]:
+		if action == &"":
+			continue
+		var label := _format_action_events(action)
+		if not label.is_empty():
+			parts.append(label)
+	if parts.is_empty():
+		return "—"
+	if action1 == &"move_forward" and parts.size() >= 4:
+		return "%s%s%s%s" % [parts[0], parts[1], parts[2], parts[3]]
+	return " / ".join(parts)
+
+func _format_action_events(action: StringName) -> String:
+	if not InputMap.has_action(action):
+		return String(action)
+	var uniq: PackedStringArray = PackedStringArray()
+	for ev in InputMap.action_get_events(action):
+		var label := ""
+		if ev is InputEventKey:
+			var key_ev := ev as InputEventKey
+			var code: Key = key_ev.physical_keycode if key_ev.physical_keycode != KEY_NONE else key_ev.keycode
+			label = OS.get_keycode_string(code)
+		elif ev is InputEventMouseButton:
+			var btn := (ev as InputEventMouseButton).button_index
+			match btn:
+				MOUSE_BUTTON_LEFT: label = "LMB"
+				MOUSE_BUTTON_RIGHT: label = "RMB"
+				MOUSE_BUTTON_MIDDLE: label = "MMB"
+				_: label = "Mouse%d" % int(btn)
+		if not label.is_empty() and not uniq.has(label):
+			uniq.append(label)
+	if uniq.is_empty():
+		return String(action)
+	return "/".join(uniq)
 
 ## Updates the raw materials HUD label.
 ## Called via signal raw_materials_changed(materials: Dictionary).
@@ -156,24 +726,60 @@ func close_all_modals() -> void:
 		_save_modal.visible = false
 	if _load_modal != null:
 		_load_modal.visible = false
+	_has_area_selected = false
+	_save_min_cell = Vector3i.ZERO
+	_save_max_cell = Vector3i.ZERO
+	if _visualizer != null:
+		_visualizer.clear_visuals()
 	if player != null and player.has_method("set_mouse_capture"):
 		player.set_mouse_capture(true)
+
+## Opens the Save Blueprint dialog for a bounded area.
+func open_save_blueprint_dialog_bounded(min_cell: Vector3i, max_cell: Vector3i) -> void:
+	open_save_blueprint_dialog()
+	_save_min_cell = min_cell
+	_save_max_cell = max_cell
+	_has_area_selected = true
+	if _save_info_label != null:
+		_save_info_label.text = "Bounded Area: (%d,%d,%d) to (%d,%d,%d)" % [
+			min_cell.x, min_cell.y, min_cell.z, max_cell.x, max_cell.y, max_cell.z
+		]
+	if _save_feedback_label != null:
+		_save_feedback_label.text = ""
+	if _save_btn != null:
+		_save_btn.disabled = false
 
 ## Opens the Save Blueprint dialog, releases mouse capture, and focuses input.
 func open_save_blueprint_dialog() -> void:
 	close_all_modals()
 	if _save_modal == null:
-		return
-	var count: int = grid_system.get_block_count() if grid_system != null else 0
-	_save_info_label.text = "Structure to Save: %d block(s) in grid" % count
-	_save_feedback_label.text = ""
-	if count == 0:
-		_save_feedback_label.text = "Grid is empty! Place blocks first to save a blueprint."
-		_save_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.7, 0.3))
-		_save_btn.disabled = true
+		_create_blueprint_dialogs()
+	_save_confirm_overwrite = false
+	if _save_btn != null:
+		_save_btn.text = "Save"
+	if not _has_area_selected:
+		var count: int = grid_system.get_block_count() if grid_system != null else 0
+		if count == 0:
+			if _save_info_label != null:
+				_save_info_label.text = "Structure to Save: 0 block(s) in grid"
+			if _save_feedback_label != null:
+				_save_feedback_label.text = "Grid is empty. Place blocks before saving."
+			if _save_btn != null:
+				_save_btn.disabled = true
+		else:
+			if _save_info_label != null:
+				_save_info_label.text = "Structure to Save: %d block(s) in grid" % count
+			if _save_feedback_label != null:
+				_save_feedback_label.text = ""
+			if _save_btn != null:
+				_save_btn.disabled = false
 	else:
-		_save_btn.disabled = false
-	_save_modal.visible = true
+		if _save_feedback_label != null:
+			_save_feedback_label.text = ""
+		if _save_btn != null:
+			_save_btn.disabled = false
+	if _save_modal != null:
+		_save_modal.visible = true
 	if player != null and player.has_method("set_mouse_capture"):
 		player.set_mouse_capture(false)
 	if _save_name_input != null and _save_name_input.is_inside_tree():
@@ -184,15 +790,20 @@ func open_save_blueprint_dialog() -> void:
 func open_load_blueprint_dialog(anchor: Vector3i = Vector3i.ZERO) -> void:
 	close_all_modals()
 	if _load_modal == null:
-		return
+		_create_blueprint_dialogs()
 
-	_anchor_x.value = anchor.x
-	_anchor_y.value = anchor.y
-	_anchor_z.value = anchor.z
-	_load_feedback_label.text = ""
+	if _anchor_x != null:
+		_anchor_x.value = anchor.x
+	if _anchor_y != null:
+		_anchor_y.value = anchor.y
+	if _anchor_z != null:
+		_anchor_z.value = anchor.z
+	if _load_feedback_label != null:
+		_load_feedback_label.text = ""
 	_refresh_blueprint_list()
 
-	_load_modal.visible = true
+	if _load_modal != null:
+		_load_modal.visible = true
 	if player != null and player.has_method("set_mouse_capture"):
 		player.set_mouse_capture(false)
 
@@ -216,14 +827,18 @@ func _create_save_modal() -> void:
 	_save_modal = PanelContainer.new()
 	_save_modal.name = "SaveBlueprintModal"
 	_save_modal.add_theme_stylebox_override("panel", _make_modal_panel_style())
-	_save_modal.anchors_preset = Control.PRESET_CENTER
-	_save_modal.custom_minimum_size = Vector2(460, 230)
-	_save_modal.offset_left = -230
-	_save_modal.offset_top = -115
-	_save_modal.offset_right = 230
-	_save_modal.offset_bottom = 115
+	_save_modal.custom_minimum_size = Vector2(480, 240)
+	_save_modal.anchor_left = 0.5
+	_save_modal.anchor_top = 0.5
+	_save_modal.anchor_right = 0.5
+	_save_modal.anchor_bottom = 0.5
+	_save_modal.offset_left = -240
+	_save_modal.offset_top = -120
+	_save_modal.offset_right = 240
+	_save_modal.offset_bottom = 120
 	_save_modal.grow_horizontal = Control.GROW_DIRECTION_BOTH
 	_save_modal.grow_vertical = Control.GROW_DIRECTION_BOTH
+	_save_modal.z_index = 10
 	_save_modal.visible = false
 	add_child(_save_modal)
 
@@ -258,6 +873,11 @@ func _create_save_modal() -> void:
 	_save_name_input.placeholder_text = "Enter blueprint name"
 	_save_name_input.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	_save_name_input.text_submitted.connect(func(_t: String) -> void: _on_save_confirm_pressed())
+	_save_name_input.text_changed.connect(func(_t: String) -> void:
+		_save_confirm_overwrite = false
+		if _save_btn != null:
+			_save_btn.text = "Save"
+	)
 	name_hbox.add_child(_save_name_input)
 
 	_save_feedback_label = Label.new()
@@ -288,14 +908,18 @@ func _create_load_modal() -> void:
 	_load_modal = PanelContainer.new()
 	_load_modal.name = "LoadBlueprintModal"
 	_load_modal.add_theme_stylebox_override("panel", _make_modal_panel_style())
-	_load_modal.anchors_preset = Control.PRESET_CENTER
 	_load_modal.custom_minimum_size = Vector2(560, 420)
+	_load_modal.anchor_left = 0.5
+	_load_modal.anchor_top = 0.5
+	_load_modal.anchor_right = 0.5
+	_load_modal.anchor_bottom = 0.5
 	_load_modal.offset_left = -280
 	_load_modal.offset_top = -210
 	_load_modal.offset_right = 280
 	_load_modal.offset_bottom = 210
 	_load_modal.grow_horizontal = Control.GROW_DIRECTION_BOTH
 	_load_modal.grow_vertical = Control.GROW_DIRECTION_BOTH
+	_load_modal.z_index = 10
 	_load_modal.visible = false
 	add_child(_load_modal)
 
@@ -337,6 +961,7 @@ func _create_load_modal() -> void:
 	_anchor_x.min_value = -999
 	_anchor_x.max_value = 999
 	_anchor_x.step = 1
+	_anchor_x.value_changed.connect(func(_val: float) -> void: _on_anchor_changed())
 	anchor_hbox.add_child(_anchor_x)
 
 	var ly := Label.new()
@@ -346,6 +971,7 @@ func _create_load_modal() -> void:
 	_anchor_y.min_value = -999
 	_anchor_y.max_value = 999
 	_anchor_y.step = 1
+	_anchor_y.value_changed.connect(func(_val: float) -> void: _on_anchor_changed())
 	anchor_hbox.add_child(_anchor_y)
 
 	var lz := Label.new()
@@ -355,6 +981,7 @@ func _create_load_modal() -> void:
 	_anchor_z.min_value = -999
 	_anchor_z.max_value = 999
 	_anchor_z.step = 1
+	_anchor_z.value_changed.connect(func(_val: float) -> void: _on_anchor_changed())
 	anchor_hbox.add_child(_anchor_z)
 
 	var btn_aim := Button.new()
@@ -384,6 +1011,26 @@ func _create_load_modal() -> void:
 	_load_place_btn.custom_minimum_size = Vector2(130, 32)
 	_load_place_btn.pressed.connect(_on_load_confirm_pressed)
 	btns_hbox.add_child(_load_place_btn)
+
+	_load_inspect_btn = Button.new()
+	_load_inspect_btn.text = "Inspect Plan"
+	_load_inspect_btn.custom_minimum_size = Vector2(110, 32)
+	_load_inspect_btn.pressed.connect(_on_inspect_plan_pressed)
+	btns_hbox.add_child(_load_inspect_btn)
+
+	_load_reconstruct_btn = Button.new()
+	_load_reconstruct_btn.text = "Reconstruct Cell"
+	_load_reconstruct_btn.tooltip_text = "Reconstructs the next buildable missing block in this blueprint."
+	_load_reconstruct_btn.custom_minimum_size = Vector2(120, 32)
+	_load_reconstruct_btn.pressed.connect(_on_reconstruct_cell_pressed)
+	btns_hbox.add_child(_load_reconstruct_btn)
+
+	var update_area_btn := Button.new()
+	update_area_btn.text = "Update Area"
+	update_area_btn.tooltip_text = "Explicitly update the saved blueprint layout from current live world blocks inside its area."
+	update_area_btn.custom_minimum_size = Vector2(110, 32)
+	update_area_btn.pressed.connect(_on_update_area_pressed)
+	btns_hbox.add_child(update_area_btn)
 
 	_load_delete_btn = Button.new()
 	_load_delete_btn.text = "Delete"
@@ -439,9 +1086,158 @@ func _on_blueprint_item_selected(index: int) -> void:
 	var bp = bp_mgr.load_blueprint(bp_name)
 	if bp != null:
 		var dims: Vector3i = bp.get_dimensions()
-		_load_details_label.text = "Blueprint: %s  |  Blocks: %d  |  Size: %dx%dx%d  |  Joints: %d" % [
-			bp.name, bp.get_block_count(), dims.x, dims.y, dims.z, bp.joints.size()
-		]
+		var anchor := Vector3i(int(_anchor_x.value), int(_anchor_y.value), int(_anchor_z.value))
+		var plan = bp_mgr.plan_reconstruction(bp, anchor, player) if bp_mgr.has_method("plan_reconstruction") else null
+		if plan != null:
+			_load_details_label.text = "Blueprint: %s (%dx%dx%d) | PRESENT: %d | MISSING: %d | CONFLICT: %d | INVALID: %d" % [
+				bp.name, dims.x, dims.y, dims.z,
+				plan.present_count, plan.missing_count, plan.conflict_count, plan.invalid_count
+			]
+		else:
+			_load_details_label.text = "Blueprint: %s  |  Blocks: %d  |  Size: %dx%dx%d  |  Joints: %d" % [
+				bp.name, bp.get_block_count(), dims.x, dims.y, dims.z, bp.joints.size()
+			]
+
+func _on_inspect_plan_pressed() -> void:
+	var selected_items: PackedInt32Array = _load_item_list.get_selected_items()
+	if selected_items.is_empty():
+		_load_feedback_label.text = "Select a blueprint to inspect."
+		_load_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
+		return
+
+	var bp_name: String = _load_item_list.get_item_text(selected_items[0])
+	var bp_mgr := _get_blueprint_manager()
+	if bp_mgr == null:
+		return
+
+	var bp = bp_mgr.load_blueprint(bp_name)
+	if bp == null:
+		return
+
+	var anchor := Vector3i(int(_anchor_x.value), int(_anchor_y.value), int(_anchor_z.value))
+	var plan = bp_mgr.plan_reconstruction(bp, anchor, player)
+	if plan == null:
+		return
+
+	var details := "Reconstruction Plan [%s] at (%d,%d,%d):\nPRESENT: %d | MISSING: %d | CONFLICT: %d | INVALID: %d" % [
+		bp.name, anchor.x, anchor.y, anchor.z,
+		plan.present_count, plan.missing_count, plan.conflict_count, plan.invalid_count
+	]
+
+	if not plan.required_materials.is_empty():
+		details += "\nRequired:"
+		var inv_mgr = get_node_or_null("/root/InventoryManager")
+		for mat in plan.required_materials.keys():
+			var req: int = plan.required_materials[mat]
+			var avail: int = inv_mgr.get_material_count(mat) if inv_mgr != null else 0
+			var mat_name := BlockTypeCatalog.get_display_name(mat)
+			details += " %s: %d (avail %d) |" % [mat_name, req, avail]
+		details = details.trim_suffix(" |")
+
+	if plan.conflict_count > 0:
+		var conflicts: Array[Dictionary] = plan.get_conflict_entries()
+		var first_conf: Dictionary = conflicts[0]
+		details += "\nConflict at %s: %s" % [str(first_conf.get("world_cell", Vector3i.ZERO)), first_conf.get("reason", "UNKNOWN")]
+	elif plan.invalid_count > 0:
+		var invalids: Array[Dictionary] = plan.get_invalid_entries()
+		var first_inv: Dictionary = invalids[0]
+		details += "\nInvalid at %s: Out of Bounds" % str(first_inv.get("world_cell", Vector3i.ZERO))
+
+	_load_feedback_label.text = details
+	if plan.is_fully_intact():
+		_load_feedback_label.add_theme_color_override("font_color", Color(0.3, 1.0, 0.4))
+	elif plan.is_ready_for_reconstruction():
+		_load_feedback_label.add_theme_color_override("font_color", Color(0.4, 0.85, 1.0))
+	else:
+		_load_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.7, 0.2))
+
+	if _visualizer != null:
+		_visualizer.render_plan(plan, grid_system.cell_size if grid_system != null else 1.0)
+
+func _on_reconstruct_cell_pressed() -> void:
+	var selected_items: PackedInt32Array = _load_item_list.get_selected_items()
+	if selected_items.is_empty():
+		_load_feedback_label.text = "Select a blueprint to reconstruct."
+		_load_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
+		return
+
+	var bp_name: String = _load_item_list.get_item_text(selected_items[0])
+	var bp_mgr := _get_blueprint_manager()
+	if bp_mgr == null:
+		return
+
+	var bp = bp_mgr.load_blueprint(bp_name)
+	if bp == null:
+		return
+
+	var anchor := Vector3i(int(_anchor_x.value), int(_anchor_y.value), int(_anchor_z.value))
+	var plan = bp_mgr.plan_reconstruction(bp, anchor, player)
+	if plan == null:
+		return
+
+	var missing_entries: Array[Dictionary] = plan.get_missing_entries()
+	if missing_entries.is_empty():
+		if plan.is_fully_intact():
+			_load_feedback_label.text = "✓ Blueprint is fully intact! All blocks present."
+			_load_feedback_label.add_theme_color_override("font_color", Color(0.3, 1.0, 0.4))
+		else:
+			_load_feedback_label.text = "No buildable missing cells. Resolve conflicts (%d) or invalid cells (%d) first!" % [
+				plan.conflict_count, plan.invalid_count
+			]
+			_load_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.7, 0.2))
+		return
+
+	# Reconstruct the first buildable missing cell
+	var first_missing: Dictionary = missing_entries[0]
+	var target_cell: Vector3i = first_missing.get("world_cell", Vector3i.ZERO)
+	var res: Dictionary = bp_mgr.reconstruct_single_cell(bp, anchor, target_cell, player)
+
+	if res.get("success", false):
+		var exp_mat: StringName = first_missing.get("expected_type", &"stone")
+		var mat_display := BlockTypeCatalog.get_display_name(exp_mat)
+		_load_feedback_label.text = "✓ Reconstructed [%s] block at %s!" % [mat_display, str(target_cell)]
+		_load_feedback_label.add_theme_color_override("font_color", Color(0.3, 1.0, 0.4))
+
+		var updated_plan = res.get("plan", null)
+		if updated_plan != null:
+			if _visualizer != null:
+				_visualizer.render_plan(updated_plan, grid_system.cell_size if grid_system != null else 1.0)
+			var dims: Vector3i = bp.get_dimensions()
+			_load_details_label.text = "Blueprint: %s (%dx%dx%d) | PRESENT: %d | MISSING: %d | CONFLICT: %d | INVALID: %d" % [
+				bp.name, dims.x, dims.y, dims.z,
+				updated_plan.present_count, updated_plan.missing_count, updated_plan.conflict_count, updated_plan.invalid_count
+			]
+	else:
+		var reason: String = res.get("reason", "UNKNOWN")
+		_load_feedback_label.text = "Cannot reconstruct at %s: %s" % [str(target_cell), reason]
+		_load_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
+
+func _on_anchor_changed() -> void:
+	var selected_items: PackedInt32Array = _load_item_list.get_selected_items()
+	if selected_items.is_empty():
+		return
+	_on_blueprint_item_selected(selected_items[0])
+
+func _on_update_area_pressed() -> void:
+	var selected_items: PackedInt32Array = _load_item_list.get_selected_items()
+	if selected_items.is_empty():
+		_load_feedback_label.text = "Select a blueprint to update."
+		_load_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
+		return
+
+	var bp_name: String = _load_item_list.get_item_text(selected_items[0])
+	var bp_mgr := _get_blueprint_manager()
+	if bp_mgr == null:
+		return
+
+	var ok: bool = bp_mgr.update_registered_blueprint_from_world(bp_name)
+	if ok:
+		_load_feedback_label.text = "✓ Blueprint '%s' updated from current area!" % bp_name
+		_load_feedback_label.add_theme_color_override("font_color", Color(0.3, 1.0, 0.4))
+		_on_blueprint_item_selected(selected_items[0])
+	else:
+		_load_feedback_label.text = "Failed to update blueprint '%s'." % bp_name
+		_load_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
 
 func _on_use_aim_pressed() -> void:
 	if player != null and player.has_target:
@@ -472,14 +1268,28 @@ func _on_save_confirm_pressed() -> void:
 		_save_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
 		return
 
-	var bp = bp_mgr.capture_blueprint(raw_name)
+	if bp_mgr.has_blueprint(raw_name) and not _save_confirm_overwrite:
+		_save_confirm_overwrite = true
+		_save_btn.text = "Confirm Overwrite"
+		_save_feedback_label.text = "Blueprint '%s' already exists! Click 'Confirm Overwrite' to replace it." % raw_name
+		_save_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.7, 0.2))
+		return
+
+	var bp: BlueprintData = null
+	if _has_area_selected:
+		bp = bp_mgr.capture_blueprint_area(raw_name, _save_min_cell, _save_max_cell)
+	else:
+		bp = bp_mgr.capture_blueprint(raw_name)
+
 	if bp == null:
-		_save_feedback_label.text = "Failed to capture blueprint: grid is empty."
+		_save_feedback_label.text = "Failed to capture blueprint: no blocks found in selection."
 		_save_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
 		return
 
 	var ok: bool = bp_mgr.save_blueprint(bp, true)
 	if ok:
+		_save_confirm_overwrite = false
+		_save_btn.text = "Save"
 		_save_feedback_label.text = "✓ Blueprint '%s' saved successfully (%d blocks)!" % [bp.name, bp.get_block_count()]
 		_save_feedback_label.add_theme_color_override("font_color", Color(0.3, 1.0, 0.4))
 		if is_inside_tree() and get_tree() != null:
@@ -523,6 +1333,13 @@ func _on_load_confirm_pressed() -> void:
 		if not conflicts.is_empty():
 			var sample: Array = conflicts.slice(0, 3)
 			conflict_str = " (at %s%s)" % [str(sample), "..." if conflicts.size() > 3 else ""]
+		var reason_msg := reason
+		match reason:
+			"OUT_OF_BOUNDS": reason_msg = "Exceeds grid boundaries"
+			"CELL_OCCUPIED": reason_msg = "Conflicts with existing static structure"
+			"DEBRIS_COLLISION": reason_msg = "Obstructed by fallen debris"
+			"PLAYER_OVERLAP": reason_msg = "Overlaps player position"
+			"EMPTY_BLUEPRINT": reason_msg = "Blueprint is empty"
 		_load_feedback_label.text = "Cannot place [%s]: %d conflict(s)%s" % [reason, conflicts.size(), conflict_str]
 		_load_feedback_label.add_theme_color_override("font_color", Color(1.0, 0.3, 0.3))
 		return

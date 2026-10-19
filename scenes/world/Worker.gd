@@ -1,0 +1,2138 @@
+class_name Worker
+extends CharacterBody3D
+
+## Hauler Bot: Autonomous generalist helper entity with AStar3D grid-based pathfinding,
+## multi-item carrying, intelligent destination validation, dynamic obstacle awareness,
+## reliable route-following, stuck detection with recovery, and F3 debug visualization.
+
+enum State {
+	IDLE,
+	SEARCH_JOB,
+	MOVING_TO_ITEM,
+	PICKUP_ITEM,
+	MOVING_TO_STATION,
+	DEPOSIT_ITEM,
+}
+
+@export var move_speed: float = 3.6
+@export var search_radius: float = 36.0
+@export var gravity: float = 9.8
+@export var jump_velocity: float = 5.5
+@export var reach_distance: float = 2.5
+@export var step_height: float = 0.35
+@export var wander_radius: float = 8.0
+
+## Interaction tolerances: separate loose pickups from stations and validate approach
+const ITEM_PICKUP_HORIZ_TOLERANCE: float = 1.75
+const ITEM_PICKUP_VERT_TOLERANCE: float = 1.55
+const STATION_DEPOSIT_HORIZ_TOLERANCE: float = 1.65
+const STATION_DEPOSIT_VERT_TOLERANCE: float = 1.4
+const PALLET_DEPOSIT_HORIZ_TOLERANCE: float = 2.0
+const APPROACH_POINT_REACH: float = 0.75
+
+## Heavy gravity multiplier to eliminate moon-gravity feel.
+const GRAVITY_MULTIPLIER: float = 2.5
+## Jump velocity tuned for heavy gravity, clears 1.2m: sqrt(2 * 9.8 * 2.5 * 1.2) ≈ 7.67
+const JUMP_VELOCITY: float = 7.7
+## Y threshold above which the bot considers a ledge worth jumping.
+const JUMP_THRESHOLD: float = 0.35
+## How close to a waypoint before advancing to the next one (metres).
+const WAYPOINT_REACH: float = 0.55
+## Cooldown after a path/task failure before returning to IDLE (prevents rapid flickering).
+const TASK_ABORT_COOLDOWN: float = 0.6
+
+## Helper capacities: 1 log, 2 planks, and up to 25 loose fragment pickups.
+const MAX_LOGS: int = 1
+const MAX_PLANKS: int = 2
+const MAX_FRAGMENTS: int = 25
+
+## Stuck detection & recovery parameters
+const MAX_RECOVERY_ATTEMPTS: int = 3
+const STUCK_CHECK_INTERVAL: float = 0.75
+const MIN_PROGRESS_DIST: float = 0.2
+const TARGET_BLACKLIST_COOLDOWN: float = 2.5
+
+## Deterministic palette for helper identity
+const HELPER_PALETTE: Array[Color] = [
+	Color(0.18, 0.90, 1.0),   # Cyan
+	Color(1.0, 0.60, 0.15),   # Amber Orange
+	Color(0.30, 0.95, 0.45),  # Lime Green
+	Color(1.0, 0.28, 0.60),   # Magenta Rose
+	Color(0.80, 0.45, 1.0),   # Purple Violet
+	Color(1.0, 0.92, 0.20),   # Golden Yellow
+	Color(0.25, 0.70, 1.0),   # Azure Blue
+	Color(1.0, 0.40, 0.25),   # Coral Red
+]
+
+static var _next_worker_id: int = 1
+var helper_id: int = 0
+var helper_name: String = ""
+var helper_color: Color = Color.WHITE
+
+@onready var carrier_marker: Marker3D = $CarrierMarker3D
+@onready var debug_label: Label3D = $DebugLabel3D
+@onready var line: Node = get_node_or_null("Line3D")
+
+var current_state: State = State.IDLE
+var target_item: Node3D = null
+var carried_items: Array[Node3D] = []
+var carried_material: String = ""
+var target_station: Node3D = null
+var fragment_bag: Dictionary = {}
+
+var _station_cache_timestamp: int = 0
+var _station_exists_cache: Dictionary = {}
+var _failed_approach_points: Array[Vector3] = []
+var _debug_line_hold_timer: float = 0.0
+
+var _idle_timer: float = 0.0
+var _abort_cooldown: float = 0.0
+var _status_text: String = "[IDLE] Waiting for work..."
+var _status_hold_timer: float = 0.0
+
+## Target tracking & rolling damp trackers
+var _target_repath_cooldown: float = 0.0
+var _rolling_settle_timer: float = 0.0
+
+## Idle wander trackers
+var _is_wandering: bool = false
+var _wander_timer: float = 0.0
+var _wander_cooldown: float = 3.0
+var _home_position: Vector3 = Vector3.INF
+
+## AStar3D path following
+var _current_path: PackedVector3Array = PackedVector3Array()
+var _path_index: int = 0
+var _destination: Vector3 = Vector3.INF
+var _approach_target_point: Vector3 = Vector3.INF
+var _last_target_pos: Vector3 = Vector3.INF
+var _path_dirty: bool = false
+var _last_line_worker_pos: Vector3 = Vector3.INF
+
+## Stuck detection and jumping trackers
+var _stuck_timer: float = 0.0
+var _last_stuck_check_pos: Vector3 = Vector3.INF
+var _recovery_attempts: int = 0
+var _jump_cooldown: float = 0.0
+var _jump_count_at_waypoint: int = 0
+var _last_jump_waypoint_idx: int = -1
+var _wall_stuck_timer: float = 0.0
+var _replan_pending: bool = false
+var _replan_delay: float = 0.0
+
+## Target blacklist: instance_id -> expiry_ticks_msec
+var _blacklisted_targets: Dictionary = {}
+
+## Lightweight collection cluster for batch resource gathering (stores instance IDs as int)
+var _collection_cluster: Array = []
+
+## Shared station and candidate caches across all workers
+static var _shared_stations_cache: Array[Node3D] = []
+static var _shared_stations_frame: int = -1
+static var _shared_station_exists: Dictionary = {}
+static var _shared_station_exists_time: int = 0
+static var _shared_nodes_in_group_cache: Dictionary = {}
+static var _shared_nodes_in_group_frame: int = -1
+
+## Global search concurrency throttling across workers
+static var _active_searches_in_frame: int = 0
+static var _last_search_frame: int = -1
+const MAX_SEARCHES_PER_FRAME: int = 1
+
+static func invalidate_station_cache() -> void:
+	_shared_stations_frame = -1
+	_shared_station_exists.clear()
+	_shared_stations_cache.clear()
+
+static func _get_cached_nodes_in_group(tree: SceneTree, grp: StringName) -> Array:
+	if tree == null:
+		return []
+	var f := Engine.get_physics_frames()
+	if _shared_nodes_in_group_frame != f:
+		_shared_nodes_in_group_frame = f
+		_shared_nodes_in_group_cache.clear()
+	if _shared_nodes_in_group_cache.has(grp):
+		return _shared_nodes_in_group_cache[grp]
+	var nodes := tree.get_nodes_in_group(grp)
+	_shared_nodes_in_group_cache[grp] = nodes
+	return nodes
+
+static func _get_all_stations(tree: SceneTree) -> Array[Node3D]:
+	if tree == null:
+		return []
+	var f := Engine.get_physics_frames()
+	if _shared_stations_frame == f and not _shared_stations_cache.is_empty():
+		return _shared_stations_cache
+	_shared_stations_frame = f
+	var result: Array[Node3D] = []
+	for node in _get_cached_nodes_in_group(tree, &"chopping_blocks"):
+		if node is Node3D and is_instance_valid(node) and not node.is_queued_for_deletion():
+			result.append(node)
+	for node in _get_cached_nodes_in_group(tree, &"pallets"):
+		if node is Node3D and is_instance_valid(node) and not node.is_queued_for_deletion():
+			result.append(node)
+	_shared_stations_cache = result
+	return result
+
+## Cached reference to AStarGridManager
+var _astar_mgr: Node = null
+
+# ---------------------------------------------------------------------------
+# Lifecycle
+# ---------------------------------------------------------------------------
+func _ready() -> void:
+	add_to_group("workers")
+	add_to_group("npcs")
+	collision_layer = 2
+	collision_mask = 1
+	floor_snap_length = 1.1
+	floor_constant_speed = true
+
+	# Assign unique helper identity and deterministic color
+	helper_id = _next_worker_id
+	_next_worker_id += 1
+	helper_name = "Helper #%d" % helper_id
+	helper_color = HELPER_PALETTE[(helper_id - 1) % HELPER_PALETTE.size()]
+
+	# Apply identity color to VisorMesh accent (duplicate material to avoid shared mutation)
+	var visor_mesh: MeshInstance3D = get_node_or_null("MeshInstance3D/VisorMesh") as MeshInstance3D
+	if visor_mesh != null:
+		var orig_mat: Material = visor_mesh.get_active_material(0)
+		var new_mat: StandardMaterial3D = null
+		if orig_mat is StandardMaterial3D:
+			new_mat = (orig_mat as StandardMaterial3D).duplicate() as StandardMaterial3D
+		else:
+			new_mat = StandardMaterial3D.new()
+		new_mat.albedo_color = helper_color
+		new_mat.emission_enabled = true
+		new_mat.emission = helper_color
+		new_mat.emission_energy_multiplier = 2.5
+		visor_mesh.material_override = new_mat
+
+	if debug_label != null:
+		debug_label.modulate = helper_color
+		debug_label.visible = false
+
+	if line != null:
+		line.top_level = true
+		line.visible = false
+		if line.has_method("set_route_color"):
+			line.set_route_color(helper_color)
+		elif "line_color" in line:
+			line.line_color = helper_color
+
+	var mgr := _get_astar()
+	if mgr != null and mgr.has_signal("graph_rebuilt"):
+		if not mgr.graph_rebuilt.is_connected(_on_astar_graph_rebuilt):
+			mgr.graph_rebuilt.connect(_on_astar_graph_rebuilt)
+
+	floor_max_angle = deg_to_rad(51.0)
+	floor_snap_length = 1.1
+
+	# Stagger initial search timer to avoid all helpers searching simultaneously
+	_idle_timer = randf_range(0.2, 0.6) + (float(helper_id) * 0.15)
+	_home_position = global_position
+	_wander_cooldown = randf_range(2.5, 5.0) + (float(helper_id % 4) * 0.75)
+	_transition_to(State.IDLE)
+
+func _exit_tree() -> void:
+	_release_target_assignments()
+
+func _on_astar_graph_rebuilt() -> void:
+	# World geometry changed! Clear blacklist so previously blocked targets can be retried.
+	_blacklisted_targets.clear()
+	# Stagger/throttle replanning across helpers instead of all bots computing at once
+	if not _replan_pending:
+		_replan_pending = true
+		_replan_delay = randf_range(0.1, 0.3) + (float(helper_id % 6) * 0.12)
+
+# ---------------------------------------------------------------------------
+# AStar Helper & Route Management
+# ---------------------------------------------------------------------------
+func _get_astar() -> Node:
+	if _astar_mgr != null and is_instance_valid(_astar_mgr):
+		return _astar_mgr
+	var root: Node = get_tree().root if is_inside_tree() else null
+	if root != null:
+		var gw: Node = root.find_child("GameWorld", true, false)
+		if gw != null:
+			_astar_mgr = gw.get_node_or_null("AStarGridManager")
+			if _astar_mgr != null:
+				return _astar_mgr
+		_astar_mgr = root.find_child("AStarGridManager", true, false)
+	return _astar_mgr
+
+func _get_target_approach_tolerances(target_node: Node3D) -> Dictionary:
+	if target_node is ChoppingBlock:
+		return {
+			"half_extents": Vector2(0.58, 0.58),
+			"min_dist": 0.25,
+			"max_dist": 0.95,
+			"max_vert": 1.3,
+			"horiz_tol": 1.15,
+			"vert_tol": STATION_DEPOSIT_VERT_TOLERANCE
+		}
+	elif target_node is Pallet:
+		return {
+			"half_extents": Vector2(1.1, 1.1),
+			"min_dist": 0.3,
+			"max_dist": 1.05,
+			"max_vert": 1.3,
+			"horiz_tol": 1.25,
+			"vert_tol": STATION_DEPOSIT_VERT_TOLERANCE
+		}
+	else:
+		var he := Vector2(0.2, 0.2)
+		if target_node != null and is_instance_valid(target_node):
+			if target_node.is_in_group("logs"):
+				he = Vector2(0.5, 0.5)
+			elif target_node.is_in_group("planks"):
+				he = Vector2(0.4, 0.4)
+		return {
+			"half_extents": he,
+			"min_dist": 0.2,
+			"max_dist": 1.6,
+			"max_vert": 2.2,
+			"horiz_tol": 2.0,
+			"vert_tol": 2.2
+		}
+
+func _get_distance_to_station_edge(station: Node3D, pos: Vector3) -> float:
+	if station == null or not is_instance_valid(station):
+		return INF
+	var tol := _get_target_approach_tolerances(station)
+	var he: Vector2 = tol.get("half_extents", Vector2.ZERO)
+	if he == Vector2.ZERO:
+		return Vector2(pos.x - station.global_position.x, pos.z - station.global_position.z).length()
+	var dx := maxf(0.0, absf(pos.x - station.global_position.x) - he.x)
+	var dz := maxf(0.0, absf(pos.z - station.global_position.z) - he.y)
+	return Vector2(dx, dz).length()
+
+func _request_path(to: Vector3, target_node: Node3D = null) -> bool:
+	var mgr := _get_astar()
+	if mgr == null:
+		_destination = to
+		_approach_target_point = to
+		_current_path = PackedVector3Array([to])
+		_path_index = 0
+		_path_dirty = true
+		return true
+
+	var t_node: Node3D = target_node
+	if t_node == null:
+		if current_state == State.MOVING_TO_ITEM:
+			t_node = target_item
+		elif current_state == State.MOVING_TO_STATION:
+			t_node = target_station
+
+	var path: PackedVector3Array = PackedVector3Array()
+	if t_node != null and mgr.has_method("find_approach_path"):
+		var tol := _get_target_approach_tolerances(t_node)
+		path = mgr.find_approach_path(global_position, to, tol["min_dist"], tol["max_dist"], tol["max_vert"], tol.get("half_extents", Vector2.ZERO), _failed_approach_points)
+	elif mgr.has_method("find_approach_path"):
+		path = mgr.find_approach_path(global_position, to, 0.4, 1.3, 1.0, Vector2.ZERO, _failed_approach_points)
+
+	# Do not fall back to routing directly to an object's origin when find_approach_path() fails!
+	if path.is_empty():
+		_current_path = PackedVector3Array()
+		_path_index = 0
+		_destination = Vector3.INF
+		_approach_target_point = Vector3.INF
+		_path_dirty = true
+		var fail_stage := "No connected route"
+		if mgr != null and mgr.has_method("get_last_failure_reason"):
+			var r: String = mgr.get_last_failure_reason()
+			if not r.is_empty():
+				fail_stage = r
+		_set_status("[BLOCKED] Navigation failed: %s" % fail_stage, 2.0, false)
+		return false
+
+	var final_wp: Vector3 = path[path.size() - 1]
+	var v_dist: float = absf(final_wp.y - to.y)
+	if t_node != null:
+		var tol := _get_target_approach_tolerances(t_node)
+		var h_dist: float
+		if tol.get("half_extents", Vector2.ZERO) != Vector2.ZERO:
+			h_dist = _get_distance_to_station_edge(t_node, final_wp)
+		else:
+			h_dist = Vector2(final_wp.x - to.x, final_wp.z - to.z).length()
+
+		# Allow up to 2.2m downward vertical difference when bot approach point is above the item
+		var max_v_tol: float = 2.2 if final_wp.y >= to.y else float(tol["vert_tol"])
+		if h_dist > tol["horiz_tol"] or v_dist > max_v_tol:
+			_current_path = PackedVector3Array()
+			_path_index = 0
+			_destination = Vector3.INF
+			_approach_target_point = Vector3.INF
+			_path_dirty = true
+			return false
+
+	_current_path = path
+	# Destination is the reachable approach point beside the obstacle, NOT the inside of the object
+	_destination = final_wp
+	_approach_target_point = _destination
+	_path_index = 0
+	# If the first waypoint is already behind or very close to the bot, advance to 1
+	if _current_path.size() > 1:
+		var d0 := Vector2(global_position.x - _current_path[0].x, global_position.z - _current_path[0].z).length()
+		if d0 < WAYPOINT_REACH:
+			_path_index = 1
+	_path_dirty = true
+	return true
+
+func _has_valid_path() -> bool:
+	return _path_index < _current_path.size()
+
+func _current_waypoint() -> Vector3:
+	if _has_valid_path():
+		return _current_path[_path_index]
+	return _destination
+
+func _advance_waypoint() -> void:
+	_path_index += 1
+	_path_dirty = true
+
+# ---------------------------------------------------------------------------
+# Physics Loop
+# ---------------------------------------------------------------------------
+func _physics_process(delta: float) -> void:
+	if global_position.y < -50.0:
+		_release_target_assignments()
+		queue_free()
+		return
+
+	# Gravity — 2.5x multiplier to eliminate moon-gravity feel
+	if not is_on_floor():
+		velocity.y -= gravity * GRAVITY_MULTIPLIER * delta
+	else:
+		if velocity.y < 0.0:
+			velocity.y = -0.1
+
+	if _abort_cooldown > 0.0:
+		_abort_cooldown -= delta
+	if _status_hold_timer > 0.0:
+		_status_hold_timer -= delta
+	if _replan_pending:
+		_replan_delay -= delta
+		if _replan_delay <= 0.0:
+			_replan_pending = false
+			if current_state == State.MOVING_TO_ITEM and is_instance_valid(target_item):
+				_request_path(target_item.global_position, target_item)
+			elif current_state == State.MOVING_TO_STATION and is_instance_valid(target_station):
+				_request_path(target_station.global_position, target_station)
+
+	# Jump cooldown tick
+	if _jump_cooldown > 0.0:
+		_jump_cooldown -= delta
+
+	# Controlled jumping: detect upcoming one-block elevation transition and initiate takeoff early enough
+	if is_on_floor() and _has_valid_path() and _jump_cooldown <= 0.0:
+		var on_slope: bool = _is_on_ramp_or_walkable_slope()
+		if not on_slope:
+			var target_elevated_wp: Vector3 = Vector3.INF
+			var elev_y_diff: float = 0.0
+			var wp := _current_waypoint()
+			var y_diff_cur: float = wp.y - global_position.y
+			if y_diff_cur > JUMP_THRESHOLD and y_diff_cur <= 1.35:
+				target_elevated_wp = wp
+				elev_y_diff = y_diff_cur
+			elif _path_index + 1 < _current_path.size():
+				var nxt := _current_path[_path_index + 1]
+				var y_diff_nxt: float = nxt.y - global_position.y
+				if y_diff_nxt > JUMP_THRESHOLD and y_diff_nxt <= 1.35:
+					target_elevated_wp = nxt
+					elev_y_diff = y_diff_nxt
+
+			if target_elevated_wp != Vector3.INF:
+				var xz_to_elev: float = Vector2(global_position.x - target_elevated_wp.x, global_position.z - target_elevated_wp.z).length()
+				var dir_to_elev := Vector3(target_elevated_wp.x - global_position.x, 0.0, target_elevated_wp.z - global_position.z).normalized()
+				var horiz_vel := Vector3(velocity.x, 0.0, velocity.z)
+				var moving_towards: bool = (horiz_vel.length() < 0.5) or (horiz_vel.normalized().dot(dir_to_elev) > 0.25)
+
+				# Takeoff window: initiate jump when approaching ledge (between 0.45m and 1.45m) with forward movement
+				if moving_towards and xz_to_elev >= 0.45 and xz_to_elev <= 1.45:
+					if _has_jump_headroom() and _is_jump_landing_safe(target_elevated_wp):
+						if _path_index != _last_jump_waypoint_idx:
+							_last_jump_waypoint_idx = _path_index
+							_jump_count_at_waypoint = 0
+						_jump_count_at_waypoint += 1
+						if _jump_count_at_waypoint <= 2:
+							velocity.y = JUMP_VELOCITY
+							# Maintain/boost forward momentum in elevation direction during takeoff
+							velocity.x = dir_to_elev.x * move_speed
+							velocity.z = dir_to_elev.z * move_speed
+							_jump_cooldown = 0.65
+						else:
+							# Cannot clear obstacle after 2 jumps; trigger recovery instead of bouncing in place
+							_trigger_stuck_recovery("Obstacle too high / ledge blocked")
+
+	# State execution
+	match current_state:
+		State.IDLE:
+			if _is_wandering and _has_valid_path():
+				_wander_timer -= delta
+				if _wander_timer <= 0.0:
+					_stop_wandering()
+				else:
+					_follow_path(delta, 0.4)
+					if not _has_valid_path():
+						_stop_wandering()
+			else:
+				velocity.x = move_toward(velocity.x, 0.0, move_speed * delta * 5.0)
+				velocity.z = move_toward(velocity.z, 0.0, move_speed * delta * 5.0)
+
+			_idle_timer -= delta
+			if _idle_timer <= 0.0 and _abort_cooldown <= 0.0:
+				_process_search_job()
+
+			if not _is_wandering and not _has_any_cargo():
+				_wander_cooldown -= delta
+				if _wander_cooldown <= 0.0:
+					_try_idle_wander()
+
+		State.SEARCH_JOB:
+			velocity.x = move_toward(velocity.x, 0.0, move_speed * delta * 5.0)
+			velocity.z = move_toward(velocity.z, 0.0, move_speed * delta * 5.0)
+			_process_search_job()
+
+		State.MOVING_TO_ITEM:
+			_process_moving_to_item(delta)
+
+		State.PICKUP_ITEM:
+			velocity.x = 0.0
+			velocity.z = 0.0
+			_process_pickup_item()
+
+		State.MOVING_TO_STATION:
+			_process_moving_to_station(delta)
+
+		State.DEPOSIT_ITEM:
+			velocity.x = 0.0
+			velocity.z = 0.0
+			_process_deposit_item()
+
+	move_and_slide()
+
+	# Step-up: handle small bumps (up to 1.05m) smoothly without jumping; replan if blocked
+	if is_on_wall():
+		var wn := get_wall_normal()
+		# If the "wall" contact is actually an inclined floor/ramp surface, do not treat it as a blocking wall
+		if wn.y > 0.5 or _is_on_ramp_or_walkable_slope():
+			_wall_stuck_timer = 0.0
+		else:
+			var horiz_vel := Vector2(velocity.x, velocity.z)
+			if horiz_vel.length_squared() > 0.01:
+				var move_dir := Vector3(velocity.x, 0.0, velocity.z).normalized()
+				var stepped: bool = _try_step_up(move_dir)
+				if not stepped and _has_valid_path():
+					_wall_stuck_timer += delta
+					if _wall_stuck_timer >= 0.4:
+						_wall_stuck_timer = 0.0
+						_trigger_stuck_recovery("Path obstructed by wall/obstacle")
+				else:
+					_wall_stuck_timer = 0.0
+			else:
+				_wall_stuck_timer = 0.0
+	else:
+		_wall_stuck_timer = 0.0
+
+func _get_direct_space_state() -> PhysicsDirectSpaceState3D:
+	if not is_inside_tree():
+		return null
+	var world := get_world_3d()
+	if world == null or not world.space.is_valid():
+		return null
+	return world.direct_space_state
+
+func _has_jump_headroom() -> bool:
+	var space := _get_direct_space_state()
+	if space == null:
+		return false
+	var ray := PhysicsRayQueryParameters3D.create(
+		global_position + Vector3(0.0, 1.0, 0.0),
+		global_position + Vector3(0.0, 2.2, 0.0)
+	)
+	ray.collision_mask = collision_mask
+	ray.exclude = [get_rid()]
+	if space == null:
+		return false
+	return space.intersect_ray(ray).is_empty()
+
+func _is_jump_landing_safe(landing_pos: Vector3) -> bool:
+	if not is_inside_tree():
+		return true
+	var space := _get_direct_space_state()
+	if space == null:
+		return true
+
+	# Ground support check: verify floor exists at landing waypoint
+	var ray_from := landing_pos + Vector3(0.0, 0.5, 0.0)
+	var ray_to := landing_pos - Vector3(0.0, 1.4, 0.0)
+	var ray := PhysicsRayQueryParameters3D.create(ray_from, ray_to, collision_mask)
+	ray.exclude = [get_rid()]
+	var hit := space.intersect_ray(ray)
+	if hit.is_empty():
+		return false
+
+	# Headroom clearance check at landing spot
+	var head_from := landing_pos + Vector3(0.0, 0.5, 0.0)
+	var head_to := landing_pos + Vector3(0.0, 1.8, 0.0)
+	var head_ray := PhysicsRayQueryParameters3D.create(head_from, head_to, collision_mask)
+	head_ray.exclude = [get_rid()]
+	return space.intersect_ray(head_ray).is_empty()
+
+func _is_ground_ahead_safe(move_dir: Vector3) -> bool:
+	if not is_inside_tree() or not is_on_floor():
+		return true
+	var space := _get_direct_space_state()
+	if space == null:
+		return true
+
+	# Probe floor 0.45m ahead in movement direction
+	var probe_ahead := global_position + (move_dir.normalized() * 0.45)
+	# Start ray high enough (+0.9m) so upward ramps (rising up to 0.45m ahead) do not entrap the ray inside the mesh
+	var ray_from := probe_ahead + Vector3(0.0, 0.9, 0.0)
+	var ray_to := probe_ahead - Vector3(0.0, 1.8, 0.0)
+	var ray := PhysicsRayQueryParameters3D.create(ray_from, ray_to, collision_mask)
+	ray.hit_from_inside = true
+	ray.exclude = [get_rid()]
+	var hit := space.intersect_ray(ray)
+	if hit.is_empty():
+		return false
+	if hit.position.y < global_position.y - 1.4:
+		return false
+	return true
+
+func _is_on_ramp_or_walkable_slope() -> bool:
+	if is_on_floor():
+		var fn := get_floor_normal()
+		if fn.y > 0.45 and fn.y < 0.95:
+			return true
+	var mgr := _get_astar()
+	if mgr != null and mgr.has_method("is_walkable_slope_at"):
+		if mgr.is_walkable_slope_at(global_position):
+			return true
+		var wp := _current_waypoint()
+		if wp != Vector3.INF and mgr.is_walkable_slope_at(wp):
+			return true
+		if _path_index + 1 < _current_path.size():
+			if mgr.is_walkable_slope_at(_current_path[_path_index + 1]):
+				return true
+	return false
+
+func _try_step_up(move_dir: Vector3) -> bool:
+	if not is_inside_tree() or not is_on_floor():
+		return false
+	var space := _get_direct_space_state()
+	if space == null:
+		return false
+
+	# Probe forward at step height to find ground ledge/slope ahead
+	var probe_dist: float = 0.35
+	var probe_pos := global_position + (move_dir.normalized() * probe_dist)
+	var check_high := probe_pos + Vector3(0.0, 0.45, 0.0)
+	var check_low := probe_pos - Vector3(0.0, 0.2, 0.0)
+	var floor_params := PhysicsRayQueryParameters3D.create(check_high, check_low)
+	floor_params.exclude = [get_rid()]
+	floor_params.collision_mask = collision_mask
+	var floor_hit := space.intersect_ray(floor_params)
+	if floor_hit.is_empty():
+		return false
+
+	var floor_pos: Vector3 = floor_hit.position
+	var step_y: float = floor_pos.y - global_position.y
+	if step_y > 0.02 and step_y <= 0.45:
+		# Headroom check at destination
+		var head_high: Vector3 = floor_pos + Vector3(0.0, 1.45, 0.0)
+		var head_params := PhysicsRayQueryParameters3D.create(floor_pos + Vector3(0.0, 0.1, 0.0), head_high)
+		head_params.exclude = [get_rid()]
+		head_params.collision_mask = collision_mask
+		if space.intersect_ray(head_params).is_empty():
+			global_position.y += step_y + 0.02
+			velocity.y = 0.0
+			return true
+
+	return false
+
+# ---------------------------------------------------------------------------
+# Debug & F3 Overlay Visuals
+# ---------------------------------------------------------------------------
+func _process(delta: float) -> void:
+	if _debug_line_hold_timer > 0.0:
+		_debug_line_hold_timer -= delta
+
+	var debug_on: bool = _is_debug_overlay_active()
+
+	if debug_label != null:
+		debug_label.visible = debug_on
+		if debug_on:
+			debug_label.text = "[%s] %s" % [helper_name, _status_text]
+
+	# Display route lines while actively moving or when holding visualization after route failure
+	var is_actively_pathing: bool = (
+		(current_state == State.MOVING_TO_ITEM or current_state == State.MOVING_TO_STATION or (current_state == State.IDLE and _is_wandering))
+		and _has_valid_path()
+	) or (_debug_line_hold_timer > 0.0 and line != null and "points" in line and not (line.points as PackedVector3Array).is_empty())
+
+	if line != null:
+		if debug_on and is_actively_pathing:
+			line.visible = true
+			var moved_line_dist := global_position.distance_to(_last_line_worker_pos)
+			if _path_dirty or moved_line_dist > 0.4:
+				_update_debug_line()
+		else:
+			if line.visible and _debug_line_hold_timer <= 0.0:
+				line.visible = false
+				if "points" in line:
+					line.points = PackedVector3Array()
+
+func _clear_route_line(force: bool = false) -> void:
+	_current_path = PackedVector3Array()
+	_path_index = 0
+	_destination = Vector3.INF
+	_approach_target_point = Vector3.INF
+	_path_dirty = true
+	if line != null and (force or _debug_line_hold_timer <= 0.0):
+		line.visible = false
+		if "points" in line:
+			line.points = PackedVector3Array()
+
+func _update_debug_line() -> void:
+	if line == null:
+		return
+	var pts: PackedVector3Array = PackedVector3Array()
+	# Start at bot's current position
+	pts.append(global_position + Vector3(0.0, 0.25, 0.0))
+	# Append each remaining waypoint in the AStar path
+	for i in range(_path_index, _current_path.size()):
+		pts.append(_current_path[i] + Vector3(0.0, 0.25, 0.0))
+
+	line.points = pts
+	_last_line_worker_pos = global_position
+	_path_dirty = false
+
+func _is_debug_overlay_active() -> bool:
+	var overlay: Node = get_tree().root.find_child("DebugOverlay", true, false)
+	if overlay != null and overlay is CanvasLayer:
+		return (overlay as CanvasLayer).visible
+	var hud: Node = get_tree().root.find_child("BuildHUD", true, false)
+	if hud != null:
+		var v = hud.get("_debug_visible")
+		if v != null:
+			return bool(v)
+	var player_node: Node = get_tree().root.find_child("Player", true, false)
+	if player_node != null:
+		var v = player_node.get("_debug_overlay_enabled")
+		if v != null:
+			return bool(v)
+	return false
+
+# ---------------------------------------------------------------------------
+# Status Management & Readable Hold Timers
+# ---------------------------------------------------------------------------
+func _set_status(text: String, hold_duration: float = 0.0, force: bool = false) -> void:
+	if force or _status_hold_timer <= 0.0:
+		_status_text = text
+		if hold_duration > 0.0:
+			_status_hold_timer = hold_duration
+		if debug_label != null:
+			debug_label.text = "[%s] %s" % [helper_name, _status_text]
+
+func _transition_to(new_state: State) -> void:
+	current_state = new_state
+	match current_state:
+		State.IDLE:
+			if not _is_wandering:
+				_clear_route_line()
+				_home_position = global_position
+			if _status_hold_timer <= 0.0:
+				if not _has_any_cargo():
+					_set_status("[IDLE] Waiting for work...", 0.0, false)
+				else:
+					_set_status("[IDLE] Waiting for station for %s..." % carried_material, 0.0, false)
+		State.SEARCH_JOB:
+			_clear_route_line()
+			if _status_hold_timer <= 0.0:
+				_set_status("[SEARCHING] Scanning for resources...", 0.0, false)
+		State.MOVING_TO_ITEM:
+			if is_instance_valid(target_item):
+				var d: float = global_position.distance_to(target_item.global_position)
+				_set_status("[COLLECTING] Moving to %s (%.1fm)" % [target_item.name, d], 0.0, true)
+		State.PICKUP_ITEM:
+			_clear_route_line()
+			_set_status("[COLLECTING] Picking up %s..." % carried_material, 0.0, true)
+		State.MOVING_TO_STATION:
+			if is_instance_valid(target_station):
+				var d: float = Vector2(global_position.x - target_station.global_position.x, global_position.z - target_station.global_position.z).length()
+				_set_status("[CARRYING] Transporting %d %s(s) to %s (%.1fm)" % [_get_cargo_count(), carried_material, target_station.name, d], 0.0, true)
+		State.DEPOSIT_ITEM:
+			_clear_route_line()
+			if is_instance_valid(target_station):
+				_set_status("[DELIVERING] Depositing %d %s(s) at %s..." % [_get_cargo_count(), carried_material, target_station.name], 0.0, true)
+			else:
+				_set_status("[DELIVERING] Depositing %d item(s)..." % _get_cargo_count(), 0.0, true)
+
+# ---------------------------------------------------------------------------
+# Job Search & Destination Validation
+# ---------------------------------------------------------------------------
+func _process_search_job() -> void:
+	if _abort_cooldown > 0.0:
+		_transition_to(State.IDLE)
+		return
+
+	# Global search concurrency throttle: stagger full candidate evaluations across workers
+	var cur_f := Engine.get_physics_frames()
+	if _last_search_frame != cur_f:
+		_last_search_frame = cur_f
+		_active_searches_in_frame = 0
+
+	if _active_searches_in_frame >= MAX_SEARCHES_PER_FRAME:
+		_idle_timer = 0.05 + (float(helper_id % 3) * 0.03)
+		_transition_to(State.IDLE)
+		return
+
+	_active_searches_in_frame += 1
+
+	# Priority 1: If carrying cargo, always find a destination station first
+	if _has_any_cargo():
+		_go_to_station_or_idle(carried_material)
+		return
+
+	# 1. Search for nearest unassigned Log or Plank with a valid destination
+	var candidates: Array[Node3D] = _get_filtered_candidates(["logs", "planks"])
+	# 2. If no logs/planks, search for loose Fragments
+	if candidates.is_empty():
+		candidates = _get_filtered_candidates(["fragments"])
+
+	if candidates.is_empty():
+		if _status_hold_timer <= 0.0:
+			_set_status("[IDLE] Waiting for work...", 0.0)
+		_idle_timer = randf_range(0.35, 0.65) + (float(helper_id % 4) * 0.1)
+		_transition_to(State.IDLE)
+		return
+
+	# Evaluate multiple nearby candidates rather than abandoning search on first failure
+	var max_to_eval: int = mini(5, candidates.size())
+	var astar_mgr := _get_astar()
+	var any_chunk_requested: bool = false
+	var last_failure_reason: String = ""
+
+	for i in range(max_to_eval):
+		var item: Node3D = candidates[i]
+		if not is_instance_valid(item) or item.is_queued_for_deletion():
+			continue
+		var mat: String = _resolve_item_material(item)
+
+		# If outside baked graph, request chunk baking and check remaining candidates
+		if astar_mgr != null and astar_mgr.has_method("is_position_in_baked_graph"):
+			if not astar_mgr.is_position_in_baked_graph(item.global_position):
+				if astar_mgr.has_method("request_chunk_for_position"):
+					astar_mgr.request_chunk_for_position(item.global_position)
+				any_chunk_requested = true
+				continue
+
+		var station := _find_nearest_station_for_material(mat, -1, false)
+		if station == null:
+			last_failure_reason = "No compatible station for %s" % mat
+			_blacklist_target(item, 2.0)
+			continue
+
+		_failed_approach_points.clear()
+		var path_ok: bool = _request_path(item.global_position, item)
+		if path_ok:
+			_stop_wandering()
+			target_item = item
+			target_item.set_meta("worker_reserved_by", self)
+			target_item.set_meta("worker_assigned", true)
+			_last_target_pos = target_item.global_position
+			_target_repath_cooldown = 0.0
+			_rolling_settle_timer = 0.0
+			_recovery_attempts = 0
+			_stuck_timer = 0.0
+			_last_stuck_check_pos = global_position
+			_build_collection_cluster(candidates, mat)
+			_transition_to(State.MOVING_TO_ITEM)
+			return
+		else:
+			var fail_stage := "Path blocked"
+			if astar_mgr != null and astar_mgr.has_method("get_last_failure_reason"):
+				var r: String = astar_mgr.get_last_failure_reason()
+				if not r.is_empty():
+					fail_stage = r
+			last_failure_reason = "%s to %s" % [fail_stage, item.name]
+			_blacklist_target(item, TARGET_BLACKLIST_COOLDOWN)
+
+	if any_chunk_requested:
+		_idle_timer = 0.4
+		_transition_to(State.IDLE)
+		return
+
+	if not last_failure_reason.is_empty():
+		_set_status("[IDLE: NO_WORK] " + last_failure_reason, 2.0)
+	elif _status_hold_timer <= 0.0:
+		_set_status("[IDLE] Waiting for work...", 0.0)
+	_idle_timer = randf_range(0.3, 0.6)
+	_transition_to(State.IDLE)
+
+func _has_any_compatible_station_for(mat: String) -> bool:
+	var now: int = Time.get_ticks_msec()
+	if now - _shared_station_exists_time < 400 and _shared_station_exists.has(mat):
+		return bool(_shared_station_exists[mat])
+
+	var exists: bool = false
+	var stations := _get_all_stations(get_tree())
+	for st in stations:
+		if is_instance_valid(st) and not _is_target_blacklisted(st):
+			if _can_station_accept_material(st, mat, 1):
+				exists = true
+				break
+
+	_shared_station_exists_time = now
+	_shared_station_exists[mat] = exists
+	return exists
+
+func _get_filtered_candidates(group_names: Array, same_type: String = "") -> Array[Node3D]:
+	var best_dist_sq: float = search_radius * search_radius
+	var candidate_list: Array[Dictionary] = []
+	var station_exists_cache: Dictionary = {}
+
+	for grp in group_names:
+		var nodes: Array = _get_cached_nodes_in_group(get_tree(), grp)
+		for node in nodes:
+			if not (node is Node3D) or not is_instance_valid(node):
+				continue
+			if node.is_queued_for_deletion():
+				continue
+			if node.get_parent() is Marker3D:
+				continue
+
+			# Fast early distance rejection before metadata and material lookups
+			var dist_sq: float = global_position.distance_squared_to(node.global_position)
+			if dist_sq >= best_dist_sq:
+				continue
+
+			# Respect per-worker reservations & clear stale ghost assignments
+			var res_worker = node.get_meta("worker_reserved_by") if node.has_meta("worker_reserved_by") else null
+			if res_worker != null:
+				if not is_instance_valid(res_worker) or not (res_worker is Node and (res_worker as Node).is_inside_tree()):
+					node.set_meta("worker_reserved_by", null)
+					node.set_meta("worker_assigned", false)
+				elif res_worker != self:
+					continue
+			elif node.has_meta("worker_assigned"):
+				if bool(node.get_meta("worker_assigned")) and node != target_item:
+					# Clean up stale unowned reservation
+					node.set_meta("worker_assigned", false)
+
+			var is_vac: bool = false
+			if node.has_meta("vacuum_pull"):
+				is_vac = bool(node.get_meta("vacuum_pull"))
+			var is_craft: bool = false
+			if node.has_meta("pallet_craft_block"):
+				is_craft = bool(node.get_meta("pallet_craft_block"))
+			if is_vac or is_craft:
+				continue
+			if node is RigidBody3D and (node as RigidBody3D).freeze and not node.is_in_group("fragments"):
+				continue
+			if _is_target_blacklisted(node):
+				continue
+
+			var mat: String = _resolve_item_material(node)
+			if not same_type.is_empty() and mat != same_type:
+				continue
+
+			# Zero-value visual fragments: ignore for collection
+			if node.is_in_group("fragments"):
+				var rv: int = _get_item_resource_value(node)
+				if rv <= 0:
+					continue
+
+			# Fast broad check: ensure a destination station exists (cached per material)
+			if not _has_any_cargo():
+				if not station_exists_cache.has(mat):
+					station_exists_cache[mat] = _has_any_compatible_station_for(mat)
+				if not station_exists_cache[mat]:
+					continue
+
+			candidate_list.append({"node": node, "dist_sq": dist_sq})
+
+	if candidate_list.is_empty():
+		return []
+
+	candidate_list.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return a["dist_sq"] < b["dist_sq"]
+	)
+
+	var result: Array[Node3D] = []
+	for c in candidate_list:
+		result.append(c["node"])
+	return result
+
+func _build_collection_cluster(candidates: Array[Node3D], mat: String) -> void:
+	_collection_cluster.clear()
+	if target_item == null or not is_instance_valid(target_item) or target_item.is_queued_for_deletion():
+		return
+	var origin: Vector3 = target_item.global_position
+	var cluster_candidates: Array[Dictionary] = []
+	var max_to_add: int = _get_max_capacity(mat) - 1
+
+	for node in candidates:
+		if node == target_item or not is_instance_valid(node) or node.is_queued_for_deletion():
+			continue
+		if _resolve_item_material(node) != mat:
+			continue
+		var d_sq := origin.distance_squared_to(node.global_position)
+		if d_sq <= 256.0:  # Within 16m cluster
+			cluster_candidates.append({"id": node.get_instance_id(), "dist_sq": d_sq})
+
+	cluster_candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return a["dist_sq"] < b["dist_sq"]
+	)
+
+	for i in range(mini(max_to_add, cluster_candidates.size())):
+		_collection_cluster.append(cluster_candidates[i]["id"])
+
+func _find_best_candidate_item(group_names: Array, same_type: String = "") -> Node3D:
+	var candidates: Array[Node3D] = _get_filtered_candidates(group_names, same_type)
+	if candidates.is_empty():
+		return null
+	return candidates[0]
+
+func _has_any_cargo() -> bool:
+	return not carried_items.is_empty() or not fragment_bag.is_empty()
+
+func _get_cargo_count() -> int:
+	if not fragment_bag.is_empty():
+		var total: int = 0
+		for mat in fragment_bag:
+			total += int(fragment_bag[mat])
+		return total
+	return carried_items.size()
+
+func _get_carried_resource_value() -> int:
+	if not fragment_bag.is_empty():
+		var total_frag: int = 0
+		for mat in fragment_bag:
+			total_frag += int(fragment_bag[mat])
+		return maxi(total_frag, 1)
+	if carried_items.is_empty():
+		return 1
+	if carried_material == "log":
+		return carried_items.size()
+	if carried_material == "plank":
+		return carried_items.size()
+	var total: int = 0
+	for item in carried_items:
+		if is_instance_valid(item):
+			total += _get_item_resource_value(item)
+	return maxi(total, 1)
+
+func _can_station_accept_material(station: Node3D, mat: String, amount: int = -1) -> bool:
+	if station == null or not is_instance_valid(station) or station.is_queued_for_deletion():
+		return false
+	if amount <= 0:
+		amount = _get_carried_resource_value()
+
+	if station is ChoppingBlock:
+		if mat != "log":
+			return false
+		var cb := station as ChoppingBlock
+		if cb.has_method("can_accept_log"):
+			return cb.can_accept_log(self)
+		if cb.has_log:
+			return false
+		var rw = cb.reserved_worker if "reserved_worker" in cb else null
+		if rw != null and is_instance_valid(rw) and rw != self:
+			return false
+		return true
+	elif station is Pallet:
+		var pallet := station as Pallet
+		if pallet.has_method("can_accept_material"):
+			return pallet.can_accept_material(mat, amount, self)
+		if pallet.get("_auto_converted") == true:
+			return false
+		var assigned: String = pallet.assigned_material
+		if not assigned.is_empty() and not pallet._materials_compatible(mat, assigned):
+			return false
+		return true
+	return false
+
+func _get_candidate_stations_for_material(mat: String, amount: int = -1) -> Array[Node3D]:
+	if amount <= 0:
+		amount = _get_carried_resource_value()
+
+	var result: Array[Node3D] = []
+	var stations := _get_all_stations(get_tree())
+	var cb_candidates: Array[Dictionary] = []
+	var matching_pallet_candidates: Array[Dictionary] = []
+	var empty_pallet_candidates: Array[Dictionary] = []
+
+	for station in stations:
+		if not is_instance_valid(station) or station.is_queued_for_deletion():
+			continue
+		if _is_target_blacklisted(station):
+			continue
+		if not _can_station_accept_material(station, mat, amount):
+			continue
+		var d_sq: float = global_position.distance_squared_to(station.global_position)
+		if station is ChoppingBlock and mat == "log":
+			cb_candidates.append({"station": station, "dist_sq": d_sq})
+		elif station is Pallet:
+			var pallet := station as Pallet
+			var eff_mat: String = pallet.get_effective_assigned_material() if pallet.has_method("get_effective_assigned_material") else pallet.assigned_material
+			var has_matching: bool = (not eff_mat.is_empty()) and pallet._materials_compatible(mat, eff_mat)
+			if has_matching:
+				matching_pallet_candidates.append({"station": station, "dist_sq": d_sq})
+			else:
+				empty_pallet_candidates.append({"station": station, "dist_sq": d_sq})
+
+	if not cb_candidates.is_empty():
+		cb_candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+			return a["dist_sq"] < b["dist_sq"]
+		)
+		for cand in cb_candidates:
+			result.append(cand["station"])
+
+	matching_pallet_candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return a["dist_sq"] < b["dist_sq"]
+	)
+	empty_pallet_candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return a["dist_sq"] < b["dist_sq"]
+	)
+
+	# Prefer matching pallets over empty pallets when within sensible distance (~25m extra travel or within 45m)
+	if not matching_pallet_candidates.is_empty() and not empty_pallet_candidates.is_empty():
+		var best_match_d: float = sqrt(matching_pallet_candidates[0]["dist_sq"])
+		var best_empty_d: float = sqrt(empty_pallet_candidates[0]["dist_sq"])
+		if best_match_d <= 45.0 and (best_match_d <= best_empty_d + 25.0):
+			for cand in matching_pallet_candidates:
+				result.append(cand["station"])
+			for cand in empty_pallet_candidates:
+				result.append(cand["station"])
+		else:
+			for cand in empty_pallet_candidates:
+				result.append(cand["station"])
+			for cand in matching_pallet_candidates:
+				result.append(cand["station"])
+	elif not matching_pallet_candidates.is_empty():
+		for cand in matching_pallet_candidates:
+			result.append(cand["station"])
+	elif not empty_pallet_candidates.is_empty():
+		for cand in empty_pallet_candidates:
+			result.append(cand["station"])
+
+	return result
+
+func _find_nearest_station_for_material(mat: String, amount: int = -1, check_full_route: bool = true) -> Node3D:
+	var astar_mgr := _get_astar()
+	var candidates: Array[Node3D] = _get_candidate_stations_for_material(mat, amount)
+	for station in candidates:
+		if check_full_route:
+			if astar_mgr != null and astar_mgr.has_method("find_approach_path"):
+				var tol := _get_target_approach_tolerances(station)
+				var p: PackedVector3Array = astar_mgr.find_approach_path(global_position, station.global_position, tol["min_dist"], tol["max_dist"], tol["max_vert"], tol.get("half_extents", Vector2.ZERO))
+				if p.is_empty():
+					continue
+				var final_pt: Vector3 = p[p.size() - 1]
+				var f_h: float
+				if tol.get("half_extents", Vector2.ZERO) != Vector2.ZERO:
+					f_h = _get_distance_to_station_edge(station, final_pt)
+				else:
+					f_h = Vector2(final_pt.x - station.global_position.x, final_pt.z - station.global_position.z).length()
+				var f_v: float = absf(final_pt.y - station.global_position.y)
+				if f_h > tol["horiz_tol"] or f_v > tol["vert_tol"]:
+					continue
+		return station
+	return null
+
+# ---------------------------------------------------------------------------
+# Movement & Stuck Monitoring
+# ---------------------------------------------------------------------------
+func _process_moving_to_item(delta: float) -> void:
+	if target_item == null or not is_instance_valid(target_item) or target_item.is_queued_for_deletion():
+		_cancel_job("Target item lost!")
+		return
+	if target_item.get_parent() is Marker3D and target_item.get_parent() != carrier_marker:
+		_cancel_job("Target taken by player/worker!")
+		return
+
+	if _target_repath_cooldown > 0.0:
+		_target_repath_cooldown -= delta
+
+	var target_pos: Vector3 = target_item.global_position
+	var is_rolling := (target_item is RigidBody3D) and ((target_item as RigidBody3D).linear_velocity.length_squared() > 0.04)
+
+	var horiz_dist: float = Vector2(global_position.x - target_pos.x, global_position.z - target_pos.z).length()
+	var vert_dist: float = absf(global_position.y - target_pos.y)
+	var y_diff_item: float = global_position.y - target_pos.y
+	var vert_ok: bool = (y_diff_item >= -1.4 and y_diff_item <= 2.2)
+
+	_set_status("[COLLECTING] Moving to %s (%.1fm)" % [target_item.name, horiz_dist], 0.0)
+
+	# Proximity damping for rolling bodies: help rolling items settle naturally when near
+	if horiz_dist <= 2.5 and vert_dist <= 1.8 and (target_item is RigidBody3D):
+		var rb := target_item as RigidBody3D
+		if not rb.freeze and not rb.sleeping:
+			var spd := rb.linear_velocity.length()
+			if spd > 0.02 and spd < 4.0:
+				rb.linear_velocity = rb.linear_velocity.move_toward(Vector3.ZERO, delta * 4.5)
+				rb.angular_velocity = rb.angular_velocity.move_toward(Vector3.ZERO, delta * 5.0)
+
+	# Arrival verification: confirm actual interaction limits and physical line of access
+	var in_pickup_range: bool = (horiz_dist <= 2.0) and vert_ok
+	if in_pickup_range:
+		if _is_item_physically_reachable(target_item):
+			var rb_speed: float = (target_item as RigidBody3D).linear_velocity.length() if (target_item is RigidBody3D) else 0.0
+			if rb_speed < 0.6:
+				_transition_to(State.PICKUP_ITEM)
+				return
+			else:
+				# Allow rolling item a brief settle window before picking up
+				_rolling_settle_timer += delta
+				if _rolling_settle_timer >= 0.8:
+					_rolling_settle_timer = 0.0
+					_transition_to(State.PICKUP_ITEM)
+					return
+		else:
+			_rolling_settle_timer = 0.0
+	else:
+		_rolling_settle_timer = 0.0
+
+	# Dynamic target tracking: update destination and replan without restarting the route unnecessarily
+	var target_moved_dist_sq: float = target_pos.distance_squared_to(_last_target_pos)
+	if target_moved_dist_sq > 0.64 and _target_repath_cooldown <= 0.0:
+		_target_repath_cooldown = 0.4
+		_last_target_pos = target_pos
+
+		if horiz_dist <= 3.0 and vert_ok and _is_item_physically_reachable(target_item):
+			# Close range pursuit: steer directly towards target approach point
+			_destination = target_pos
+			_approach_target_point = target_pos
+			_current_path = PackedVector3Array([target_pos])
+			_path_index = 0
+			_path_dirty = true
+		elif target_moved_dist_sq < 4.0 and _has_valid_path() and (_current_path.size() - _path_index) > 1:
+			# Minor displacement en route: update destination without resetting progress
+			_destination = target_pos
+			_approach_target_point = target_pos
+			_current_path[_current_path.size() - 1] = target_pos
+			_path_dirty = true
+		else:
+			# Substantial displacement: replan approach path smoothly
+			var repath_ok := _request_path(target_pos, target_item)
+			if not repath_ok and not is_rolling:
+				_cancel_job("Path blocked to moved item!")
+				return
+
+	# Handle end of path waypoints
+	if not _has_valid_path():
+		if in_pickup_range and _is_item_physically_reachable(target_item):
+			_transition_to(State.PICKUP_ITEM)
+			return
+		elif horiz_dist <= 2.6 and vert_ok and _is_item_physically_reachable(target_item):
+			# Fine approach: step closer toward visible target at controlled speed
+			var approach_dir := (target_pos - global_position)
+			approach_dir.y = 0.0
+			if approach_dir.length_squared() > 0.01:
+				velocity.x = approach_dir.normalized().x * (move_speed * 0.6)
+				velocity.z = approach_dir.normalized().z * (move_speed * 0.6)
+				return
+		elif horiz_dist <= 3.0 and is_rolling and _rolling_settle_timer < 1.0:
+			_rolling_settle_timer += delta
+			return
+		else:
+			if _recovery_attempts < MAX_RECOVERY_ATTEMPTS:
+				_trigger_stuck_recovery("Fine-tuning approach to item")
+				return
+			else:
+				_trigger_stuck_recovery("Item unreachable at approach point")
+				return
+
+	_monitor_stuck_progress(delta)
+	_follow_path(delta)
+
+func _is_item_physically_reachable(item: Node3D) -> bool:
+	if item == null or not is_inside_tree() or not is_instance_valid(item) or item.is_queued_for_deletion():
+		return false
+	var space := _get_direct_space_state()
+	if space == null:
+		return false
+
+	var excludes: Array[RID] = [get_rid()]
+	if item is CollisionObject3D:
+		excludes.append((item as CollisionObject3D).get_rid())
+	for child in item.get_children():
+		if child is CollisionObject3D:
+			excludes.append((child as CollisionObject3D).get_rid())
+
+	# 1. Try direct line of sight from helper's torso/hands to item center
+	var from_chest := global_position + Vector3(0.0, 0.75, 0.0)
+	var to_center := item.global_position + Vector3(0.0, 0.2, 0.0)
+	var direct_ray := PhysicsRayQueryParameters3D.create(from_chest, to_center, 1)  # Mask 1 = solid terrain/structures
+	direct_ray.exclude = excludes
+	var direct_hit := space.intersect_ray(direct_ray)
+	if direct_hit.is_empty():
+		return true
+
+	# If the hit was the station or resting surface (e.g. Pallet, ChoppingBlock)
+	# only treat as accessible if the item is actually resting on the station within reach,
+	# rather than on the opposite side of the station structure!
+	var hit_col = direct_hit.get("collider", null)
+	if hit_col is Pallet or hit_col is ChoppingBlock:
+		if direct_hit.position.distance_to(to_center) <= 0.65:
+			return true
+		return false
+	if direct_hit.position.distance_to(to_center) <= 0.45:
+		return true
+
+	# 2. If direct ray hit terrain, test if this is a reach-over-step scenario:
+	# Ray from helper's chest outward to reach height above the item, then down to the item.
+	# This allows reaching down (or up) a step while blocking items behind actual walls or through solid floors.
+	var high_y: float = maxf(global_position.y + 0.75, item.global_position.y + 0.5)
+	var reach_above := Vector3(item.global_position.x, high_y, item.global_position.z)
+
+	var ray1 := PhysicsRayQueryParameters3D.create(from_chest, reach_above, 1)
+	ray1.exclude = excludes
+	var hit1 := space.intersect_ray(ray1)
+	if hit1.is_empty():
+		var ray2 := PhysicsRayQueryParameters3D.create(reach_above, to_center, 1)
+		ray2.exclude = excludes
+		var hit2 := space.intersect_ray(ray2)
+		if hit2.is_empty():
+			return true
+
+	# 3. Near-field ground touch: If helper is very close horizontally (<= 1.2m) and within 1.5m vertically,
+	# check if the obstruction was merely the ground surface near helper's feet (hit position is below helper's waist).
+	var h_dist := Vector2(global_position.x - item.global_position.x, global_position.z - item.global_position.z).length()
+	var v_diff := absf(global_position.y - item.global_position.y)
+	if h_dist <= 1.2 and v_diff <= 1.5:
+		if direct_hit.position.y <= global_position.y + 0.15:
+			var eye_from := global_position + Vector3(0.0, 1.2, 0.0)
+			var eye_to := item.global_position + Vector3(0.0, 1.2, 0.0)
+			var wall_ray := PhysicsRayQueryParameters3D.create(eye_from, eye_to, 1)
+			wall_ray.exclude = excludes
+			if space.intersect_ray(wall_ray).is_empty():
+				return true
+
+	# 4. Step-down reach check: If helper is on a ledge/step above the item (down to 2.2m below helper feet),
+	# cast from helper waist shifted forward towards item to clear floor edges
+	var y_step: float = global_position.y - item.global_position.y
+	if y_step >= -0.2 and y_step <= 2.2:
+		if h_dist <= 2.2:
+			var fwd_dir := (item.global_position - global_position)
+			fwd_dir.y = 0.0
+			var fwd_offset := fwd_dir.normalized() * 0.35 if fwd_dir.length_squared() > 0.01 else Vector3.ZERO
+			var waist_from := global_position + Vector3(0.0, 0.45, 0.0) + fwd_offset
+			var step_ray := PhysicsRayQueryParameters3D.create(waist_from, to_center, 1)
+			step_ray.exclude = excludes
+			var step_hit := space.intersect_ray(step_ray)
+			if step_hit.is_empty() or step_hit.position.distance_squared_to(item.global_position) < 0.35:
+				return true
+
+	return false
+
+func _is_station_physically_reachable(station: Node3D) -> bool:
+	if station == null or not is_inside_tree() or not is_instance_valid(station) or station.is_queued_for_deletion():
+		return false
+	var space := _get_direct_space_state()
+	if space == null:
+		return false
+
+	# Ray travels at an interaction height above terrain to avoid floor clipping
+	var from_pt := global_position + Vector3(0.0, 0.85, 0.0)
+	var target_y_offset: float = 0.55 if (station is Pallet) else 0.65
+	var to_pt := station.global_position + Vector3(0.0, target_y_offset, 0.0)
+	var ray := PhysicsRayQueryParameters3D.create(from_pt, to_pt, 1)  # Mask 1 = solid terrain/structures
+
+	var excludes: Array[RID] = [get_rid()]
+	if station is CollisionObject3D:
+		excludes.append((station as CollisionObject3D).get_rid())
+	for child in station.get_children():
+		if child is CollisionObject3D:
+			excludes.append((child as CollisionObject3D).get_rid())
+	ray.exclude = excludes
+
+	if space == null:
+		return false
+	var hit := space.intersect_ray(ray)
+	if hit.is_empty():
+		return true
+	var hit_col = hit.get("collider", null)
+	if hit_col == station or (hit_col is Node and (hit_col as Node).get_parent() == station):
+		return true
+	if hit.position.distance_to(to_pt) <= 0.45:
+		return true
+	return false
+
+func _process_moving_to_station(delta: float) -> void:
+	if target_station == null or not is_instance_valid(target_station) or target_station.is_queued_for_deletion():
+		_go_to_station_or_idle(carried_material)
+		return
+
+	# Check if station became full or incompatible en route
+	if not _can_station_accept_material(target_station, carried_material):
+		_blacklist_target(target_station, 4.0)
+		_release_station_reservation(target_station)
+		target_station = null
+		_go_to_station_or_idle(carried_material)
+		return
+
+	if target_station.global_position.distance_squared_to(_last_target_pos) > 0.36:
+		_last_target_pos = target_station.global_position
+		if not _request_path(target_station.global_position, target_station):
+			_blacklist_target(target_station, 4.0)
+			_release_station_reservation(target_station)
+			target_station = null
+			_set_status("[REPLANNING] Station path blocked, seeking alternative...", 2.0, true)
+			_go_to_station_or_idle(carried_material)
+			return
+
+	var edge_dist: float = _get_distance_to_station_edge(target_station, global_position)
+	var vert_dist: float = absf(global_position.y - target_station.global_position.y)
+	var dist_to_approach: float = Vector2(global_position.x - _approach_target_point.x, global_position.z - _approach_target_point.z).length() if _approach_target_point != Vector3.INF else INF
+
+	_set_status("[CARRYING] Transporting %d %s(s) to %s (%.1fm)" % [carried_items.size(), carried_material, target_station.name, edge_dist], 0.0)
+
+	var tol := _get_target_approach_tolerances(target_station)
+	var in_station_range: bool = (edge_dist <= tol["horiz_tol"]) and (vert_dist <= tol["vert_tol"])
+
+	if in_station_range:
+		if _is_station_physically_reachable(target_station):
+			_transition_to(State.DEPOSIT_ITEM)
+			return
+
+	if not _has_valid_path():
+		if in_station_range and _is_station_physically_reachable(target_station):
+			_transition_to(State.DEPOSIT_ITEM)
+			return
+		elif edge_dist <= tol["horiz_tol"] + 0.6 and _is_station_physically_reachable(target_station):
+			# Fine approach: step closer toward station edge
+			var to_st := (target_station.global_position - global_position)
+			to_st.y = 0.0
+			if to_st.length_squared() > 0.01:
+				velocity.x = to_st.normalized().x * (move_speed * 0.5)
+				velocity.z = to_st.normalized().z * (move_speed * 0.5)
+				return
+		else:
+			_trigger_stuck_recovery("Station unreachable at approach point")
+			return
+
+	_monitor_stuck_progress(delta)
+	_follow_path(delta)
+
+func _follow_path(delta: float, speed_mult: float = 1.0) -> void:
+	if not _has_valid_path():
+		velocity.x = move_toward(velocity.x, 0.0, move_speed * delta * 8.0)
+		velocity.z = move_toward(velocity.z, 0.0, move_speed * delta * 8.0)
+		return
+
+	var wp := _current_waypoint()
+
+	# Advance waypoint when reached in XZ plane with sensible vertical tolerance for ascending/descending
+	var xz_dist: float = Vector2(global_position.x - wp.x, global_position.z - wp.z).length()
+	var y_diff: float = wp.y - global_position.y
+	if xz_dist < WAYPOINT_REACH:
+		if y_diff > JUMP_THRESHOLD:
+			if global_position.y >= wp.y - 0.25 or is_on_floor():
+				_advance_waypoint()
+				_jump_count_at_waypoint = 0
+				if not _has_valid_path():
+					velocity.x = move_toward(velocity.x, 0.0, move_speed * delta * 8.0)
+					velocity.z = move_toward(velocity.z, 0.0, move_speed * delta * 8.0)
+					return
+				wp = _current_waypoint()
+		else:
+			if absf(y_diff) < 1.9:
+				_advance_waypoint()
+				_jump_count_at_waypoint = 0
+				if not _has_valid_path():
+					velocity.x = move_toward(velocity.x, 0.0, move_speed * delta * 8.0)
+					velocity.z = move_toward(velocity.z, 0.0, move_speed * delta * 8.0)
+					return
+				wp = _current_waypoint()
+
+	var dir: Vector3 = wp - global_position
+	dir.y = 0.0
+
+	if dir.length_squared() < 0.001:
+		velocity.x = move_toward(velocity.x, 0.0, move_speed * delta * 8.0)
+		velocity.z = move_toward(velocity.z, 0.0, move_speed * delta * 8.0)
+		return
+
+	dir = dir.normalized()
+
+	# Ledge / Void safety guard:
+	# If the current waypoint does not intend a downward step (y_diff >= -0.3),
+	# check that moving forward does not step off into void or a deep pit!
+	if is_on_floor() and y_diff >= -0.3:
+		if not _is_ground_ahead_safe(dir):
+			velocity.x = move_toward(velocity.x, 0.0, move_speed * delta * 10.0)
+			velocity.z = move_toward(velocity.z, 0.0, move_speed * delta * 10.0)
+			if _has_valid_path():
+				_trigger_stuck_recovery("Unsafe ledge/void detected ahead")
+			return
+
+	# Smooth steering when approaching current waypoint towards next waypoint
+	if _path_index + 1 < _current_path.size() and xz_dist < 0.85:
+		var next_wp := _current_path[_path_index + 1]
+		var dir_next := next_wp - global_position
+		dir_next.y = 0.0
+		if dir_next.length_squared() > 0.001:
+			var blend: float = clampf(1.0 - (xz_dist / 0.85), 0.0, 0.5)
+			dir = dir.lerp(dir_next.normalized(), blend).normalized()
+
+	# Smooth rotation towards movement direction
+	var target_yaw: float = atan2(-dir.x, -dir.z)
+	rotation.y = lerp_angle(rotation.y, target_yaw, 12.0 * delta)
+
+	var effective_speed: float = move_speed * speed_mult
+	# Arrival deceleration near final destination
+	if _path_index == _current_path.size() - 1:
+		if xz_dist < 0.9:
+			effective_speed *= clampf(xz_dist / 0.9, 0.35, 1.0)
+
+	var target_vx := dir.x * effective_speed
+	var target_vz := dir.z * effective_speed
+	velocity.x = move_toward(velocity.x, target_vx, effective_speed * delta * 12.0)
+	velocity.z = move_toward(velocity.z, target_vz, effective_speed * delta * 12.0)
+
+func _monitor_stuck_progress(delta: float) -> void:
+	_stuck_timer += delta
+	if _stuck_timer >= STUCK_CHECK_INTERVAL:
+		_stuck_timer = 0.0
+		if _last_stuck_check_pos != Vector3.INF:
+			var moved_dist := Vector2(
+				global_position.x - _last_stuck_check_pos.x,
+				global_position.z - _last_stuck_check_pos.z
+			).length()
+			if moved_dist < MIN_PROGRESS_DIST and _has_valid_path():
+				_trigger_stuck_recovery("Movement blocked / stalled")
+				return
+		_last_stuck_check_pos = global_position
+
+func _trigger_stuck_recovery(reason: String) -> void:
+	if _recovery_attempts < MAX_RECOVERY_ATTEMPTS:
+		_recovery_attempts += 1
+		# Remember current approach point as failed so alternative angles are chosen
+		if _approach_target_point != Vector3.INF and not _failed_approach_points.has(_approach_target_point):
+			_failed_approach_points.append(_approach_target_point)
+
+		_set_status("[REPLANNING] Controller unable to traverse planned route (%s), trying alternative angle (%d/%d)..." % [reason, _recovery_attempts, MAX_RECOVERY_ATTEMPTS], 1.5, true)
+		var dest := _destination
+		var t_dest_node: Node3D = null
+		if current_state == State.MOVING_TO_ITEM and is_instance_valid(target_item):
+			dest = target_item.global_position
+			t_dest_node = target_item
+		elif current_state == State.MOVING_TO_STATION and is_instance_valid(target_station):
+			dest = target_station.global_position
+			t_dest_node = target_station
+
+		if dest != Vector3.INF:
+			var success := _request_path(dest, t_dest_node)
+			if success and _has_valid_path():
+				_last_stuck_check_pos = global_position
+				return
+			if is_instance_valid(t_dest_node):
+				var nudge_dir := (t_dest_node.global_position - global_position)
+				nudge_dir.y = 0.0
+				if nudge_dir.length_squared() > 0.01:
+					velocity.x = nudge_dir.normalized().x * (move_speed * 0.6)
+					velocity.z = nudge_dir.normalized().z * (move_speed * 0.6)
+				_last_stuck_check_pos = global_position
+				return
+
+	# Exhausted recovery attempts: abandon target and blacklist temporarily
+	var t_node: Node = null
+	var t_name: String = "target"
+	if current_state == State.MOVING_TO_ITEM and is_instance_valid(target_item):
+		t_node = target_item
+		t_name = target_item.name
+	elif current_state == State.MOVING_TO_STATION and is_instance_valid(target_station):
+		t_node = target_station
+		t_name = target_station.name
+
+	if t_node != null:
+		_blacklist_target(t_node, TARGET_BLACKLIST_COOLDOWN)
+
+	_cancel_job("Stuck / unable to reach %s (%s)" % [t_name, reason])
+
+func _try_idle_wander() -> void:
+	if _has_any_cargo() or target_item != null or target_station != null:
+		return
+	if _home_position == Vector3.INF:
+		_home_position = global_position
+
+	var mgr := _get_astar()
+	if mgr == null or not mgr.has_method("get_nearby_walkable_points"):
+		_wander_cooldown = randf_range(2.0, 4.0)
+		return
+
+	# Search around current position within modest wander radius
+	var points: Array[Vector3] = mgr.get_nearby_walkable_points(global_position, 1.8, wander_radius, 1.4)
+	if points.is_empty():
+		_wander_cooldown = randf_range(2.5, 4.0)
+		return
+
+	# Keep within wander_radius of _home_position anchor
+	var max_anchor_sq := wander_radius * wander_radius
+	var safe_points: Array[Vector3] = []
+	for pt in points:
+		if pt.distance_squared_to(_home_position) <= max_anchor_sq:
+			safe_points.append(pt)
+
+	if safe_points.is_empty():
+		# If drifted outside anchor radius, steer back toward home
+		for pt in points:
+			if pt.distance_squared_to(_home_position) < global_position.distance_squared_to(_home_position):
+				safe_points.append(pt)
+
+	if safe_points.is_empty():
+		_home_position = global_position
+		_wander_cooldown = randf_range(2.0, 3.5)
+		return
+
+	safe_points.shuffle()
+	var test_count: int = mini(3, safe_points.size())
+	var chosen_path: PackedVector3Array = PackedVector3Array()
+	var chosen_pt: Vector3 = Vector3.INF
+
+	for i in range(test_count):
+		var pt: Vector3 = safe_points[i]
+		var p: PackedVector3Array = mgr.find_astar_path(global_position, pt)
+		if not p.is_empty():
+			chosen_path = p
+			chosen_pt = pt
+			break
+
+	if chosen_path.is_empty():
+		_wander_cooldown = randf_range(2.0, 3.5)
+		return
+
+	_is_wandering = true
+	_current_path = chosen_path
+	_path_index = 0
+	_destination = chosen_pt
+	_approach_target_point = chosen_pt
+	_wander_timer = randf_range(3.5, 5.5)
+	_wander_cooldown = randf_range(2.5, 4.5)
+	_path_dirty = true
+	_set_status("[IDLE: WANDERING] Patrolling work area...", 0.0)
+
+func _stop_wandering() -> void:
+	if _is_wandering:
+		_is_wandering = false
+		_clear_route_line()
+		_wander_cooldown = randf_range(2.0, 4.0)
+		_idle_timer = randf_range(0.25, 0.5)
+
+# ---------------------------------------------------------------------------
+# Pickup & Carrying
+# ---------------------------------------------------------------------------
+func _process_pickup_item() -> void:
+	if target_item == null or not is_instance_valid(target_item) or target_item.is_queued_for_deletion():
+		_cancel_job("Target item disappeared!")
+		return
+
+	var item_mat: String = _resolve_item_material(target_item)
+
+	if not _can_carry_more(item_mat):
+		_go_to_station_or_idle(carried_material if not carried_material.is_empty() else item_mat)
+		return
+
+	var is_fragment: bool = (target_item.is_in_group("fragments") or (item_mat not in ["log", "plank"]))
+	if is_fragment:
+		var rv: int = _get_item_resource_value(target_item)
+		if target_item.has_meta("worker_reserved_by") and target_item.get_meta("worker_reserved_by") == self:
+			target_item.set_meta("worker_reserved_by", null)
+		target_item.set_meta("worker_assigned", false)
+		target_item.queue_free()
+		target_item = null
+
+		fragment_bag[item_mat] = int(fragment_bag.get(item_mat, 0)) + rv
+		carried_material = item_mat
+		_refresh_carrier_visuals()
+		_set_status("[COLLECTING] Picked up %s (%d/%d)" % [carried_material, _get_cargo_count(), MAX_FRAGMENTS], 0.6)
+	else:
+		# Disable physics and collision completely while carried to fix falling/jittering visuals
+		if target_item is RigidBody3D:
+			var rb := target_item as RigidBody3D
+			rb.freeze = true
+			rb.freeze_mode = RigidBody3D.FREEZE_MODE_KINEMATIC
+			rb.sleeping = true
+			rb.collision_layer = 0
+			rb.collision_mask = 0
+			rb.linear_velocity = Vector3.ZERO
+			rb.angular_velocity = Vector3.ZERO
+			rb.set_physics_process(false)
+			rb.set_process(false)
+			for child in rb.get_children():
+				if child is CollisionShape3D:
+					(child as CollisionShape3D).disabled = true
+
+		# Reparent to carrier marker and reset transform
+		var old_parent: Node = target_item.get_parent()
+		if old_parent != null:
+			old_parent.remove_child(target_item)
+		carrier_marker.add_child(target_item)
+		target_item.transform = Transform3D.IDENTITY
+
+		carried_items.append(target_item)
+		carried_material = item_mat
+		target_item = null
+		_refresh_carrier_visuals()
+
+		var max_cap := _get_max_capacity(carried_material)
+		_set_status("[COLLECTING] Picked up %s (%d/%d)" % [carried_material, carried_items.size(), max_cap], 0.6)
+
+	# Batch collection plan: if helper can carry more, loop through cluster and local items
+	if _can_carry_more(carried_material):
+		var next_val: int = _get_carried_resource_value() + 1
+		var st := _find_nearest_station_for_material(carried_material, next_val, false)
+		if st != null:
+			# Try candidates from cluster first
+			while not _collection_cluster.is_empty():
+				var cand_id_val = _collection_cluster.pop_front()
+				var cand: Node3D = null
+				if cand_id_val is int:
+					cand = instance_from_id(cand_id_val) as Node3D
+				elif cand_id_val is Node3D and is_instance_valid(cand_id_val):
+					cand = cand_id_val
+				if cand == null or not is_instance_valid(cand) or cand.is_queued_for_deletion():
+					continue
+				if cand.get_parent() is Marker3D:
+					continue
+				if _is_target_blacklisted(cand):
+					continue
+				var res_worker = cand.get_meta("worker_reserved_by") if cand.has_meta("worker_reserved_by") else null
+				if res_worker != null and is_instance_valid(res_worker) and res_worker != self:
+					continue
+				if _resolve_item_material(cand) != carried_material:
+					continue
+
+				_failed_approach_points.clear()
+				var path_ok := _request_path(cand.global_position, cand)
+				if path_ok:
+					target_item = cand
+					target_item.set_meta("worker_reserved_by", self)
+					target_item.set_meta("worker_assigned", true)
+					_last_target_pos = target_item.global_position
+					_recovery_attempts = 0
+					_stuck_timer = 0.0
+					_last_stuck_check_pos = global_position
+					_rolling_settle_timer = 0.0
+					_target_repath_cooldown = 0.0
+					_transition_to(State.MOVING_TO_ITEM)
+					return
+				else:
+					_blacklist_target(cand, TARGET_BLACKLIST_COOLDOWN)
+
+			# If cluster didn't yield a reachable item, check local candidates within 12m
+			var local_cands := _get_filtered_candidates([_material_to_group(carried_material)], carried_material)
+			var attempts_budget: int = 3
+			for cand in local_cands:
+				if cand == null or not is_instance_valid(cand) or cand.is_queued_for_deletion():
+					continue
+				if cand.global_position.distance_squared_to(global_position) > 144.0:
+					continue
+				var res_worker = cand.get_meta("worker_reserved_by") if cand.has_meta("worker_reserved_by") else null
+				if res_worker != null and is_instance_valid(res_worker) and res_worker != self:
+					continue
+				if _is_target_blacklisted(cand):
+					continue
+
+				_failed_approach_points.clear()
+				var path_ok := _request_path(cand.global_position, cand)
+				if path_ok:
+					target_item = cand
+					target_item.set_meta("worker_reserved_by", self)
+					target_item.set_meta("worker_assigned", true)
+					_last_target_pos = target_item.global_position
+					_recovery_attempts = 0
+					_stuck_timer = 0.0
+					_last_stuck_check_pos = global_position
+					_rolling_settle_timer = 0.0
+					_target_repath_cooldown = 0.0
+					_transition_to(State.MOVING_TO_ITEM)
+					return
+				else:
+					_blacklist_target(cand, TARGET_BLACKLIST_COOLDOWN)
+					attempts_budget -= 1
+					if attempts_budget <= 0:
+						break
+
+	_go_to_station_or_idle(carried_material)
+
+func _get_max_capacity(mat: String) -> int:
+	if mat == "log":
+		return MAX_LOGS
+	elif mat == "plank":
+		return MAX_PLANKS
+	return MAX_FRAGMENTS
+
+func _can_carry_more(mat: String) -> bool:
+	if not carried_material.is_empty() and mat != carried_material:
+		return false
+	if mat not in ["log", "plank"]:
+		return _get_cargo_count() < MAX_FRAGMENTS
+	return carried_items.size() < _get_max_capacity(mat)
+
+func _refresh_carrier_visuals() -> void:
+	for i in range(carried_items.size()):
+		var item: Node3D = carried_items[i]
+		if not is_instance_valid(item):
+			continue
+		item.rotation = Vector3.ZERO
+		item.scale = Vector3.ONE
+		if carried_material == "log":
+			item.position = Vector3(0.0, 0.0, 0.0)
+		elif carried_material == "plank":
+			item.position = Vector3(0.0, float(i) * 0.12, 0.0)
+		else:
+			item.position = Vector3(0.0, 0.0, 0.0)
+
+func _material_to_group(mat: String) -> String:
+	match mat:
+		"log":   return "logs"
+		"plank": return "planks"
+		_:       return "fragments"
+
+func _go_to_station_or_idle(mat: String) -> void:
+	var needed_amount: int = _get_carried_resource_value()
+	var candidates: Array[Node3D] = _get_candidate_stations_for_material(mat, needed_amount)
+	for station in candidates:
+		if _set_target_station(station):
+			_recovery_attempts = 0
+			_stuck_timer = 0.0
+			_last_stuck_check_pos = global_position
+			_transition_to(State.MOVING_TO_STATION)
+			return
+
+	# Retain cargo safely while retrying later! Never drop cargo merely because station is unavailable.
+	_set_status("[IDLE] Waiting for station for %s..." % mat, 2.5)
+	_idle_timer = 2.0
+	_transition_to(State.IDLE)
+
+func _set_target_station(station: Node3D) -> bool:
+	if not is_instance_valid(station):
+		return false
+	if is_instance_valid(target_station) and target_station != station:
+		_release_station_reservation(target_station)
+
+	var reserved_ok: bool = false
+	var needed_amount: int = _get_carried_resource_value()
+	if station.has_method("reserve"):
+		if station is Pallet:
+			reserved_ok = (station as Pallet).reserve(self, carried_material, needed_amount)
+		elif station is ChoppingBlock:
+			reserved_ok = (station as ChoppingBlock).reserve(self)
+	else:
+		station.set_meta("worker_reserved_by", self)
+		station.set_meta("worker_assigned", true)
+		reserved_ok = true
+
+	if not reserved_ok:
+		return false
+
+	target_station = station
+	_last_target_pos = target_station.global_position
+	if not _request_path(target_station.global_position, target_station):
+		_release_station_reservation(target_station)
+		target_station = null
+		return false
+
+	return true
+
+func _resolve_item_material(item: Node3D) -> String:
+	if item == null or not is_instance_valid(item):
+		return ""
+	if item.has_meta("material"):
+		return String(item.get_meta("material"))
+	if item.has_meta("carry_type"):
+		return String(item.get_meta("carry_type"))
+	if item.has_meta("fragment_type"):
+		return String(item.get_meta("fragment_type"))
+	if item.is_in_group("logs"):
+		return "log"
+	if item.is_in_group("planks"):
+		return "plank"
+	if item.is_in_group("fragments"):
+		return "stone"
+	return "plank"
+
+func _get_item_resource_value(item: Node3D) -> int:
+	if item == null or not is_instance_valid(item):
+		return 0
+	if item is VoxelFragment:
+		return (item as VoxelFragment).resource_value
+	if item.has_meta("resource_value"):
+		return int(item.get_meta("resource_value"))
+	return 1
+
+# ---------------------------------------------------------------------------
+# Deposit & Resource Safety
+# ---------------------------------------------------------------------------
+func _process_deposit_item() -> void:
+	if not is_instance_valid(target_station):
+		# Station became invalid: retain cargo and search for another station
+		_go_to_station_or_idle(carried_material)
+		return
+
+	_set_status("[DELIVERING] Depositing %d %s(s) at %s..." % [_get_cargo_count(), carried_material, target_station.name], 0.0)
+
+	if target_station is ChoppingBlock and carried_material == "log":
+		var cb := target_station as ChoppingBlock
+		var placed: bool = cb.try_place_log()
+		if placed:
+			if not carried_items.is_empty():
+				var item = carried_items.pop_back()
+				if item != null and is_instance_valid(item):
+					item.queue_free()
+		else:
+			# try_place_log() failed! Retain the log and replan!
+			_blacklist_target(cb, 5.0)
+			_release_station_reservation(target_station)
+			target_station = null
+			_set_status("[REPLANNING] Chopping block rejected log, replanning...", 2.0, true)
+			_go_to_station_or_idle(carried_material)
+			return
+
+	elif target_station is Pallet:
+		var pallet := target_station as Pallet
+
+		# 1. Deposit from logical fragment_bag
+		if not fragment_bag.is_empty():
+			for mat in fragment_bag.keys():
+				var amt: int = int(fragment_bag[mat])
+				if amt <= 0:
+					fragment_bag.erase(mat)
+					continue
+				var rem_cap: int = pallet.get_remaining_capacity(mat, self) if pallet.has_method("get_remaining_capacity") else amt
+				var to_dep: int = mini(amt, rem_cap)
+				if to_dep > 0:
+					var ok: bool = false
+					if pallet.has_method("refund_material"):
+						ok = pallet.refund_material(mat, to_dep)
+					elif pallet.has_method("try_store"):
+						for _s in range(to_dep):
+							if pallet.try_store(mat):
+								ok = true
+					if ok:
+						fragment_bag[mat] = int(fragment_bag[mat]) - to_dep
+						if int(fragment_bag[mat]) <= 0:
+							fragment_bag.erase(mat)
+
+		# 2. Deposit from physical carried_items (planks / logs)
+		for i in range(carried_items.size() - 1, -1, -1):
+			var item: Node3D = carried_items[i]
+			if not is_instance_valid(item):
+				carried_items.remove_at(i)
+				continue
+
+			var rv: int = _get_item_resource_value(item)
+			if rv <= 0:
+				# Zero-value visual fragment: safely free
+				carried_items.remove_at(i)
+				item.queue_free()
+				continue
+
+			var deposited: bool = false
+			if pallet.has_method("refund_material"):
+				deposited = pallet.refund_material(carried_material, rv)
+			elif pallet.has_method("try_store"):
+				deposited = pallet.try_store(carried_material)
+
+			if deposited:
+				carried_items.remove_at(i)
+				item.queue_free()
+			else:
+				# Pallet full or rejected — keep remaining items in cargo!
+				break
+	else:
+		# Station has no valid deposit handler for this material: retain cargo and replan
+		_blacklist_target(target_station, 5.0)
+		_release_station_reservation(target_station)
+		target_station = null
+		_set_status("[REPLANNING] Station cannot accept %s, replanning..." % carried_material, 2.0, true)
+		_go_to_station_or_idle(carried_material)
+		return
+
+	_refresh_carrier_visuals()
+
+	# Release reservation on target station
+	_release_station_reservation(target_station)
+
+	if not _has_any_cargo():
+		# All cargo deposited successfully!
+		target_station = null
+		carried_material = ""
+		_set_status("[IDLE] Deposit complete, looking for work...", 1.5)
+		_idle_timer = 0.5
+		_transition_to(State.IDLE)
+	else:
+		# Station full with cargo remaining — seek next station without dropping cargo!
+		_blacklist_target(target_station, 6.0)
+		target_station = null
+		_set_status("[CARRYING] Station full, finding next station...", 2.0, true)
+		_go_to_station_or_idle(carried_material)
+
+# ---------------------------------------------------------------------------
+# Job Cancellation, Target Blacklisting, & Cleanup
+# ---------------------------------------------------------------------------
+func _cancel_job(reason: String) -> void:
+	_set_status("[BLOCKED] " + reason, 3.5, true)
+	if debug_label != null:
+		debug_label.text = "[%s] %s" % [helper_name, _status_text]
+
+	_release_target_assignments()
+	_collection_cluster.clear()
+
+	_recovery_attempts = 0
+	_stuck_timer = 0.0
+	_last_stuck_check_pos = Vector3.INF
+	_debug_line_hold_timer = 3.5  # Retain line visualization so path failure can be diagnosed
+	_is_wandering = false
+
+	velocity.x = 0.0
+	velocity.z = 0.0
+
+	# Resource safety: Never drop carried cargo on path/target failure!
+	_idle_timer = TASK_ABORT_COOLDOWN
+	_abort_cooldown = TASK_ABORT_COOLDOWN
+	_transition_to(State.IDLE)
+
+func _release_target_assignments() -> void:
+	_collection_cluster.clear()
+	_release_item_reservation()
+	_release_station_reservation()
+
+func _release_item_reservation(item: Node3D = null) -> void:
+	var it := item if item != null else target_item
+	if is_instance_valid(it):
+		if it.has_meta("worker_reserved_by") and it.get_meta("worker_reserved_by") == self:
+			it.set_meta("worker_reserved_by", null)
+		it.set_meta("worker_assigned", false)
+	if item == null or item == target_item:
+		target_item = null
+
+func _release_station_reservation(st: Node3D = null) -> void:
+	var station_to_release: Node3D = st if st != null else target_station
+	if is_instance_valid(station_to_release):
+		if station_to_release.has_method("release_reservation"):
+			station_to_release.release_reservation(self)
+		else:
+			if station_to_release.has_meta("worker_reserved_by") and station_to_release.get_meta("worker_reserved_by") == self:
+				station_to_release.set_meta("worker_reserved_by", null)
+			station_to_release.set_meta("worker_assigned", false)
+	if st == null or st == target_station:
+		target_station = null
+
+func _blacklist_target(target: Node, duration_sec: float) -> void:
+	if target == null or not is_instance_valid(target):
+		return
+	var expiry: int = Time.get_ticks_msec() + int(duration_sec * 1000.0)
+	_blacklisted_targets[target.get_instance_id()] = expiry
+
+func _is_target_blacklisted(target: Node) -> bool:
+	if target == null or not is_instance_valid(target):
+		return true
+	var id: int = target.get_instance_id()
+	if _blacklisted_targets.has(id):
+		if Time.get_ticks_msec() < _blacklisted_targets[id]:
+			return true
+		else:
+			_blacklisted_targets.erase(id)
+	return false
+
+func _drop_all_carried() -> void:
+	for item in carried_items:
+		_drop_single_item(item)
+	carried_items.clear()
+
+	for mat in fragment_bag.keys():
+		var total_val: int = int(fragment_bag[mat])
+		var num_frags: int = mini(total_val, 8)
+		if num_frags <= 0:
+			continue
+		var base_val: int = total_val / num_frags
+		var rem: int = total_val % num_frags
+		for i in range(num_frags):
+			var v: int = base_val + (1 if i < rem else 0)
+			_spawn_dropped_fragment(mat, v)
+	fragment_bag.clear()
+	carried_material = ""
+
+func _spawn_dropped_fragment(mat: String, value: int) -> void:
+	if value <= 0:
+		return
+	var world_parent: Node = get_parent()
+	if world_parent == null and is_inside_tree():
+		world_parent = get_tree().current_scene
+	if world_parent == null:
+		return
+
+	var body := VoxelFragment.new()
+	body.add_to_group("fragments")
+	body.set_meta("mined_fragment", true)
+	body.set_meta("material", mat)
+	body.set_meta("fragment_type", mat)
+	body.resource_value = value
+	body.collision_layer = 4  # DEBRIS_LAYER
+	body.collision_mask = 1 | 4
+
+	var mesh_inst := MeshInstance3D.new()
+	var box_mesh := BoxMesh.new()
+	box_mesh.size = Vector3(0.2, 0.2, 0.2)
+	mesh_inst.mesh = box_mesh
+	mesh_inst.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_OFF
+
+	var col := CollisionShape3D.new()
+	var box_shape := BoxShape3D.new()
+	box_shape.size = Vector3(0.2, 0.2, 0.2)
+	col.shape = box_shape
+
+	body.add_child(mesh_inst)
+	body.add_child(col)
+	world_parent.add_child(body)
+
+	body.global_position = global_position + Vector3(
+		randf_range(-0.35, 0.35), 0.45, randf_range(-0.35, 0.35)
+	)
+	body.linear_velocity = Vector3(randf_range(-1.0, 1.0), 1.2, randf_range(-1.0, 1.0))
+
+func _drop_single_item(item: Node3D) -> void:
+	if item == null or not is_instance_valid(item):
+		return
+
+	var world_parent: Node = get_parent()
+	if world_parent == null and is_inside_tree():
+		world_parent = get_tree().current_scene
+
+	if item.get_parent() == carrier_marker:
+		carrier_marker.remove_child(item)
+	elif item.get_parent() != null:
+		item.get_parent().remove_child(item)
+
+	if world_parent != null:
+		world_parent.add_child(item)
+
+	item.global_position = global_position + Vector3(
+		randf_range(-0.3, 0.3), 0.4, randf_range(-0.3, 0.3)
+	)
+
+	if item is RigidBody3D:
+		var rb := item as RigidBody3D
+		rb.freeze = false
+		rb.freeze_mode = RigidBody3D.FREEZE_MODE_STATIC
+		rb.sleeping = false
+		rb.collision_layer = 4  # DEBRIS_LAYER
+		rb.collision_mask = 1 | 4
+		rb.set_physics_process(true)
+		rb.set_process(true)
+		for child in rb.get_children():
+			if child is CollisionShape3D:
+				(child as CollisionShape3D).disabled = false
+		rb.linear_velocity = Vector3(randf_range(-0.5, 0.5), 0.8, randf_range(-0.5, 0.5))
+
+	item.set_meta("worker_assigned", false)
+	if item.has_meta("worker_reserved_by") and item.get_meta("worker_reserved_by") == self:
+		item.set_meta("worker_reserved_by", null)

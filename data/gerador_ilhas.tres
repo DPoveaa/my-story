@@ -1,0 +1,20 @@
+[gd_resource type="VoxelGeneratorGraph" format=3 uid="uid://c8xbp1q3a0j"]
+
+[resource]
+graph_data = {
+"connections": [[1, 0, 2, 0]],
+"nodes": {
+"1": {
+"auto_connect": false,
+"gui_position": Vector2(0, 0),
+"type": "Constant",
+"value": 0.0
+},
+"2": {
+"auto_connect": true,
+"gui_position": Vector2(200, 0),
+"type": "OutputType"
+}
+},
+"version": 2
+}

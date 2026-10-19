@@ -1,0 +1,150 @@
+[gd_scene load_steps=13 format=3 uid="uid://pallet_cs"]
+
+[ext_resource type="Script" path="res://scenes/world/Pallet.gd" id="1_script"]
+
+[sub_resource type="StandardMaterial3D" id="MatPallet"]
+albedo_color = Color(0.55, 0.38, 0.2, 1)
+roughness = 0.9
+
+[sub_resource type="StandardMaterial3D" id="MatWall"]
+albedo_color = Color(0.48, 0.32, 0.16, 1)
+roughness = 0.92
+
+[sub_resource type="StandardMaterial3D" id="MatFill"]
+albedo_color = Color(0.49, 0.35, 0.22, 1)
+roughness = 0.95
+
+[sub_resource type="BoxMesh" id="MeshSlat"]
+material = SubResource("MatPallet")
+size = Vector3(0.42, 0.1, 2.2)
+
+[sub_resource type="BoxMesh" id="MeshWallLong"]
+material = SubResource("MatWall")
+size = Vector3(2.2, 2.0, 0.08)
+
+[sub_resource type="BoxMesh" id="MeshWallShort"]
+material = SubResource("MatWall")
+size = Vector3(0.08, 2.0, 2.04)
+
+[sub_resource type="BoxMesh" id="MeshFill"]
+material = SubResource("MatFill")
+size = Vector3(2.0, 1.0, 2.0)
+
+[sub_resource type="BoxShape3D" id="ColSlat"]
+size = Vector3(0.42, 0.1, 2.2)
+
+[sub_resource type="BoxShape3D" id="ColCatch"]
+size = Vector3(2.2, 0.8, 2.2)
+
+[sub_resource type="BoxShape3D" id="ColFill"]
+size = Vector3(2.0, 1.0, 2.0)
+
+[node name="Pallet" type="StaticBody3D" groups=["crafting_stations", "pallets"]]
+collision_layer = 1
+collision_mask = 0
+script = ExtResource("1_script")
+
+[node name="Slat0" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.88, 0.1, 0)
+mesh = SubResource("MeshSlat")
+
+[node name="Slat1" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.44, 0.1, 0)
+mesh = SubResource("MeshSlat")
+
+[node name="Slat2" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.1, 0)
+mesh = SubResource("MeshSlat")
+
+[node name="Slat3" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.44, 0.1, 0)
+mesh = SubResource("MeshSlat")
+
+[node name="Slat4" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.88, 0.1, 0)
+mesh = SubResource("MeshSlat")
+
+[node name="ColSlat0" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.88, 0.1, 0)
+shape = SubResource("ColSlat")
+
+[node name="ColSlat1" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -0.44, 0.1, 0)
+shape = SubResource("ColSlat")
+
+[node name="ColSlat2" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.1, 0)
+shape = SubResource("ColSlat")
+
+[node name="ColSlat3" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.44, 0.1, 0)
+shape = SubResource("ColSlat")
+
+[node name="ColSlat4" type="CollisionShape3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0.88, 0.1, 0)
+shape = SubResource("ColSlat")
+
+[node name="CrateFrame" type="Node3D" parent="."]
+
+[node name="WallNorth" type="MeshInstance3D" parent="CrateFrame"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.2, -1.06)
+visible = false
+mesh = SubResource("MeshWallLong")
+
+[node name="WallSouth" type="MeshInstance3D" parent="CrateFrame"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.2, 1.06)
+visible = false
+mesh = SubResource("MeshWallLong")
+
+[node name="WallWest" type="MeshInstance3D" parent="CrateFrame"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, -1.06, 1.2, 0)
+visible = false
+mesh = SubResource("MeshWallShort")
+
+[node name="WallEast" type="MeshInstance3D" parent="CrateFrame"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 1.06, 1.2, 0)
+visible = false
+mesh = SubResource("MeshWallShort")
+
+[node name="FillVolume" type="MeshInstance3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 0.001, 0, 0, 0, 1, 0, 0.2, 0)
+visible = false
+mesh = SubResource("MeshFill")
+
+[node name="FillCollision" type="StaticBody3D" parent="."]
+collision_layer = 1
+collision_mask = 0
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="FillCollision"]
+transform = Transform3D(1, 0, 0, 0, 0.001, 0, 0, 0, 1, 0, 0.2, 0)
+disabled = true
+shape = SubResource("ColFill")
+
+[node name="CatchZone" type="Area3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0.55, 0)
+collision_layer = 0
+collision_mask = 12
+monitoring = true
+monitorable = false
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="CatchZone"]
+shape = SubResource("ColCatch")
+
+[node name="StatusLabel" type="Label3D" parent="."]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 2.35, 0)
+pixel_size = 0.01
+billboard = 1
+no_depth_test = true
+text = "Empty Pallet
+(Assign with E / fragments)"
+font_size = 28
+outline_size = 8
+modulate = Color(0.95, 0.92, 0.85, 1)
+outline_modulate = Color(0, 0, 0, 0.85)
+horizontal_alignment = 1
+vertical_alignment = 1
+
+[node name="NavigationObstacle3D" type="NavigationObstacle3D" parent="."]
+vertices = PackedVector3Array(-1.1, 0, -1.1, 1.1, 0, -1.1, 1.1, 0, 1.1, -1.1, 0, 1.1)
+height = 2.0
+avoidance_enabled = true

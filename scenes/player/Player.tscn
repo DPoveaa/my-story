@@ -1,4 +1,4 @@
-[gd_scene load_steps=6 format=3 uid="uid://player_m2"]
+[gd_scene load_steps=7 format=3 uid="uid://player_m2"]
 
 [ext_resource type="Script" path="res://scenes/player/PlayerController.gd" id="1_controller"]
 [ext_resource type="Script" path="res://systems/interaction/DebrisGrabber.gd" id="2_grabber"]
@@ -16,9 +16,14 @@ material = SubResource("StandardMaterial3D_body")
 radius = 0.4
 height = 1.8
 
+[sub_resource type="BoxShape3D" id="BoxShape_vacuum"]
+size = Vector3(2.8, 2.8, 4)
+
 [node name="Player" type="CharacterBody3D"]
 collision_layer = 2
-collision_mask = 5
+collision_mask = 1
+floor_max_angle = 0.802851
+floor_snap_length = 0.3
 script = ExtResource("1_controller")
 
 [node name="CollisionShape3D" type="CollisionShape3D" parent="."]
@@ -34,6 +39,16 @@ transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 1.6, 0)
 
 [node name="BodyCamera" type="Camera3D" parent="Head"]
 current = true
+
+[node name="VacuumZone" type="Area3D" parent="Head/BodyCamera"]
+transform = Transform3D(1, 0, 0, 0, 1, 0, 0, 0, 1, 0, 0, -2)
+collision_layer = 0
+collision_mask = 4
+monitoring = true
+monitorable = false
+
+[node name="CollisionShape3D" type="CollisionShape3D" parent="Head/BodyCamera/VacuumZone"]
+shape = SubResource("BoxShape_vacuum")
 
 [node name="ProjectionCamera" type="Camera3D" parent="."]
 top_level = true

@@ -12,6 +12,7 @@ signal blueprint_rejected(name: String, anchor: Vector3i, reason: String, confli
 signal blueprint_deleted(name: String)
 
 const BlueprintDataScript = preload("res://data/BlueprintData.gd")
+const ReconstructionPlannerScript = preload("res://systems/blueprint/ReconstructionPlanner.gd")
 
 @export var storage_dir: String = "user://blueprints"
 
@@ -28,6 +29,15 @@ func _ready() -> void:
 	if stability_system == null and has_node("/root/StabilitySystem"):
 		stability_system = get_node("/root/StabilitySystem")
 	_ensure_storage_dir()
+	load_all_registered_blueprints()
+
+## Restores all saved blueprint files from storage_dir into active_registered_blueprints.
+func load_all_registered_blueprints() -> void:
+	var names := list_blueprints()
+	for n in names:
+		var bp := load_blueprint(n)
+		if bp != null:
+			active_registered_blueprints[n] = bp
 
 func _ensure_storage_dir() -> bool:
 	if not DirAccess.dir_exists_absolute(storage_dir):
@@ -126,6 +136,39 @@ func delete_blueprint(blueprint_name: String) -> bool:
 # ==============================================================================
 # CAPTURING FROM LIVE WORLD
 # ==============================================================================
+
+## Dictionary of active registered construction areas in current scene: Dictionary[String, BlueprintData]
+var active_registered_blueprints: Dictionary = {}
+
+## Captures a snapshot of strictly the blocks within the specified bounded area [min_cell, max_cell].
+## Never falls back to capturing the whole grid.
+func capture_blueprint_area(blueprint_name: String, min_cell: Vector3i, max_cell: Vector3i) -> BlueprintData:
+	var grid := _get_grid()
+	if grid == null:
+		push_error("BlueprintManager: GridSystem reference is null")
+		return null
+
+	var bounds_min := Vector3i(mini(min_cell.x, max_cell.x), mini(min_cell.y, max_cell.y), mini(min_cell.z, max_cell.z))
+	var bounds_max := Vector3i(maxi(min_cell.x, max_cell.x), maxi(min_cell.y, max_cell.y), maxi(min_cell.z, max_cell.z))
+
+	var target_cells: Array[Vector3i] = []
+	for x in range(bounds_min.x, bounds_max.x + 1):
+		for y in range(bounds_min.y, bounds_max.y + 1):
+			for z in range(bounds_min.z, bounds_max.z + 1):
+				var c := Vector3i(x, y, z)
+				if grid.has_block(c):
+					target_cells.append(c)
+
+	if target_cells.is_empty():
+		push_warning("BlueprintManager: No blocks found in bounded area (%s to %s) for '%s'" % [str(bounds_min), str(bounds_max), blueprint_name])
+		return null
+
+	var bp := capture_blueprint(blueprint_name, target_cells, bounds_min)
+	if bp != null:
+		bp.bounds_min = Vector3i.ZERO
+		bp.bounds_max = bounds_max - bounds_min
+		active_registered_blueprints[blueprint_name] = bp
+	return bp
 
 ## Captures a snapshot of the specified cells (or all occupied cells if empty).
 ## Preserves block type, durability, metadata (including coated faces), and structural joints.
@@ -374,6 +417,178 @@ func update_or_replace_blueprint(blueprint_name: String, cells: Array[Vector3i] 
 	if bp == null:
 		return false
 	return save_blueprint(bp, true)
+
+## Explicitly updates a registered blueprint from the current live world cells inside its bounded area.
+func update_registered_blueprint_from_world(blueprint_name: String, custom_min: Variant = null, custom_max: Variant = null) -> bool:
+	var min_c := Vector3i.ZERO
+	var max_c := Vector3i.ZERO
+
+	if custom_min is Vector3i and custom_max is Vector3i:
+		min_c = custom_min
+		max_c = custom_max
+	elif active_registered_blueprints.has(blueprint_name):
+		var existing: BlueprintData = active_registered_blueprints[blueprint_name]
+		min_c = existing.anchor_cell + existing.bounds_min
+		max_c = existing.anchor_cell + existing.bounds_max
+	else:
+		push_warning("BlueprintManager: Cannot update unregistered blueprint '%s' without explicit bounds" % blueprint_name)
+		return false
+
+	var updated_bp := capture_blueprint_area(blueprint_name, min_c, max_c)
+	if updated_bp == null:
+		push_warning("BlueprintManager: No blocks found in bounded area for '%s'" % blueprint_name)
+		return false
+
+	return save_blueprint(updated_bp, true)
+
+func _get_inventory_manager() -> Node:
+	if is_inside_tree() and has_node("/root/InventoryManager"):
+		return get_node("/root/InventoryManager")
+	return null
+
+## Generates a ReconstructionPlanner comparison between a blueprint and current world state.
+func plan_reconstruction(blueprint: BlueprintData, anchor_cell: Vector3i, player: Node = null) -> RefCounted:
+	var grid := _get_grid()
+	var orch := _get_orchestrator()
+	var inv := _get_inventory_manager()
+	return ReconstructionPlannerScript.generate_plan(blueprint, anchor_cell, grid, orch, player, inv)
+
+## Reconstructs a single missing cell from a blueprint at target_world_cell.
+## Revalidates target cell safety, places expected block type with saved metadata,
+## restores mortar/joints with existing neighbors, and re-plans reconstruction.
+func reconstruct_single_cell(blueprint: BlueprintData, anchor_cell: Vector3i, target_world_cell: Vector3i, player: Node = null) -> Dictionary:
+	if blueprint == null:
+		return {"success": false, "reason": "NULL_BLUEPRINT", "placed_cell": target_world_cell, "plan": null}
+
+	var grid := _get_grid()
+	if grid == null:
+		return {"success": false, "reason": "NO_GRID", "placed_cell": target_world_cell, "plan": null}
+
+	var rel_pos := target_world_cell - anchor_cell
+	var block_dict: Dictionary = blueprint.get_block_at_rel_pos(rel_pos)
+	if block_dict.is_empty():
+		return {"success": false, "reason": "CELL_NOT_IN_BLUEPRINT", "placed_cell": target_world_cell, "plan": null}
+
+	var exp_type := StringName(block_dict.get("block_type", "stone"))
+	var exp_dur := float(block_dict.get("durability", 1.0))
+	var raw_meta = block_dict.get("metadata", {})
+	var exp_meta: Dictionary = raw_meta.duplicate(true) if raw_meta is Dictionary else {}
+
+	# Check material availability
+	var cost := BlockTypeCatalog.get_cost(exp_type)
+	var inv_mgr := _get_inventory_manager()
+	if inv_mgr != null and not inv_mgr.has_materials(cost):
+		return {"success": false, "reason": "INSUFFICIENT_MATERIALS", "placed_cell": target_world_cell, "plan": null}
+
+	# 1. Immediate Safety Re-validation
+	if target_world_cell.y < grid.min_y or absi(target_world_cell.x) > grid.max_coord_bound or absi(target_world_cell.z) > grid.max_coord_bound or target_world_cell.y > grid.max_coord_bound:
+		return {"success": false, "reason": "OUT_OF_BOUNDS", "placed_cell": target_world_cell, "plan": null}
+
+	if grid.has_block(target_world_cell):
+		return {"success": false, "reason": "CELL_OCCUPIED", "placed_cell": target_world_cell, "plan": null}
+
+	var orch := _get_orchestrator()
+	if orch != null and orch.has_method("is_cell_blocked_by_debris"):
+		if orch.is_cell_blocked_by_debris(target_world_cell, grid.cell_size):
+			return {"success": false, "reason": "DEBRIS_COLLISION", "placed_cell": target_world_cell, "plan": null}
+
+	if player != null and player.has_method("is_cell_overlapping_player"):
+		if player.is_cell_overlapping_player(target_world_cell, grid.cell_size):
+			return {"success": false, "reason": "PLAYER_OVERLAP", "placed_cell": target_world_cell, "plan": null}
+
+	# 2. Place Block with exact expected BlockData and consume cost
+	var b_data := BlockData.new(exp_type, exp_dur, exp_meta)
+	if grid.place_block(target_world_cell, b_data):
+		if inv_mgr != null:
+			inv_mgr.consume_materials(cost)
+
+	# Notify intentional edit so registered area is maintained
+	notify_intentional_block_placed(target_world_cell, b_data)
+
+	# 3. Restore mortar coated faces and structural joints
+	var joint_sys := _get_joint_sys()
+	if joint_sys != null:
+		if exp_meta.has("coated_faces"):
+			var c_faces = exp_meta["coated_faces"]
+			if c_faces is Array:
+				for f in c_faces:
+					var fdir := Vector3i.ZERO
+					if f is Vector3i:
+						fdir = f
+					elif f is Array and f.size() == 3:
+						fdir = Vector3i(int(f[0]), int(f[1]), int(f[2]))
+					if fdir != Vector3i.ZERO and joint_sys.has_method("set_face_coated"):
+						joint_sys.set_face_coated(target_world_cell, fdir)
+
+		for j_item in blueprint.joints:
+			if not (j_item is Dictionary):
+				continue
+			var a_arr = j_item.get("rel_a", null)
+			var b_arr = j_item.get("rel_b", null)
+			if a_arr is Array and b_arr is Array:
+				var world_a := anchor_cell + Vector3i(int(a_arr[0]), int(a_arr[1]), int(a_arr[2]))
+				var world_b := anchor_cell + Vector3i(int(b_arr[0]), int(b_arr[1]), int(b_arr[2]))
+				if (world_a == target_world_cell or world_b == target_world_cell) and grid.has_block(world_a) and grid.has_block(world_b):
+					var is_mortared: bool = bool(j_item.get("is_mortared", false))
+					var strength: float = float(j_item.get("strength", 50.0))
+					if is_mortared and joint_sys != null:
+						joint_sys.bond_adjacent(world_a, world_b, strength)
+
+	var stab := _get_stability()
+	if stab != null and stab.has_method("recalculate_stability"):
+		stab.call_deferred("recalculate_stability")
+
+	# 4. Generate updated plan after placement
+	var new_plan = plan_reconstruction(blueprint, anchor_cell, player)
+	return {"success": true, "reason": "", "placed_cell": target_world_cell, "plan": new_plan}
+
+# ==============================================================================
+# INTENTIONAL PLAYER EDIT TRACKING (Vs. Collapses / Destruction)
+# ==============================================================================
+
+## Called when the player intentionally builds/places a block.
+## Updates any active registered construction area that contains this world cell.
+func notify_intentional_block_placed(cell: Vector3i, data: BlockData) -> void:
+	for bp: BlueprintData in active_registered_blueprints.values():
+		if bp == null:
+			continue
+		var abs_min := bp.anchor_cell + bp.bounds_min
+		var abs_max := bp.anchor_cell + bp.bounds_max
+		if cell.x >= abs_min.x and cell.x <= abs_max.x and cell.y >= abs_min.y and cell.y <= abs_max.y and cell.z >= abs_min.z and cell.z <= abs_max.z:
+			var rel := cell - bp.anchor_cell
+			var existing_idx := -1
+			for i in range(bp.blocks.size()):
+				var b = bp.blocks[i]
+				if b is Dictionary and b.get("rel_pos", []) == [rel.x, rel.y, rel.z]:
+					existing_idx = i
+					break
+			var entry := {
+				"rel_pos": [rel.x, rel.y, rel.z],
+				"block_type": String(data.block_type),
+				"durability": data.durability,
+				"metadata": data.metadata.duplicate(true)
+			}
+			if existing_idx >= 0:
+				bp.blocks[existing_idx] = entry
+			else:
+				bp.blocks.append(entry)
+			save_blueprint(bp, true)
+
+## Called when the player intentionally removes a block.
+## Updates any active registered construction area that contains this world cell.
+func notify_intentional_block_removed(cell: Vector3i) -> void:
+	for bp: BlueprintData in active_registered_blueprints.values():
+		if bp == null:
+			continue
+		var abs_min := bp.anchor_cell + bp.bounds_min
+		var abs_max := bp.anchor_cell + bp.bounds_max
+		if cell.x >= abs_min.x and cell.x <= abs_max.x and cell.y >= abs_min.y and cell.y <= abs_max.y and cell.z >= abs_min.z and cell.z <= abs_max.z:
+			var rel := cell - bp.anchor_cell
+			for i in range(bp.blocks.size() - 1, -1, -1):
+				var b = bp.blocks[i]
+				if b is Dictionary and b.get("rel_pos", []) == [rel.x, rel.y, rel.z]:
+					bp.blocks.remove_at(i)
+			save_blueprint(bp, true)
 
 # ==============================================================================
 # SYSTEM RESOLVERS
