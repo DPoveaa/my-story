@@ -20,6 +20,7 @@ enum State {
 @export var jump_velocity: float = 5.5
 @export var reach_distance: float = 2.5
 @export var step_height: float = 0.35
+@export var wander_radius: float = 8.0
 
 ## Interaction tolerances: separate loose pickups from stations and validate approach
 const ITEM_PICKUP_HORIZ_TOLERANCE: float = 1.75
@@ -225,6 +226,9 @@ func _ready() -> void:
 		if not mgr.graph_rebuilt.is_connected(_on_astar_graph_rebuilt):
 			mgr.graph_rebuilt.connect(_on_astar_graph_rebuilt)
 
+	floor_max_angle = deg_to_rad(48.0)
+	floor_snap_length = 1.1
+
 	# Stagger initial search timer to avoid all helpers searching simultaneously
 	_idle_timer = randf_range(0.2, 0.6) + (float(helper_id) * 0.15)
 	_home_position = global_position
@@ -417,42 +421,44 @@ func _physics_process(delta: float) -> void:
 
 	# Controlled jumping: detect upcoming one-block elevation transition and initiate takeoff early enough
 	if is_on_floor() and _has_valid_path() and _jump_cooldown <= 0.0:
-		var target_elevated_wp: Vector3 = Vector3.INF
-		var elev_y_diff: float = 0.0
-		var wp := _current_waypoint()
-		var y_diff_cur: float = wp.y - global_position.y
-		if y_diff_cur > JUMP_THRESHOLD and y_diff_cur <= 1.35:
-			target_elevated_wp = wp
-			elev_y_diff = y_diff_cur
-		elif _path_index + 1 < _current_path.size():
-			var nxt := _current_path[_path_index + 1]
-			var y_diff_nxt: float = nxt.y - global_position.y
-			if y_diff_nxt > JUMP_THRESHOLD and y_diff_nxt <= 1.35:
-				target_elevated_wp = nxt
-				elev_y_diff = y_diff_nxt
+		var on_slope: bool = _is_on_ramp_or_walkable_slope()
+		if not on_slope:
+			var target_elevated_wp: Vector3 = Vector3.INF
+			var elev_y_diff: float = 0.0
+			var wp := _current_waypoint()
+			var y_diff_cur: float = wp.y - global_position.y
+			if y_diff_cur > JUMP_THRESHOLD and y_diff_cur <= 1.35:
+				target_elevated_wp = wp
+				elev_y_diff = y_diff_cur
+			elif _path_index + 1 < _current_path.size():
+				var nxt := _current_path[_path_index + 1]
+				var y_diff_nxt: float = nxt.y - global_position.y
+				if y_diff_nxt > JUMP_THRESHOLD and y_diff_nxt <= 1.35:
+					target_elevated_wp = nxt
+					elev_y_diff = y_diff_nxt
 
-		if target_elevated_wp != Vector3.INF:
-			var xz_to_elev: float = Vector2(global_position.x - target_elevated_wp.x, global_position.z - target_elevated_wp.z).length()
-			var dir_to_elev := Vector3(target_elevated_wp.x - global_position.x, 0.0, target_elevated_wp.z - global_position.z).normalized()
-			var horiz_vel := Vector3(velocity.x, 0.0, velocity.z)
-			var moving_towards: bool = (horiz_vel.length() < 0.5) or (horiz_vel.normalized().dot(dir_to_elev) > 0.25)
+			if target_elevated_wp != Vector3.INF:
+				var xz_to_elev: float = Vector2(global_position.x - target_elevated_wp.x, global_position.z - target_elevated_wp.z).length()
+				var dir_to_elev := Vector3(target_elevated_wp.x - global_position.x, 0.0, target_elevated_wp.z - global_position.z).normalized()
+				var horiz_vel := Vector3(velocity.x, 0.0, velocity.z)
+				var moving_towards: bool = (horiz_vel.length() < 0.5) or (horiz_vel.normalized().dot(dir_to_elev) > 0.25)
 
-			# Takeoff window: initiate jump when approaching ledge (between 0.45m and 1.45m) with forward movement
-			if moving_towards and xz_to_elev >= 0.45 and xz_to_elev <= 1.45:
-				if _has_jump_headroom() and _is_jump_landing_safe(target_elevated_wp):
-					if _path_index != _last_jump_waypoint_idx:
-						_last_jump_waypoint_idx = _path_index
-						_jump_count_at_waypoint = 0
-					_jump_count_at_waypoint += 1
-					if _jump_count_at_waypoint <= 2:
-						velocity.y = JUMP_VELOCITY
-						# Maintain/boost forward momentum in elevation direction during takeoff
-						velocity.x = dir_to_elev.x * move_speed
-						velocity.z = dir_to_elev.z * move_speed
-						_jump_cooldown = 0.65
-					else:
-						# Cannot clear obstacle after 2 jumps; trigger recovery instead of bouncing in place
-						_trigger_stuck_recovery("Obstacle too high / ledge blocked")
+				# Takeoff window: initiate jump when approaching ledge (between 0.45m and 1.45m) with forward movement
+				if moving_towards and xz_to_elev >= 0.45 and xz_to_elev <= 1.45:
+					if _has_jump_headroom() and _is_jump_landing_safe(target_elevated_wp):
+						if _path_index != _last_jump_waypoint_idx:
+							_last_jump_waypoint_idx = _path_index
+							_jump_count_at_waypoint = 0
+						_jump_count_at_waypoint += 1
+						if _jump_count_at_waypoint <= 2:
+							velocity.y = JUMP_VELOCITY
+							# Maintain/boost forward momentum in elevation direction during takeoff
+							velocity.x = dir_to_elev.x * move_speed
+							velocity.z = dir_to_elev.z * move_speed
+							_jump_cooldown = 0.65
+						else:
+							# Cannot clear obstacle after 2 jumps; trigger recovery instead of bouncing in place
+							_trigger_stuck_recovery("Obstacle too high / ledge blocked")
 
 	# State execution
 	match current_state:
@@ -582,6 +588,19 @@ func _is_ground_ahead_safe(move_dir: Vector3) -> bool:
 		return false
 	return true
 
+func _is_on_ramp_or_walkable_slope() -> bool:
+	var mgr := _get_astar()
+	if mgr != null and mgr.has_method("is_walkable_slope_at"):
+		if mgr.is_walkable_slope_at(global_position):
+			return true
+		var wp := _current_waypoint()
+		if wp != Vector3.INF and mgr.is_walkable_slope_at(wp):
+			return true
+		if _path_index + 1 < _current_path.size():
+			if mgr.is_walkable_slope_at(_current_path[_path_index + 1]):
+				return true
+	return false
+
 func _try_step_up(move_dir: Vector3) -> bool:
 	if not is_inside_tree() or not is_on_floor():
 		return false
@@ -589,32 +608,30 @@ func _try_step_up(move_dir: Vector3) -> bool:
 	if space == null:
 		return false
 
-	var test_up := global_position + Vector3.UP * step_height
-	var test_fwd := test_up + move_dir * 0.4
-	var params := PhysicsRayQueryParameters3D.create(test_up, test_fwd)
-	params.exclude = [get_rid()]
-	params.collision_mask = collision_mask
-	if space == null:
-		return false
-	var hit := space.intersect_ray(params)
-	if not hit.is_empty():
-		return false
-
-	var check_to := test_fwd + Vector3.DOWN * (step_height + 0.1)
-	var floor_params := PhysicsRayQueryParameters3D.create(test_fwd, check_to)
+	# Probe forward at step height to find ground ledge/slope ahead
+	var probe_dist: float = 0.35
+	var probe_pos := global_position + (move_dir.normalized() * probe_dist)
+	var check_high := probe_pos + Vector3(0.0, 0.45, 0.0)
+	var check_low := probe_pos - Vector3(0.0, 0.2, 0.0)
+	var floor_params := PhysicsRayQueryParameters3D.create(check_high, check_low)
 	floor_params.exclude = [get_rid()]
 	floor_params.collision_mask = collision_mask
-	if space == null:
-		return false
 	var floor_hit := space.intersect_ray(floor_params)
 	if floor_hit.is_empty():
 		return false
 
-	var step_y: float = floor_hit.position.y - global_position.y
-	if step_y > 0.05 and step_y <= step_height:
-		global_position.y += step_y + 0.02
-		velocity.y = 0.0
-		return true
+	var floor_pos: Vector3 = floor_hit.position
+	var step_y: float = floor_pos.y - global_position.y
+	if step_y > 0.02 and step_y <= 0.45:
+		# Headroom check at destination
+		var head_high: Vector3 = floor_pos + Vector3(0.0, 1.45, 0.0)
+		var head_params := PhysicsRayQueryParameters3D.create(floor_pos + Vector3(0.0, 0.1, 0.0), head_high)
+		head_params.exclude = [get_rid()]
+		head_params.collision_mask = collision_mask
+		if space.intersect_ray(head_params).is_empty():
+			global_position.y += step_y + 0.02
+			velocity.y = 0.0
+			return true
 
 	return false
 
@@ -708,6 +725,7 @@ func _transition_to(new_state: State) -> void:
 		State.IDLE:
 			if not _is_wandering:
 				_clear_route_line()
+				_home_position = global_position
 			if _status_hold_timer <= 0.0:
 				if not _has_any_cargo():
 					_set_status("[IDLE] Waiting for work...", 0.0, false)
@@ -1022,7 +1040,8 @@ func _get_candidate_stations_for_material(mat: String, amount: int = -1) -> Arra
 	var result: Array[Node3D] = []
 	var stations := _get_all_stations(get_tree())
 	var cb_candidates: Array[Dictionary] = []
-	var pallet_candidates: Array[Dictionary] = []
+	var matching_pallet_candidates: Array[Dictionary] = []
+	var empty_pallet_candidates: Array[Dictionary] = []
 
 	for station in stations:
 		if not is_instance_valid(station) or station.is_queued_for_deletion():
@@ -1035,7 +1054,13 @@ func _get_candidate_stations_for_material(mat: String, amount: int = -1) -> Arra
 		if station is ChoppingBlock and mat == "log":
 			cb_candidates.append({"station": station, "dist_sq": d_sq})
 		elif station is Pallet:
-			pallet_candidates.append({"station": station, "dist_sq": d_sq})
+			var pallet := station as Pallet
+			var eff_mat: String = pallet.get_effective_assigned_material() if pallet.has_method("get_effective_assigned_material") else pallet.assigned_material
+			var has_matching: bool = (not eff_mat.is_empty()) and pallet._materials_compatible(mat, eff_mat)
+			if has_matching:
+				matching_pallet_candidates.append({"station": station, "dist_sq": d_sq})
+			else:
+				empty_pallet_candidates.append({"station": station, "dist_sq": d_sq})
 
 	if not cb_candidates.is_empty():
 		cb_candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
@@ -1044,11 +1069,32 @@ func _get_candidate_stations_for_material(mat: String, amount: int = -1) -> Arra
 		for cand in cb_candidates:
 			result.append(cand["station"])
 
-	if not pallet_candidates.is_empty():
-		pallet_candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-			return a["dist_sq"] < b["dist_sq"]
-		)
-		for cand in pallet_candidates:
+	matching_pallet_candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return a["dist_sq"] < b["dist_sq"]
+	)
+	empty_pallet_candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return a["dist_sq"] < b["dist_sq"]
+	)
+
+	# Prefer matching pallets over empty pallets when within sensible distance (~25m extra travel or within 45m)
+	if not matching_pallet_candidates.is_empty() and not empty_pallet_candidates.is_empty():
+		var best_match_d: float = sqrt(matching_pallet_candidates[0]["dist_sq"])
+		var best_empty_d: float = sqrt(empty_pallet_candidates[0]["dist_sq"])
+		if best_match_d <= 45.0 and (best_match_d <= best_empty_d + 25.0):
+			for cand in matching_pallet_candidates:
+				result.append(cand["station"])
+			for cand in empty_pallet_candidates:
+				result.append(cand["station"])
+		else:
+			for cand in empty_pallet_candidates:
+				result.append(cand["station"])
+			for cand in matching_pallet_candidates:
+				result.append(cand["station"])
+	elif not matching_pallet_candidates.is_empty():
+		for cand in matching_pallet_candidates:
+			result.append(cand["station"])
+	elif not empty_pallet_candidates.is_empty():
+		for cand in empty_pallet_candidates:
 			result.append(cand["station"])
 
 	return result
@@ -1484,36 +1530,64 @@ func _trigger_stuck_recovery(reason: String) -> void:
 	_cancel_job("Stuck / unable to reach %s (%s)" % [t_name, reason])
 
 func _try_idle_wander() -> void:
-	_wander_cooldown = randf_range(3.5, 6.0) + (float(helper_id % 4) * 0.5)
 	if _has_any_cargo() or target_item != null or target_station != null:
 		return
+	if _home_position == Vector3.INF:
+		_home_position = global_position
+
 	var mgr := _get_astar()
 	if mgr == null or not mgr.has_method("get_nearby_walkable_points"):
+		_wander_cooldown = randf_range(2.0, 4.0)
 		return
-	var points: Array[Vector3] = mgr.get_nearby_walkable_points(global_position, 2.5, 6.0, 1.2)
+
+	# Search around current position within modest wander radius
+	var points: Array[Vector3] = mgr.get_nearby_walkable_points(global_position, 1.8, wander_radius, 1.4)
 	if points.is_empty():
+		_wander_cooldown = randf_range(2.5, 4.0)
 		return
+
+	# Keep within wander_radius of _home_position anchor
+	var max_anchor_sq := wander_radius * wander_radius
 	var safe_points: Array[Vector3] = []
 	for pt in points:
-		if _home_position == Vector3.INF or pt.distance_squared_to(_home_position) <= 81.0:
+		if pt.distance_squared_to(_home_position) <= max_anchor_sq:
 			safe_points.append(pt)
+
 	if safe_points.is_empty():
+		# If drifted outside anchor radius, steer back toward home
+		for pt in points:
+			if pt.distance_squared_to(_home_position) < global_position.distance_squared_to(_home_position):
+				safe_points.append(pt)
+
+	if safe_points.is_empty():
+		_home_position = global_position
+		_wander_cooldown = randf_range(2.0, 3.5)
 		return
-	var chosen: Vector3 = safe_points[randi() % safe_points.size()]
 
-	var path: PackedVector3Array = PackedVector3Array()
-	if mgr.has_method("find_astar_path"):
-		path = mgr.find_astar_path(global_position, chosen)
+	safe_points.shuffle()
+	var test_count: int = mini(3, safe_points.size())
+	var chosen_path: PackedVector3Array = PackedVector3Array()
+	var chosen_pt: Vector3 = Vector3.INF
 
-	if path.is_empty():
+	for i in range(test_count):
+		var pt: Vector3 = safe_points[i]
+		var p: PackedVector3Array = mgr.find_astar_path(global_position, pt)
+		if not p.is_empty():
+			chosen_path = p
+			chosen_pt = pt
+			break
+
+	if chosen_path.is_empty():
+		_wander_cooldown = randf_range(2.0, 3.5)
 		return
 
 	_is_wandering = true
-	_current_path = path
+	_current_path = chosen_path
 	_path_index = 0
-	_destination = chosen
-	_approach_target_point = chosen
-	_wander_timer = randf_range(2.5, 4.5)
+	_destination = chosen_pt
+	_approach_target_point = chosen_pt
+	_wander_timer = randf_range(3.5, 5.5)
+	_wander_cooldown = randf_range(2.5, 4.5)
 	_path_dirty = true
 	_set_status("[IDLE: WANDERING] Patrolling work area...", 0.0)
 
@@ -1521,7 +1595,8 @@ func _stop_wandering() -> void:
 	if _is_wandering:
 		_is_wandering = false
 		_clear_route_line()
-		_idle_timer = 0.0
+		_wander_cooldown = randf_range(2.0, 4.0)
+		_idle_timer = randf_range(0.25, 0.5)
 
 # ---------------------------------------------------------------------------
 # Pickup & Carrying

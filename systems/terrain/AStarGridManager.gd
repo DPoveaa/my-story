@@ -80,6 +80,22 @@ func _is_cell_solid(cell: Vector3i) -> bool:
 		return true
 	return false
 
+func _is_cell_ramp_or_slope(ground_cell: Vector3i) -> bool:
+	if _voxel_world != null and _voxel_world.has_method("get_block_type_id"):
+		var tid: int = _voxel_world.get_block_type_id(ground_cell)
+		return (tid >= 10 and tid <= 21)
+	return false
+
+func is_walkable_slope_at(world_pos: Vector3) -> bool:
+	if _voxel_world == null or not _voxel_world.has_method("get_block_type_id"):
+		return false
+	var cell := Vector3i(floori(world_pos.x), floori(world_pos.y), floori(world_pos.z))
+	for dy in [0, -1, -2]:
+		var tid: int = _voxel_world.get_block_type_id(Vector3i(cell.x, cell.y + dy, cell.z))
+		if tid >= 10 and tid <= 21:
+			return true
+	return false
+
 var _astar: AStar3D = AStar3D.new()
 var _voxel_world: Node = null
 var _point_ids: Dictionary = {}        ## Vector3i cell -> int AStar point id
@@ -323,7 +339,9 @@ func _step_bake_slice(budget_ms: float) -> bool:
 				var cell: Vector3i = _active_chunk_new_cells[_active_node_idx]
 				_active_node_idx += 1
 
-				var world_pos := Vector3(float(cell.x) + 0.5, float(cell.y), float(cell.z) + 0.5)
+				var ground_cell := Vector3i(cell.x, cell.y - 1, cell.z)
+				var y_offset: float = -0.5 if _is_cell_ramp_or_slope(ground_cell) else 0.0
+				var world_pos := Vector3(float(cell.x) + 0.5, float(cell.y) + y_offset, float(cell.z) + 0.5)
 				var id: int = _next_id
 				_next_id += 1
 				_astar.add_point(id, world_pos)
@@ -751,7 +769,9 @@ func _add_and_connect_point(cell: Vector3i) -> int:
 		return -1
 	var id: int = _next_id
 	_next_id += 1
-	var world_pos := Vector3(float(cell.x) + 0.5, float(cell.y), float(cell.z) + 0.5)
+	var ground_cell := Vector3i(cell.x, cell.y - 1, cell.z)
+	var y_offset: float = -0.5 if _is_cell_ramp_or_slope(ground_cell) else 0.0
+	var world_pos := Vector3(float(cell.x) + 0.5, float(cell.y) + y_offset, float(cell.z) + 0.5)
 	_astar.add_point(id, world_pos)
 	_point_ids[cell] = id
 	_id_cells[id] = cell
@@ -784,7 +804,7 @@ func _connect_point_neighbors(cell: Vector3i) -> void:
 			if from_id == to_id:
 				continue
 			var pos_b: Vector3 = _astar.get_point_position(to_id)
-			if absf(pos_a.y - pos_b.y) > 1.1:
+			if absf(pos_a.y - pos_b.y) > 1.25:
 				continue
 
 			# Vertical headroom checks: reject step-ups where ceiling blocks the 2-block body
@@ -804,9 +824,9 @@ func _connect_point_neighbors(cell: Vector3i) -> void:
 		# Orthogonal intermediate cells must not be solid/blocked at foot or head level
 		var ortho1 := Vector3i(cell.x + diag.x, cell.y, cell.z)
 		var ortho2 := Vector3i(cell.x, cell.y, cell.z + diag.y)
-		if _is_cell_solid(ortho1) or _is_cell_solid(Vector3i(ortho1.x, ortho1.y + 1, ortho1.z)):
-			continue
-		if _is_cell_solid(ortho2) or _is_cell_solid(Vector3i(ortho2.x, ortho2.y + 1, ortho2.z)):
+		var ortho1_blocked: bool = (_is_cell_solid(ortho1) and not _is_cell_ramp_or_slope(ortho1)) or _is_cell_solid(Vector3i(ortho1.x, ortho1.y + 1, ortho1.z))
+		var ortho2_blocked: bool = (_is_cell_solid(ortho2) and not _is_cell_ramp_or_slope(ortho2)) or _is_cell_solid(Vector3i(ortho2.x, ortho2.y + 1, ortho2.z))
+		if ortho1_blocked or ortho2_blocked:
 			continue
 		if _initial_bake_done:
 			if _is_position_blocked_by_physics(ortho1) or _is_position_blocked_by_physics(ortho2):
@@ -820,7 +840,7 @@ func _connect_point_neighbors(cell: Vector3i) -> void:
 			if from_id == to_id:
 				continue
 			var pos_b: Vector3 = _astar.get_point_position(to_id)
-			if absf(pos_a.y - pos_b.y) > 1.1:
+			if absf(pos_a.y - pos_b.y) > 1.25:
 				continue
 
 			if dy == 1:
@@ -901,7 +921,13 @@ func _has_unobstructed_access(from_pos: Vector3, target_pos: Vector3) -> bool:
 		var cell := Vector3i(floori(pt.x), floori(pt.y), floori(pt.z))
 		if cell == from_cell or cell == target_cell or cell == target_cell + Vector3i(0, 1, 0):
 			continue
-		if _is_cell_solid(cell):
+		# Ground block supporting the target should not be treated as a blocking wall!
+		if cell == target_cell - Vector3i(0, 1, 0):
+			continue
+		# Ground block supporting the approach point should not block access either
+		if cell == from_cell - Vector3i(0, 1, 0):
+			continue
+		if _is_cell_solid(cell) and not _is_cell_ramp_or_slope(cell):
 			return false
 
 	return true
@@ -967,19 +993,22 @@ func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: fl
 		return a["dist_from"] < b["dist_from"]
 	)
 
-	# Evaluate reachable candidate nodes across alternative sides (top 8 closest)
+	# Evaluate reachable candidate nodes across alternative sides
 	var best_raw: PackedVector3Array = PackedVector3Array()
-	var max_to_eval: int = mini(8, candidates.size())
+	var evaluated_count: int = 0
+	const MAX_EVAL_PATHS: int = 8
 
-	for i in range(max_to_eval):
-		var cand: Dictionary = candidates[i]
+	for cand in candidates:
 		if not _has_unobstructed_access(cand["pos"], target_world):
 			continue
 		if _is_position_blocked_by_physics(cand["cell"]):
 			continue
+		evaluated_count += 1
 		var raw: PackedVector3Array = _astar.get_point_path(from_id, cand["id"])
 		if not raw.is_empty():
 			best_raw = raw
+			break
+		if evaluated_count >= MAX_EVAL_PATHS:
 			break
 
 	if best_raw.is_empty():

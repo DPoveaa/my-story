@@ -453,6 +453,7 @@ func reserve(worker: Node, mat: String, amount: int) -> bool:
 	var actual_amount: int = mini(amount, rem)
 	active_reservations[worker] = {"material": mat, "amount": actual_amount}
 	set_meta("worker_assigned", true)
+	Worker.invalidate_station_cache()
 	return true
 
 func release_reservation(worker: Node = null) -> void:
@@ -469,6 +470,7 @@ func release_reservation(worker: Node = null) -> void:
 		active_reservations.erase(w)
 	if active_reservations.is_empty():
 		set_meta("worker_assigned", false)
+	Worker.invalidate_station_cache()
 
 func refund_material(item_material: String, amount: int) -> bool:
 	if amount <= 0 or item_material.is_empty():
@@ -498,6 +500,7 @@ func _refresh_visuals() -> void:
 	_rebuild_stack_visuals()
 	_update_fill_volume()
 	_update_crate_frame_state()
+	Worker.invalidate_station_cache()
 
 func _clear_if_empty() -> void:
 	if assigned_material.is_empty():
@@ -511,6 +514,7 @@ func _clear_assignment() -> void:
 	stored_materials.clear()
 	for k in ["dirt", "grass", "stone", "plank", "log"]:
 		stored_materials[k] = 0
+	Worker.invalidate_station_cache()
 
 func _get_assigned_count() -> int:
 	if assigned_material.is_empty():
