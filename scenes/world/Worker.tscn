@@ -31,7 +31,7 @@ size = Vector3(0.38, 0.14, 0.2)
 collision_layer = 2
 collision_mask = 1
 floor_constant_speed = true
-floor_max_angle = 0.802851
+floor_max_angle = 0.890118
 floor_snap_length = 1.1
 script = ExtResource("1_worker")
 

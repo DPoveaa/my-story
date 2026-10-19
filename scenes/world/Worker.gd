@@ -226,7 +226,7 @@ func _ready() -> void:
 		if not mgr.graph_rebuilt.is_connected(_on_astar_graph_rebuilt):
 			mgr.graph_rebuilt.connect(_on_astar_graph_rebuilt)
 
-	floor_max_angle = deg_to_rad(48.0)
+	floor_max_angle = deg_to_rad(51.0)
 	floor_snap_length = 1.1
 
 	# Stagger initial search timer to avoid all helpers searching simultaneously
@@ -339,6 +339,12 @@ func _request_path(to: Vector3, target_node: Node3D = null) -> bool:
 		_destination = Vector3.INF
 		_approach_target_point = Vector3.INF
 		_path_dirty = true
+		var fail_stage := "No connected route"
+		if mgr != null and mgr.has_method("get_last_failure_reason"):
+			var r: String = mgr.get_last_failure_reason()
+			if not r.is_empty():
+				fail_stage = r
+		_set_status("[BLOCKED] Navigation failed: %s" % fail_stage, 2.0, false)
 		return false
 
 	var final_wp: Vector3 = path[path.size() - 1]
@@ -509,15 +515,22 @@ func _physics_process(delta: float) -> void:
 
 	# Step-up: handle small bumps (up to 1.05m) smoothly without jumping; replan if blocked
 	if is_on_wall():
-		var horiz_vel := Vector2(velocity.x, velocity.z)
-		if horiz_vel.length_squared() > 0.01:
-			var move_dir := Vector3(velocity.x, 0.0, velocity.z).normalized()
-			var stepped: bool = _try_step_up(move_dir)
-			if not stepped and _has_valid_path():
-				_wall_stuck_timer += delta
-				if _wall_stuck_timer >= 0.4:
+		var wn := get_wall_normal()
+		# If the "wall" contact is actually an inclined floor/ramp surface, do not treat it as a blocking wall
+		if wn.y > 0.5 or _is_on_ramp_or_walkable_slope():
+			_wall_stuck_timer = 0.0
+		else:
+			var horiz_vel := Vector2(velocity.x, velocity.z)
+			if horiz_vel.length_squared() > 0.01:
+				var move_dir := Vector3(velocity.x, 0.0, velocity.z).normalized()
+				var stepped: bool = _try_step_up(move_dir)
+				if not stepped and _has_valid_path():
+					_wall_stuck_timer += delta
+					if _wall_stuck_timer >= 0.4:
+						_wall_stuck_timer = 0.0
+						_trigger_stuck_recovery("Path obstructed by wall/obstacle")
+				else:
 					_wall_stuck_timer = 0.0
-					_trigger_stuck_recovery("Path obstructed by wall/obstacle")
 			else:
 				_wall_stuck_timer = 0.0
 	else:
@@ -577,9 +590,11 @@ func _is_ground_ahead_safe(move_dir: Vector3) -> bool:
 
 	# Probe floor 0.45m ahead in movement direction
 	var probe_ahead := global_position + (move_dir.normalized() * 0.45)
-	var ray_from := probe_ahead + Vector3(0.0, 0.4, 0.0)
+	# Start ray high enough (+0.9m) so upward ramps (rising up to 0.45m ahead) do not entrap the ray inside the mesh
+	var ray_from := probe_ahead + Vector3(0.0, 0.9, 0.0)
 	var ray_to := probe_ahead - Vector3(0.0, 1.8, 0.0)
 	var ray := PhysicsRayQueryParameters3D.create(ray_from, ray_to, collision_mask)
+	ray.hit_from_inside = true
 	ray.exclude = [get_rid()]
 	var hit := space.intersect_ray(ray)
 	if hit.is_empty():
@@ -589,6 +604,10 @@ func _is_ground_ahead_safe(move_dir: Vector3) -> bool:
 	return true
 
 func _is_on_ramp_or_walkable_slope() -> bool:
+	if is_on_floor():
+		var fn := get_floor_normal()
+		if fn.y > 0.45 and fn.y < 0.95:
+			return true
 	var mgr := _get_astar()
 	if mgr != null and mgr.has_method("is_walkable_slope_at"):
 		if mgr.is_walkable_slope_at(global_position):
@@ -835,7 +854,12 @@ func _process_search_job() -> void:
 			_transition_to(State.MOVING_TO_ITEM)
 			return
 		else:
-			last_failure_reason = "Path blocked to %s" % item.name
+			var fail_stage := "Path blocked"
+			if astar_mgr != null and astar_mgr.has_method("get_last_failure_reason"):
+				var r: String = astar_mgr.get_last_failure_reason()
+				if not r.is_empty():
+					fail_stage = r
+			last_failure_reason = "%s to %s" % [fail_stage, item.name]
 			_blacklist_target(item, TARGET_BLACKLIST_COOLDOWN)
 
 	if any_chunk_requested:
@@ -1251,10 +1275,13 @@ func _is_item_physically_reachable(item: Node3D) -> bool:
 		return true
 
 	# If the hit was the station or resting surface (e.g. Pallet, ChoppingBlock)
-	# or hit point is within 0.45m of target center, the item is physically accessible
+	# only treat as accessible if the item is actually resting on the station within reach,
+	# rather than on the opposite side of the station structure!
 	var hit_col = direct_hit.get("collider", null)
 	if hit_col is Pallet or hit_col is ChoppingBlock:
-		return true
+		if direct_hit.position.distance_to(to_center) <= 0.65:
+			return true
+		return false
 	if direct_hit.position.distance_to(to_center) <= 0.45:
 		return true
 
@@ -1490,7 +1517,7 @@ func _trigger_stuck_recovery(reason: String) -> void:
 		if _approach_target_point != Vector3.INF and not _failed_approach_points.has(_approach_target_point):
 			_failed_approach_points.append(_approach_target_point)
 
-		_set_status("[REPLANNING] Side blocked (%s), trying alternative angle (%d/%d)..." % [reason, _recovery_attempts, MAX_RECOVERY_ATTEMPTS], 1.5, true)
+		_set_status("[REPLANNING] Controller unable to traverse planned route (%s), trying alternative angle (%d/%d)..." % [reason, _recovery_attempts, MAX_RECOVERY_ATTEMPTS], 1.5, true)
 		var dest := _destination
 		var t_dest_node: Node3D = null
 		if current_state == State.MOVING_TO_ITEM and is_instance_valid(target_item):

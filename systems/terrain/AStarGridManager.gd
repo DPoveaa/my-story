@@ -52,11 +52,15 @@ const ADJACENT_OFFSETS: Array[Vector2i] = [
 
 var _clearance_shape: CapsuleShape3D = null
 var _clearance_query: PhysicsShapeQueryParameters3D = null
+var _last_failure_reason: String = ""
+
+func get_last_failure_reason() -> String:
+	return _last_failure_reason
 
 func _get_clearance_query() -> PhysicsShapeQueryParameters3D:
 	if _clearance_query == null:
 		_clearance_shape = CapsuleShape3D.new()
-		_clearance_shape.radius = 0.32
+		_clearance_shape.radius = 0.35
 		_clearance_shape.height = 1.45
 		_clearance_query = PhysicsShapeQueryParameters3D.new()
 		_clearance_query.shape = _clearance_shape
@@ -90,10 +94,18 @@ func is_walkable_slope_at(world_pos: Vector3) -> bool:
 	if _voxel_world == null or not _voxel_world.has_method("get_block_type_id"):
 		return false
 	var cell := Vector3i(floori(world_pos.x), floori(world_pos.y), floori(world_pos.z))
-	for dy in [0, -1, -2]:
-		var tid: int = _voxel_world.get_block_type_id(Vector3i(cell.x, cell.y + dy, cell.z))
-		if tid >= 10 and tid <= 21:
-			return true
+	# Check cell itself and horizontal neighbor columns within 0.75m radius for smooth transitions
+	for dx: int in [-1, 0, 1]:
+		for dz: int in [-1, 0, 1]:
+			var check_x: int = cell.x + dx
+			var check_z: int = cell.z + dz
+			var dist_sq: float = (float(check_x) + 0.5 - world_pos.x) ** 2 + (float(check_z) + 0.5 - world_pos.z) ** 2
+			if dist_sq > 1.44:
+				continue
+			for dy: int in [0, -1, -2]:
+				var tid: int = _voxel_world.get_block_type_id(Vector3i(check_x, cell.y + dy, check_z))
+				if tid >= 10 and tid <= 21:
+					return true
 	return false
 
 var _astar: AStar3D = AStar3D.new()
@@ -868,13 +880,16 @@ func find_astar_path(from_world: Vector3, to_world: Vector3) -> PackedVector3Arr
 	var from_id := _closest_point_id(from_world)
 	var to_id   := _closest_point_id(to_world)
 	if from_id < 0 or to_id < 0:
+		_last_failure_reason = "No nearby graph node"
 		return PackedVector3Array()
 	var raw := _astar.get_point_path(from_id, to_id)
 	if raw.is_empty():
+		_last_failure_reason = "No connected A* route"
 		return raw
 	var opt := optimize_path(raw)
 	if _path_cache.size() < 1000:
 		_path_cache[cache_key] = opt
+	_last_failure_reason = ""
 	return opt
 
 func get_astar_path(from_world: Vector3, to_world: Vector3) -> PackedVector3Array:
@@ -929,6 +944,9 @@ func _has_unobstructed_access(from_pos: Vector3, target_pos: Vector3) -> bool:
 			continue
 		if _is_cell_solid(cell) and not _is_cell_ramp_or_slope(cell):
 			return false
+		# Intermediate station or physical obstacle blocks line of access to target
+		if _initial_bake_done and _is_position_blocked_by_physics(cell):
+			return false
 
 	return true
 
@@ -942,6 +960,7 @@ func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: fl
 
 	var from_id := _closest_point_id(from_world)
 	if from_id < 0:
+		_last_failure_reason = "No nearby graph node near worker"
 		return PackedVector3Array()
 
 	var target_col := Vector2i(floori(target_world.x), floori(target_world.z))
@@ -984,45 +1003,113 @@ func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: fl
 				# Ensure candidate is outside the obstacle boundary and within reachable limits
 				if horiz_d >= min_dist and horiz_d <= max_dist and y_diff <= max_vert:
 					var d_from: float = cand_pos.distance_squared_to(from_world)
-					candidates.append({"id": cand_id, "pos": cand_pos, "cell": cell, "dist_from": d_from, "horiz_d": horiz_d})
+					var angle: float = atan2(cand_pos.z - target_world.z, cand_pos.x - target_world.x)
+					var sector: int = posmod(int(round(angle / (PI * 0.25))), 8)
+					candidates.append({
+						"id": cand_id,
+						"pos": cand_pos,
+						"cell": cell,
+						"dist_from": d_from,
+						"horiz_d": horiz_d,
+						"sector": sector
+					})
 
 	if candidates.is_empty():
+		_last_failure_reason = "No valid approach point around target"
 		return PackedVector3Array()
 
-	candidates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
-		return a["dist_from"] < b["dist_from"]
-	)
+	# Distribute candidates into 8 angular sectors around the target
+	var sector_buckets: Array[Array] = []
+	for s in range(8):
+		sector_buckets.append([])
+	for cand in candidates:
+		sector_buckets[cand["sector"]].append(cand)
 
-	# Evaluate reachable candidate nodes across alternative sides
+	# Sort candidates within each sector bucket by worker distance
+	for s in range(8):
+		sector_buckets[s].sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+			return a["dist_from"] < b["dist_from"]
+		)
+
+	# Order sectors starting from the side closest to the worker, alternating left and right
+	var worker_angle: float = atan2(from_world.z - target_world.z, from_world.x - target_world.x)
+	var worker_sector: int = posmod(int(round(worker_angle / (PI * 0.25))), 8)
+	var sector_order: Array[int] = [
+		worker_sector,
+		posmod(worker_sector + 1, 8),
+		posmod(worker_sector - 1, 8),
+		posmod(worker_sector + 2, 8),
+		posmod(worker_sector - 2, 8),
+		posmod(worker_sector + 3, 8),
+		posmod(worker_sector - 3, 8),
+		posmod(worker_sector + 4, 8),
+	]
+
+	# Interleave evaluation across all sectors to explore all viable sides and corners
+	var ordered_candidates: Array[Dictionary] = []
+	var max_depth: int = 0
+	for s in range(8):
+		max_depth = maxi(max_depth, sector_buckets[s].size())
+
+	for depth in range(max_depth):
+		for s_idx in sector_order:
+			if depth < sector_buckets[s_idx].size():
+				ordered_candidates.append(sector_buckets[s_idx][depth])
+
 	var best_raw: PackedVector3Array = PackedVector3Array()
 	var evaluated_count: int = 0
 	const MAX_EVAL_PATHS: int = 8
+	var access_blocked_count: int = 0
+	var phys_blocked_count: int = 0
+	var graph_unconnected_count: int = 0
+	var route_unreachable_count: int = 0
 
-	for cand in candidates:
+	for cand in ordered_candidates:
 		if not _has_unobstructed_access(cand["pos"], target_world):
+			access_blocked_count += 1
 			continue
 		if _is_position_blocked_by_physics(cand["cell"]):
+			phys_blocked_count += 1
 			continue
+		if _astar.get_point_connections(cand["id"]).is_empty():
+			graph_unconnected_count += 1
+			continue
+
 		evaluated_count += 1
 		var raw: PackedVector3Array = _astar.get_point_path(from_id, cand["id"])
 		if not raw.is_empty():
 			best_raw = raw
 			break
+		else:
+			route_unreachable_count += 1
+
 		if evaluated_count >= MAX_EVAL_PATHS:
 			break
 
 	if best_raw.is_empty():
+		if evaluated_count > 0 and route_unreachable_count == evaluated_count:
+			_last_failure_reason = "No connected A* route to target"
+		elif phys_blocked_count > 0 and phys_blocked_count >= ordered_candidates.size() - access_blocked_count:
+			_last_failure_reason = "Blocked physical clearance around target"
+		elif access_blocked_count >= ordered_candidates.size():
+			_last_failure_reason = "No valid approach point (line of access blocked)"
+		elif graph_unconnected_count > 0:
+			_last_failure_reason = "Graph nodes disconnected around target"
+		else:
+			_last_failure_reason = "No valid approach point"
 		return PackedVector3Array()
 
 	# Optimize only the single chosen path:
 	var opt: PackedVector3Array = optimize_path(best_raw)
 	if opt.is_empty():
+		_last_failure_reason = "Path optimization failed"
 		return PackedVector3Array()
 
 	var end_pt: Vector3 = opt[opt.size() - 1]
 	var end_horiz: float
 	if half_extents != Vector2.ZERO:
 		if absf(end_pt.x - target_world.x) < half_extents.x and absf(end_pt.z - target_world.z) < half_extents.y:
+			_last_failure_reason = "Approach endpoint inside target"
 			return PackedVector3Array()
 		var edx := maxf(0.0, absf(end_pt.x - target_world.x) - half_extents.x)
 		var edz := maxf(0.0, absf(end_pt.z - target_world.z) - half_extents.y)
@@ -1034,8 +1121,10 @@ func find_approach_path(from_world: Vector3, target_world: Vector3, min_dist: fl
 	if end_horiz <= max_dist + 0.35 and end_vert <= max_vert + 0.25:
 		if _path_cache.size() < 1000:
 			_path_cache[cache_key] = opt
+		_last_failure_reason = ""
 		return opt
 
+	_last_failure_reason = "Approach endpoint out of reach tolerance"
 	return PackedVector3Array()
 
 const MAX_SHORTCUT_LOOKAHEAD: int = 5
@@ -1073,7 +1162,8 @@ func optimize_path(raw_path: PackedVector3Array) -> PackedVector3Array:
 
 func _is_sweep_clear(space: PhysicsDirectSpaceState3D, start: Vector3, end: Vector3) -> bool:
 	var sweep_query := _get_sweep_query()
-	sweep_query.transform = Transform3D(Basis.IDENTITY, start + Vector3(0.0, 0.75, 0.0))
+	# Elevate by 0.85m to ensure the sweep doesn't clip minor terrain ground polygons while catching full-height station obstacles
+	sweep_query.transform = Transform3D(Basis.IDENTITY, start + Vector3(0.0, 0.85, 0.0))
 	sweep_query.motion = end - start
 	var cast_res := space.cast_motion(sweep_query)
 	return not cast_res.is_empty() and cast_res[0] >= 0.99
@@ -1098,7 +1188,7 @@ func _is_shortcut_voxel_safe(path: PackedVector3Array, from_idx: int, to_idx: in
 	if horiz_dist > MAX_SHORTCUT_HORIZ_DIST:
 		return false
 
-	# 2. Fast voxel-level ground support and body clearance (instant integer checks)
+	# 2. Fast voxel-level ground support, body clearance, and physical obstacle avoidance
 	var steps: int = maxi(1, int(ceil(horiz_dist / 0.5)))
 	var floor_y_int := floori(base_y) - 1
 	var walk_y_int := floori(base_y)
@@ -1119,16 +1209,21 @@ func _is_shortcut_voxel_safe(path: PackedVector3Array, from_idx: int, to_idx: in
 		if _is_cell_solid(Vector3i(col_x, walk_y_int, col_z)) or _is_cell_solid(Vector3i(col_x, head_y_int, col_z)):
 			return false
 
-		# Corner clearance: check if body capsule would cut too close (< 0.32m) to adjacent solid wall corners
+		# Physical station/obstacle clearance: shortcuts must not route through stations or pallets
+		var walk_cell := Vector3i(col_x, walk_y_int, col_z)
+		if _initial_bake_done and _is_position_blocked_by_physics(walk_cell):
+			return false
+
+		# Corner clearance: check if body capsule would cut too close (< 0.35m) to adjacent solid wall corners or physical obstacles
 		var fx: float = sample_pt.x - float(col_x)
 		var fz: float = sample_pt.z - float(col_z)
-		if fx < 0.32 and _is_cell_solid(Vector3i(col_x - 1, walk_y_int, col_z)):
+		if fx < 0.35 and (_is_cell_solid(Vector3i(col_x - 1, walk_y_int, col_z)) or (_initial_bake_done and _is_position_blocked_by_physics(Vector3i(col_x - 1, walk_y_int, col_z)))):
 			return false
-		if fx > 0.68 and _is_cell_solid(Vector3i(col_x + 1, walk_y_int, col_z)):
+		if fx > 0.65 and (_is_cell_solid(Vector3i(col_x + 1, walk_y_int, col_z)) or (_initial_bake_done and _is_position_blocked_by_physics(Vector3i(col_x + 1, walk_y_int, col_z)))):
 			return false
-		if fz < 0.32 and _is_cell_solid(Vector3i(col_x, walk_y_int, col_z - 1)):
+		if fz < 0.35 and (_is_cell_solid(Vector3i(col_x, walk_y_int, col_z - 1)) or (_initial_bake_done and _is_position_blocked_by_physics(Vector3i(col_x, walk_y_int, col_z - 1)))):
 			return false
-		if fz > 0.68 and _is_cell_solid(Vector3i(col_x, walk_y_int, col_z + 1)):
+		if fz > 0.65 and (_is_cell_solid(Vector3i(col_x, walk_y_int, col_z + 1)) or (_initial_bake_done and _is_position_blocked_by_physics(Vector3i(col_x, walk_y_int, col_z + 1)))):
 			return false
 
 	return true
